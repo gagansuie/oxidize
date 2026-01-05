@@ -1,0 +1,30 @@
+[Unit]
+Description=Oxidize Network Relay v0.0.1
+After=network.target
+Documentation=https://github.com/YOUR_USERNAME/oxidize
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/oxidize
+ExecStart=/home/ubuntu/oxidize/target/release/oxidize-server \
+  --listen 0.0.0.0:4433 \
+  --config /home/ubuntu/oxidize/production.toml \
+  --metrics-addr 0.0.0.0:9090
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/ubuntu/oxidize
+
+# Performance
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

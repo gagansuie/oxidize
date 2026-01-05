@@ -53,6 +53,11 @@ Destination Port: 4433
 Description: Oxidize QUIC
 
 Source CIDR: 0.0.0.0/0
+IP Protocol: UDP
+Destination Port: 51820
+Description: WireGuard (Mobile)
+
+Source CIDR: 0.0.0.0/0
 IP Protocol: TCP
 Destination Port: 9090
 Description: Prometheus Metrics
@@ -73,6 +78,9 @@ Configure firewall:
 ```bash
 # Allow QUIC traffic
 sudo iptables -I INPUT 6 -m state --state NEW -p udp --dport 4433 -j ACCEPT
+
+# Allow WireGuard (mobile clients)
+sudo iptables -I INPUT 6 -m state --state NEW -p udp --dport 51820 -j ACCEPT
 
 # Allow Prometheus metrics
 sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 9090 -j ACCEPT
@@ -123,6 +131,12 @@ enable_tcp_acceleration = true
 enable_deduplication = true
 rate_limit_per_ip = 100
 rate_limit_window_secs = 60
+
+# WireGuard for mobile clients (optional)
+# Generate keys with: ./target/release/oxidize-server --generate-wg-config
+enable_wireguard = false
+# wireguard_port = 51820
+# wireguard_private_key = "YOUR_KEY_HERE"
 EOF
 ```
 
