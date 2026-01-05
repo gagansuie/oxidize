@@ -1,4 +1,4 @@
-# Oxidize
+# oxidize
 
 High-performance network relay built in Rust using QUIC protocol.
 
