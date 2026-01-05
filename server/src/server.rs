@@ -55,6 +55,10 @@ impl RelayServer {
             std::time::Duration::from_secs(config.connection_timeout).try_into()?,
         ));
 
+        // Enable BBR congestion control for better throughput on lossy networks
+        transport_config
+            .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
         server_config.transport_config(Arc::new(transport_config));
 
         let endpoint = Endpoint::server(server_config, listen_addr)?;

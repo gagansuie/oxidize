@@ -39,6 +39,10 @@ impl RelayClient {
         let mut transport_config = quinn::TransportConfig::default();
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(300).try_into()?));
 
+        // Enable BBR congestion control for better throughput
+        transport_config
+            .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+
         client_config.transport_config(Arc::new(transport_config));
         endpoint.set_default_client_config(client_config);
 

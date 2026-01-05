@@ -14,3 +14,4 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 lz4_flex = { workspace = true }
 etherparse = { workspace = true }
+reed-solomon-erasure = { workspace = true }
