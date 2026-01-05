@@ -1,0 +1,35 @@
+# Cloud Relay Client Configuration Example
+
+# Enable LZ4 compression for outgoing packets
+enable_compression = true
+
+# Only compress payloads larger than this (bytes)
+compression_threshold = 512
+
+# Buffer size for packet handling (bytes)
+buffer_size = 65536
+
+# Send keepalive pings to server every N seconds
+keepalive_interval = 30
+
+# Retry connection to server every N seconds after disconnect
+reconnect_interval = 5
+
+# Enable aggressive DNS prefetching
+# Resolves likely next domains before you need them
+enable_dns_prefetch = true
+
+# Maximum DNS cache entries
+dns_cache_size = 1000
+
+# Maximum queued packets before dropping
+# Higher = more memory, lower = packet loss under burst
+max_packet_queue = 10000
+
+# TUN interface MTU (Maximum Transmission Unit)
+# Standard Ethernet = 1500, Jumbo frames = 9000
+tun_mtu = 1500
+
+# Enable header compression (experimental)
+# Further reduces overhead for small packets
+enable_header_compression = true
