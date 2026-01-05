@@ -19,6 +19,8 @@ rustls = "0.21"
 rustls-pemfile = "1.0"
 rcgen = "0.12"
 reed-solomon-erasure = "6.0"
+boringtun = "0.6"
+base64 = "0.21"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

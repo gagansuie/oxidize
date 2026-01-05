@@ -22,6 +22,18 @@ pub struct Config {
     pub rate_limit_per_ip: usize,
     #[serde(default = "default_rate_window")]
     pub rate_limit_window_secs: u64,
+
+    // WireGuard settings
+    #[serde(default = "default_enable_wireguard")]
+    pub enable_wireguard: bool,
+    #[serde(default)]
+    pub wireguard_port: Option<u16>,
+    #[serde(default)]
+    pub wireguard_private_key: Option<String>,
+}
+
+fn default_enable_wireguard() -> bool {
+    false
 }
 
 fn default_rate_limit() -> usize {
@@ -47,6 +59,9 @@ impl Default for Config {
             tls_key_path: None,
             rate_limit_per_ip: 100,
             rate_limit_window_secs: 60,
+            enable_wireguard: false,
+            wireguard_port: None,
+            wireguard_private_key: None,
         }
     }
 }

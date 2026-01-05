@@ -11,9 +11,11 @@ mod prometheus;
 mod rate_limiter;
 mod server;
 mod tls;
+mod wireguard;
 
 use config::Config;
 use server::RelayServer;
+use wireguard::{generate_client_config, generate_server_config, WireGuardServer};
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-server")]
@@ -33,6 +35,12 @@ struct Args {
 
     #[arg(long)]
     disable_metrics: bool,
+
+    #[arg(long)]
+    generate_wg_config: bool,
+
+    #[arg(long)]
+    wg_endpoint: Option<String>,
 }
 
 #[tokio::main]
@@ -51,6 +59,36 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
+    // Handle WireGuard config generation
+    if args.generate_wg_config {
+        let endpoint = args
+            .wg_endpoint
+            .unwrap_or_else(|| format!("{}:51820", args.listen.ip()));
+
+        info!("Generating WireGuard server configuration...");
+        let (private_key, public_key, _key_bytes) = generate_server_config()?;
+
+        println!("\n=== WireGuard Server Configuration ===");
+        println!("Server Private Key: {}", private_key);
+        println!("Server Public Key: {}", public_key);
+        println!("\nAdd to your server config.toml:");
+        println!("[wireguard]");
+        println!("enable_wireguard = true");
+        println!("wireguard_port = 51820");
+        println!("wireguard_private_key = \"{}\"", private_key);
+
+        println!("\n=== Client Configuration ===");
+        let client_config = generate_client_config(&endpoint, &public_key, None)?;
+        println!("{}", client_config);
+
+        println!("\nSave the client config to a file and import into WireGuard app,");
+        println!("or generate a QR code with: qrencode -t ansiutf8 < client.conf");
+
+        return Ok(());
+    }
+
+    info!("Starting Oxidize Server v{}", env!("CARGO_PKG_VERSION"));
+    info!("Listening on {}", args.listen);
     info!("╔════════════════════════════════════════╗");
     info!("║   Oxidize Server v0.1.0                ║");
     info!("╚════════════════════════════════════════╝");
@@ -107,6 +145,31 @@ async fn main() -> Result<()> {
             stats.print_summary();
         }
     });
+
+    // Start WireGuard server if enabled
+    let config_ref = server.config();
+    if config_ref.enable_wireguard {
+        let wg_port = config_ref.wireguard_port.unwrap_or(51820);
+        let wg_addr: SocketAddr = format!("0.0.0.0:{}", wg_port).parse()?;
+
+        if let Some(ref private_key_b64) = config_ref.wireguard_private_key {
+            use base64::{engine::general_purpose, Engine as _};
+            let key_bytes = general_purpose::STANDARD.decode(private_key_b64)?;
+            let mut private_key = [0u8; 32];
+            private_key.copy_from_slice(&key_bytes);
+
+            let wg_server = WireGuardServer::new(wg_addr, private_key).await?;
+            info!("📱 WireGuard server listening on {}", wg_addr);
+
+            tokio::spawn(async move {
+                if let Err(e) = wg_server.run().await {
+                    warn!("WireGuard server error: {}", e);
+                }
+            });
+        } else {
+            warn!("WireGuard enabled but no private key configured");
+        }
+    }
 
     server.run().await?;
 

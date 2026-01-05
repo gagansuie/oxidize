@@ -125,7 +125,7 @@ rate_limit_per_ip = 100
 - ✅ Per-IP rate limiting
 - ✅ Prometheus metrics
 - ✅ Comprehensive test suite
-- ✅ Oracle Cloud Always Free deployment
+- ✅ Oracle Cloud deployment
 
 ## Monitoring
 

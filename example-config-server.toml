@@ -49,3 +49,9 @@ rate_limit_per_ip = 100
 
 # Rate limit time window in seconds
 rate_limit_window_secs = 60
+
+# WireGuard settings for mobile client compatibility
+# Generate keys with: ./oxidize-server --generate-wg-config
+enable_wireguard = false
+# wireguard_port = 51820
+# wireguard_private_key = "YOUR_PRIVATE_KEY_HERE"
