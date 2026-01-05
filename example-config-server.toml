@@ -1,4 +1,8 @@
-# Cloud Relay Server Configuration Example
+# Oxidize Server Configuration Example
+# Copy to /etc/oxidize/server.toml or ~/.config/oxidize/server.toml
+
+# Server listens on 0.0.0.0:4433 by default (pass --listen to override)
+# This config file controls behavior, not the listen address
 
 # Maximum number of concurrent connections
 # Recommended: 10000 per 4GB RAM
@@ -32,3 +36,16 @@ enable_tcp_acceleration = true
 # Enable content deduplication
 # Saves bandwidth when multiple users download same data
 enable_deduplication = true
+
+# TLS Certificate Configuration
+# Leave commented to use self-signed certificates (development only)
+# For production, generate real certificates with Let's Encrypt
+# tls_cert_path = "/etc/oxidize/cert.pem"
+# tls_key_path = "/etc/oxidize/key.pem"
+
+# Rate Limiting
+# Maximum requests per IP address within the time window
+rate_limit_per_ip = 100
+
+# Rate limit time window in seconds
+rate_limit_window_secs = 60

@@ -1,4 +1,10 @@
-# Cloud Relay Client Configuration Example
+# Oxidize Client Configuration Example
+# Copy to ~/.config/oxidize/client.toml
+#
+# Usage:
+#   oxidize-client --server 1.2.3.4:4433 --config client.toml
+#
+# The server address is passed via CLI (not in this config file)
 
 # Enable LZ4 compression for outgoing packets
 enable_compression = true
