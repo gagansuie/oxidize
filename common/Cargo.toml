@@ -6,8 +6,12 @@ authors = ["Oxidize Contributors"]
 license = "MIT OR Apache-2.0"
 
 [features]
-default = []
+default = ["rohc"]
 rohc = []
+
+[[bench]]
+name = "perf_bench"
+harness = false
 
 [dependencies]
 tokio = { workspace = true }

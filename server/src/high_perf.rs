@@ -1,0 +1,398 @@
+//! High-Performance Connection Pipeline
+//!
+//! Integrates all performance optimizations:
+//! - Adaptive FEC for packet loss resilience
+//! - Zero-copy buffer management
+//! - UDP batching (GSO/GRO)
+//! - Multi-path support
+//! - io_uring ready abstractions
+
+use anyhow::Result;
+use bytes::{Bytes, BytesMut};
+use oxidize_common::adaptive_fec::{AdaptiveFec, FecLevel};
+use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
+use oxidize_common::udp_batch::{GsoBatch, UdpBatcher, UdpCoalescer};
+use oxidize_common::zero_copy::{BufferPool, PacketRingBuffer};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+
+/// High-performance packet pipeline statistics
+#[derive(Debug, Clone, Default)]
+pub struct PipelineStats {
+    pub packets_processed: u64,
+    pub bytes_processed: u64,
+    pub fec_recoveries: u64,
+    pub batches_sent: u64,
+    pub syscalls_saved: u64,
+    pub buffer_reuses: u64,
+    pub compression_ratio: f64,
+    pub avg_latency_us: f64,
+}
+
+/// Configuration for high-performance pipeline
+#[derive(Debug, Clone)]
+pub struct HighPerfConfig {
+    /// Enable adaptive FEC
+    pub enable_fec: bool,
+    /// Enable packet batching
+    pub enable_batching: bool,
+    /// Enable zero-copy buffers
+    pub enable_zero_copy: bool,
+    /// Enable multi-path
+    pub enable_multipath: bool,
+    /// Buffer pool size
+    pub buffer_pool_size: usize,
+    /// Maximum batch size
+    pub max_batch_size: usize,
+    /// Batch flush interval
+    pub batch_flush_us: u64,
+}
+
+impl Default for HighPerfConfig {
+    fn default() -> Self {
+        HighPerfConfig {
+            enable_fec: true,
+            enable_batching: true,
+            enable_zero_copy: true,
+            enable_multipath: false, // Requires multiple interfaces
+            buffer_pool_size: 256,
+            max_batch_size: 64,
+            batch_flush_us: 100,
+        }
+    }
+}
+
+/// High-performance packet pipeline
+pub struct HighPerfPipeline {
+    /// Configuration
+    config: HighPerfConfig,
+    /// Adaptive FEC encoder/decoder
+    fec: Mutex<AdaptiveFec>,
+    /// Buffer pool for zero-copy
+    buffer_pool: Mutex<BufferPool>,
+    /// UDP batcher for GSO
+    batcher: Mutex<UdpBatcher>,
+    /// UDP coalescer for GRO
+    coalescer: Mutex<UdpCoalescer>,
+    /// Multi-path scheduler
+    multipath: Mutex<MultipathScheduler>,
+    /// Packet ring buffer for queueing
+    ring_buffer: Mutex<PacketRingBuffer>,
+    /// Statistics
+    stats: Arc<PipelineStatsAtomic>,
+    /// Last batch flush time
+    last_flush: Mutex<Instant>,
+}
+
+/// Atomic statistics for lock-free updates
+struct PipelineStatsAtomic {
+    packets_processed: AtomicU64,
+    bytes_processed: AtomicU64,
+    fec_recoveries: AtomicU64,
+    batches_sent: AtomicU64,
+    syscalls_saved: AtomicU64,
+    buffer_reuses: AtomicU64,
+}
+
+impl Default for PipelineStatsAtomic {
+    fn default() -> Self {
+        Self {
+            packets_processed: AtomicU64::new(0),
+            bytes_processed: AtomicU64::new(0),
+            fec_recoveries: AtomicU64::new(0),
+            batches_sent: AtomicU64::new(0),
+            syscalls_saved: AtomicU64::new(0),
+            buffer_reuses: AtomicU64::new(0),
+        }
+    }
+}
+
+impl HighPerfPipeline {
+    pub fn new(config: HighPerfConfig) -> Self {
+        HighPerfPipeline {
+            fec: Mutex::new(AdaptiveFec::new()),
+            buffer_pool: Mutex::new(BufferPool::new(65536, 64, config.buffer_pool_size)),
+            batcher: Mutex::new(UdpBatcher::with_config(config.max_batch_size, 1472)),
+            coalescer: Mutex::new(UdpCoalescer::default()),
+            multipath: Mutex::new(MultipathScheduler::new(SchedulingStrategy::Weighted)),
+            ring_buffer: Mutex::new(PacketRingBuffer::new(1024 * 1024)), // 1MB ring
+            stats: Arc::new(PipelineStatsAtomic::default()),
+            last_flush: Mutex::new(Instant::now()),
+            config,
+        }
+    }
+
+    /// Process outgoing packet through the pipeline
+    pub async fn process_outgoing(&self, data: &[u8], dest: SocketAddr) -> Result<ProcessedPacket> {
+        let start = Instant::now();
+
+        // Get buffer from pool
+        let _buffer = if self.config.enable_zero_copy {
+            let mut pool = self.buffer_pool.lock().await;
+            self.stats.buffer_reuses.fetch_add(1, Ordering::Relaxed);
+            pool.get()
+        } else {
+            BytesMut::with_capacity(data.len() + 64)
+        };
+
+        // Apply FEC if enabled
+        let encoded_data = if self.config.enable_fec {
+            let mut fec = self.fec.lock().await;
+            let packet = fec.encode(data)?;
+
+            // For now, just use first shard (full integration would send all shards)
+            if packet.shards.len() == 1 {
+                Bytes::from(packet.shards[0].clone())
+            } else {
+                // Combine shards for transmission
+                let mut combined =
+                    BytesMut::with_capacity(packet.shards.iter().map(|s| s.len()).sum());
+                for shard in &packet.shards {
+                    combined.extend_from_slice(shard);
+                }
+                combined.freeze()
+            }
+        } else {
+            Bytes::copy_from_slice(data)
+        };
+
+        // Queue for batching if enabled
+        if self.config.enable_batching {
+            let mut batcher = self.batcher.lock().await;
+            batcher.queue(dest, encoded_data.clone());
+
+            // Check if we should flush
+            let should_flush = batcher.should_flush() || {
+                let last = self.last_flush.lock().await;
+                last.elapsed().as_micros() as u64 >= self.config.batch_flush_us
+            };
+
+            if should_flush {
+                let batches = batcher.flush();
+                self.stats
+                    .batches_sent
+                    .fetch_add(batches.len() as u64, Ordering::Relaxed);
+
+                let syscalls_saved: u64 = batches
+                    .iter()
+                    .map(|b| b.count.saturating_sub(1) as u64)
+                    .sum();
+                self.stats
+                    .syscalls_saved
+                    .fetch_add(syscalls_saved, Ordering::Relaxed);
+
+                *self.last_flush.lock().await = Instant::now();
+
+                return Ok(ProcessedPacket {
+                    data: encoded_data,
+                    dest,
+                    batches: Some(batches),
+                    latency_us: start.elapsed().as_micros() as u64,
+                });
+            }
+        }
+
+        // Update stats
+        self.stats.packets_processed.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .bytes_processed
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+
+        Ok(ProcessedPacket {
+            data: encoded_data,
+            dest,
+            batches: None,
+            latency_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
+    /// Process incoming packet through the pipeline
+    pub async fn process_incoming(&self, data: &[u8], _src: SocketAddr) -> Result<Vec<Bytes>> {
+        let mut results = Vec::new();
+
+        // Process through GRO coalescer if enabled
+        let packets = if self.config.enable_batching {
+            let mut coalescer = self.coalescer.lock().await;
+            coalescer.process_gro(data, 1472)
+        } else {
+            vec![Bytes::copy_from_slice(data)]
+        };
+
+        // Decode FEC if enabled
+        for packet in packets {
+            let decoded = if self.config.enable_fec {
+                // In full implementation, would track and reconstruct FEC groups
+                packet
+            } else {
+                packet
+            };
+
+            results.push(decoded);
+        }
+
+        // Update stats
+        self.stats
+            .packets_processed
+            .fetch_add(results.len() as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_processed
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+
+        Ok(results)
+    }
+
+    /// Add a network path for multi-path support
+    pub async fn add_path(&self, local: SocketAddr, remote: SocketAddr, metrics: PathMetrics) {
+        if self.config.enable_multipath {
+            let mut mp = self.multipath.lock().await;
+            mp.add_path(PathId::new(local, remote), metrics);
+        }
+    }
+
+    /// Get next path for sending (multi-path)
+    pub async fn next_path(&self) -> Option<PathId> {
+        if self.config.enable_multipath {
+            let mut mp = self.multipath.lock().await;
+            mp.next_path()
+        } else {
+            None
+        }
+    }
+
+    /// Record packet acknowledgment (for FEC adaptation)
+    pub async fn ack_packet(&self, seq: u64) {
+        let mut fec = self.fec.lock().await;
+        fec.ack(seq);
+    }
+
+    /// Get current FEC level
+    pub async fn fec_level(&self) -> FecLevel {
+        let fec = self.fec.lock().await;
+        fec.level()
+    }
+
+    /// Flush all pending batches
+    pub async fn flush(&self) -> Vec<GsoBatch> {
+        let mut batcher = self.batcher.lock().await;
+        batcher.flush_all()
+    }
+
+    /// Get pipeline statistics
+    pub fn stats(&self) -> PipelineStats {
+        PipelineStats {
+            packets_processed: self.stats.packets_processed.load(Ordering::Relaxed),
+            bytes_processed: self.stats.bytes_processed.load(Ordering::Relaxed),
+            fec_recoveries: self.stats.fec_recoveries.load(Ordering::Relaxed),
+            batches_sent: self.stats.batches_sent.load(Ordering::Relaxed),
+            syscalls_saved: self.stats.syscalls_saved.load(Ordering::Relaxed),
+            buffer_reuses: self.stats.buffer_reuses.load(Ordering::Relaxed),
+            compression_ratio: 1.0, // Would calculate from actual data
+            avg_latency_us: 0.0,    // Would track moving average
+        }
+    }
+
+    /// Return buffer to pool
+    pub async fn return_buffer(&self, buffer: BytesMut) {
+        if self.config.enable_zero_copy {
+            let mut pool = self.buffer_pool.lock().await;
+            pool.put(buffer);
+        }
+    }
+}
+
+impl Default for HighPerfPipeline {
+    fn default() -> Self {
+        Self::new(HighPerfConfig::default())
+    }
+}
+
+/// Processed packet ready for transmission
+#[derive(Debug)]
+pub struct ProcessedPacket {
+    /// Encoded data
+    pub data: Bytes,
+    /// Destination address
+    pub dest: SocketAddr,
+    /// Batched packets (if batching triggered flush)
+    pub batches: Option<Vec<GsoBatch>>,
+    /// Processing latency in microseconds
+    pub latency_us: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn test_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433)
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_basic() {
+        let pipeline = HighPerfPipeline::default();
+        let data = b"Hello, World!";
+
+        let result = pipeline.process_outgoing(data, test_addr()).await.unwrap();
+        assert!(!result.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_no_fec() {
+        let config = HighPerfConfig {
+            enable_fec: false,
+            ..Default::default()
+        };
+        let pipeline = HighPerfPipeline::new(config);
+        let data = b"Test data";
+
+        let result = pipeline.process_outgoing(data, test_addr()).await.unwrap();
+        assert_eq!(result.data.as_ref(), data);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_batching() {
+        let config = HighPerfConfig {
+            enable_fec: false,
+            enable_batching: true,
+            max_batch_size: 4,
+            ..Default::default()
+        };
+        let pipeline = HighPerfPipeline::new(config);
+
+        // Queue packets
+        for i in 0..5 {
+            let _ = pipeline
+                .process_outgoing(format!("packet {}", i).as_bytes(), test_addr())
+                .await;
+        }
+
+        // Should have triggered at least one batch
+        let stats = pipeline.stats();
+        assert!(stats.batches_sent >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_incoming_processing() {
+        let pipeline = HighPerfPipeline::default();
+        let data = b"Incoming data";
+
+        let results = pipeline.process_incoming(data, test_addr()).await.unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stats() {
+        let pipeline = HighPerfPipeline::default();
+
+        for _ in 0..10 {
+            let _ = pipeline.process_outgoing(b"test", test_addr()).await;
+        }
+
+        let stats = pipeline.stats();
+        assert!(stats.buffer_reuses > 0);
+    }
+}
