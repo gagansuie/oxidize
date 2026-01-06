@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use oxidize_common::{compress_data, should_compress, MessageType, RelayMessage, RelayMetrics};
 use quinn::ClientConfig as QuinnClientConfig;
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::Endpoint;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

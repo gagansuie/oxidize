@@ -2,7 +2,7 @@
 //!
 //! Supports: IPv4, IPv6, UDP, TCP with W-LSB encoding
 
-use super::encoding::{RohcCrc, Sdvl, WlsbEncoder};
+use super::encoding::{Sdvl, WlsbEncoder};
 use super::profiles::Profile;
 use super::FlowId;
 use anyhow::{anyhow, Result};
@@ -21,6 +21,7 @@ enum CompState {
 
 /// Compression context for a single flow
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CompressionContext {
     /// Context ID
     cid: u8,
@@ -99,6 +100,7 @@ impl CompressionContext {
 /// ROHC packet types
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum PacketType {
     /// IR (Initialization/Refresh) - full headers
     Ir = 0xFD,

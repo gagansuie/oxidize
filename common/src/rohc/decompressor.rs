@@ -23,6 +23,7 @@ struct DecompressionContext {
 }
 
 /// ROHC Decompressor
+#[allow(dead_code)]
 pub struct RohcDecompressor {
     /// Maximum number of contexts
     max_contexts: usize,
@@ -211,7 +212,7 @@ impl RohcDecompressor {
     }
 
     /// Decompress IR-DYN packet
-    fn decompress_ir_dyn(&mut self, compressed: &[u8]) -> Result<Vec<u8>> {
+    fn decompress_ir_dyn(&mut self, _compressed: &[u8]) -> Result<Vec<u8>> {
         // For now, treat as error - context should exist
         Err(anyhow!("IR-DYN not implemented - context missing"))
     }

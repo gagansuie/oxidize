@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use quinn::{RecvStream, SendStream};
 use oxidize_common::{decompress_data, MessageType, RelayMessage, RelayMetrics};
+use quinn::{RecvStream, SendStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -174,6 +174,7 @@ impl ConnectionHandler {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn forward_to_destination(
         &self,
         data: &[u8],

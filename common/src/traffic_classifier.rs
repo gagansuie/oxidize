@@ -136,6 +136,7 @@ impl Default for ClassifierConfig {
 }
 
 /// Traffic classifier
+#[allow(dead_code)]
 pub struct TrafficClassifier {
     config: ClassifierConfig,
     /// Cached domain -> bypass decisions
@@ -259,7 +260,7 @@ impl TrafficClassifier {
     }
 
     /// Check if destination should bypass tunnel (quick check for TUN handler)
-    pub fn should_bypass_ip(&self, dest_ip: IpAddr, dest_port: u16) -> bool {
+    pub fn should_bypass_ip(&self, _dest_ip: IpAddr, dest_port: u16) -> bool {
         // Quick synchronous check for hot path
         // More thorough async check can be done separately
 

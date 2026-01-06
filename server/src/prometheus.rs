@@ -19,6 +19,7 @@ pub struct PrometheusMetrics {
     pub packets_sent_total: Counter,
     pub packets_received_total: Counter,
     pub compression_saved_bytes: Counter,
+    #[allow(dead_code)]
     pub request_duration: HistogramVec,
 }
 

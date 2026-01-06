@@ -186,6 +186,7 @@ pub struct UdpCoalescer {
     /// Segment boundaries
     segments: Vec<(usize, usize)>, // (offset, length)
     /// Maximum buffer size
+    #[allow(dead_code)]
     max_size: usize,
 }
 

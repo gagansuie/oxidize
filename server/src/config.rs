@@ -120,6 +120,7 @@ impl Config {
         Ok(config)
     }
 
+    #[allow(dead_code)]
     pub fn save(&self, path: &str) -> Result<()> {
         let content = toml::to_string_pretty(self)?;
         fs::write(path, content)?;

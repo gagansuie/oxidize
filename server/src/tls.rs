@@ -56,6 +56,7 @@ fn load_from_files(cert_path: &str, key_path: &str) -> Result<(Vec<Certificate>,
     Ok((certs, key))
 }
 
+#[allow(dead_code)]
 pub fn validate_cert_paths(cert_path: &str, key_path: &str) -> Result<()> {
     if !Path::new(cert_path).exists() {
         anyhow::bail!("Certificate file does not exist: {}", cert_path);

@@ -80,6 +80,7 @@ pub struct HighPerfPipeline {
     /// Multi-path scheduler
     multipath: Mutex<MultipathScheduler>,
     /// Packet ring buffer for queueing
+    #[allow(dead_code)]
     ring_buffer: Mutex<PacketRingBuffer>,
     /// Statistics
     stats: Arc<PipelineStatsAtomic>,
