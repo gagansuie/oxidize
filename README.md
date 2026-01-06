@@ -26,6 +26,24 @@ You → QUIC tunnel → Oracle backbone → Premium peering → Destination
 (80ms, 0% packet loss)
 ```
 
+## Architecture
+
+Oxidize uses a simple **client-server model**:
+
+```
+┌─────────────────┐         ┌─────────────────┐
+│   Your Device   │  QUIC   │  Relay Server   │
+│                 │ ──────► │  (Oracle Cloud) │ ──────► Internet
+│  oxidize-client │         │  oxidize-server │
+└─────────────────┘         └─────────────────┘
+```
+
+**Key Points:**
+- **Client** connects to a **centralized relay server** you control
+- **No peer-to-peer** - your traffic only goes through your relay
+- **No bandwidth sharing** - each user has their own connection
+- **Smart Routing** - Gaming tunneled for optimization, streaming bypasses for zero latency
+
 ## Key Features
 
 ### 🚀 Core Performance
@@ -45,7 +63,8 @@ You → QUIC tunnel → Oracle backbone → Premium peering → Destination
 ### 🧠 Smart Traffic Management
 - **BBRv3 Congestion Control** - Adaptive bandwidth probing with gaming mode
 - **HTTP/3 Priority Scheduler** - Real-time traffic prioritization
-- **Traffic Classification** - Auto-detects gaming/VoIP for optimal handling
+- **Traffic Classification** - Auto-detects gaming/streaming/VoIP for optimal handling
+- **Smart Routing** - Gaming through tunnel, streaming bypasses for zero latency
 - **Edge Caching** - LRU cache for static content at relay points
 
 ### 📦 Compression (Pure Rust, Enabled by Default)
@@ -65,10 +84,18 @@ You → QUIC tunnel → Oracle backbone → Premium peering → Destination
 | VoIP RTP (160B) | 25% header overhead | 1% | **24%** |
 | SSH keystrokes (80B) | 75% header overhead | 10% | **65%** |
 
-### 🔒 Security & Reliability
+### 🔒 Security & DDoS Protection
 - **TLS 1.3** - Real certificate support with Let's Encrypt
-- **Per-IP Rate Limiting** - DDoS protection built-in
+- **Per-IP Rate Limiting** - Connection, PPS, and bandwidth limits
+- **Auto-blocking** - Automatic IP blocking after violations
+- **QUIC Security** - Stateless retry, address validation, anti-amplification
 - **Connection Multiplexing** - Thousands of concurrent flows
+
+### 🌐 Infrastructure & Resilience
+- **Connection Migration** - Seamless WiFi ↔ LTE handoff
+- **Multi-Server Ready** - Relay mesh for scaling when needed
+- **Predictive Prefetching** - DNS and connection pre-warming
+- **Health Monitoring** - Automatic failover on relay issues
 
 ### 📊 Observability
 - **Prometheus Metrics** - Latency, throughput, compression ratios
@@ -112,11 +139,19 @@ Sample output:
 
 ## Quick Start
 
-### Download Pre-built Binaries
+### One-Click Client Install
 
-Get the latest release from [GitHub Releases](https://github.com/YOUR_USERNAME/oxidize/releases)
+```bash
+# Install and auto-start (prompts for server address)
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
 
-Or see [DOWNLOADS.md](DOWNLOADS.md) for installation instructions.
+# Or specify server directly
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- relay.example.com:4433
+```
+
+The installer handles everything: downloads binary, configures service, and starts automatically.
+
+> **Review the script:** [install.sh](install.sh)
 
 ### Build from Source
 
@@ -124,10 +159,10 @@ Or see [DOWNLOADS.md](DOWNLOADS.md) for installation instructions.
 # Build
 cargo build --release
 
-# Run server
+# Run server (on your Oracle/cloud instance)
 ./target/release/oxidize-server --listen 0.0.0.0:4433
 
-# Run client
+# Run client (on your device)
 ./target/release/oxidize-client --server SERVER_IP:4433
 
 # Run speed test to verify improvement
@@ -214,8 +249,14 @@ enable_priority_scheduler = true
 - ✅ Connection pooling
 - ✅ Edge caching
 - ✅ SIMD acceleration (AVX2/NEON)
-- ✅ Comprehensive test suite (45+ tests)
-- ✅ Oracle Cloud deployment
+- ✅ Connection migration (network handoff)
+- ✅ Relay mesh (multi-server ready)
+- ✅ Predictive prefetching
+- ✅ DDoS protection & auto-blocking
+- ✅ Comprehensive test suite (70+ tests)
+- ✅ Oracle Cloud Free Tier deployment
+- ✅ One-click client installer
+- ✅ Smart traffic classification
 - ✅ Zero external dependencies
 
 ## Monitoring
@@ -228,6 +269,14 @@ curl http://localhost:9090/metrics
 ## Deployment
 
 See [DEPLOY_ORACLE.md](DEPLOY_ORACLE.md) for production deployment guide.
+
+## Documentation
+
+- [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
+- [TUN.md](docs/TUN.md) - Full system tunneling (VPN-like mode)
+- [STREAMING.md](docs/STREAMING.md) - Streaming service compatibility (Netflix, etc.)
+- [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
+- [DEPLOY_ORACLE.md](docs/DEPLOY_ORACLE.md) - Server deployment guide
 
 ## Testing
 
@@ -261,8 +310,8 @@ cargo bench --package oxidize-common
 
 ## CI/CD
 
-[![CI](https://github.com/YOUR_USERNAME/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/oxidize/actions/workflows/ci.yml)
-[![Release](https://github.com/YOUR_USERNAME/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/YOUR_USERNAME/oxidize/actions/workflows/release.yml)
+[![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
+[![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
 
 Automatic builds for Linux, macOS, and Windows on every release tag.
 

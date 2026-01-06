@@ -1,70 +1,109 @@
-use relay_server::rate_limiter::RateLimiter;
+use oxidize_common::security::{SecurityAction, SecurityConfig, SecurityManager};
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
-#[tokio::test]
-async fn test_rate_limiter_allows_within_limit() {
-    let limiter = RateLimiter::new(5, 60);
-    let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+fn test_ip(last: u8) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(192, 168, 1, last))
+}
+
+#[test]
+fn test_security_allows_within_limit() {
+    let config = SecurityConfig {
+        max_connections_per_ip: 5,
+        ..Default::default()
+    };
+    let mut mgr = SecurityManager::new(config);
+    let ip = test_ip(1);
 
     for _ in 0..5 {
-        assert!(
-            limiter.check_rate_limit(ip).await,
+        assert_eq!(
+            mgr.check_connection(ip),
+            SecurityAction::Allow,
             "Should allow connections within limit"
         );
     }
 }
 
-#[tokio::test]
-async fn test_rate_limiter_blocks_over_limit() {
-    let limiter = RateLimiter::new(3, 60);
-    let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+#[test]
+fn test_security_rate_limits_over_limit() {
+    let config = SecurityConfig {
+        max_connections_per_ip: 3,
+        ..Default::default()
+    };
+    let mut mgr = SecurityManager::new(config);
+    let ip = test_ip(2);
 
     for _ in 0..3 {
-        assert!(limiter.check_rate_limit(ip).await);
+        assert_eq!(mgr.check_connection(ip), SecurityAction::Allow);
     }
 
-    assert!(
-        !limiter.check_rate_limit(ip).await,
-        "Should block connection over limit"
+    assert_eq!(
+        mgr.check_connection(ip),
+        SecurityAction::RateLimit,
+        "Should rate limit connection over limit"
     );
 }
 
-#[tokio::test]
-async fn test_rate_limiter_different_ips() {
-    let limiter = RateLimiter::new(2, 60);
-    let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+#[test]
+fn test_security_different_ips() {
+    let config = SecurityConfig {
+        max_connections_per_ip: 2,
+        enable_challenges: false,
+        ..Default::default()
+    };
+    let mut mgr = SecurityManager::new(config);
+    let ip1 = test_ip(10);
+    let ip2 = test_ip(20);
 
-    assert!(limiter.check_rate_limit(ip1).await);
-    assert!(limiter.check_rate_limit(ip1).await);
-    assert!(!limiter.check_rate_limit(ip1).await);
+    assert_eq!(mgr.check_connection(ip1), SecurityAction::Allow);
+    assert_eq!(mgr.check_connection(ip1), SecurityAction::Allow);
+    assert_eq!(mgr.check_connection(ip1), SecurityAction::RateLimit);
 
-    assert!(limiter.check_rate_limit(ip2).await);
-    assert!(limiter.check_rate_limit(ip2).await);
+    // Different IP should still be allowed
+    assert_eq!(mgr.check_connection(ip2), SecurityAction::Allow);
+    assert_eq!(mgr.check_connection(ip2), SecurityAction::Allow);
 }
 
-#[tokio::test]
-async fn test_rate_limiter_stats() {
-    let limiter = RateLimiter::new(10, 60);
-    let ip = IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1));
+#[test]
+fn test_security_blocklist() {
+    let mut mgr = SecurityManager::default();
+    let ip = test_ip(3);
 
-    limiter.check_rate_limit(ip).await;
+    mgr.block_ip(ip, Duration::from_secs(60));
+    assert_eq!(mgr.check_connection(ip), SecurityAction::Block);
 
-    let stats = limiter.get_stats().await;
-    assert_eq!(stats.max_per_ip, 10);
-    assert_eq!(stats.tracked_ips, 1);
+    mgr.unblock_ip(ip);
+    assert_eq!(mgr.check_connection(ip), SecurityAction::Allow);
 }
 
-#[tokio::test]
-async fn test_rate_limiter_cleanup() {
-    let limiter = RateLimiter::new(5, 1);
-    let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
+#[test]
+fn test_security_allowlist() {
+    let config = SecurityConfig {
+        max_connections_per_ip: 1,
+        ..Default::default()
+    };
+    let mut mgr = SecurityManager::new(config);
+    let ip = test_ip(4);
 
-    limiter.check_rate_limit(ip).await;
+    mgr.allowlist_ip(ip);
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    limiter.cleanup_old_entries().await;
+    // Should bypass all limits
+    for _ in 0..100 {
+        assert_eq!(mgr.check_connection(ip), SecurityAction::Allow);
+    }
+}
 
-    let stats = limiter.get_stats().await;
-    assert_eq!(stats.tracked_ips, 0, "Old entries should be cleaned up");
+#[test]
+fn test_security_snapshot() {
+    let mut mgr = SecurityManager::default();
+    let ip = test_ip(5);
+
+    mgr.check_connection(ip);
+    mgr.block_ip(test_ip(100), Duration::from_secs(60));
+    mgr.allowlist_ip(test_ip(200));
+
+    let snapshot = mgr.snapshot();
+    assert_eq!(snapshot.tracked_ips, 1);
+    assert_eq!(snapshot.blocked_ips, 1);
+    assert_eq!(snapshot.allowlisted_ips, 1);
 }

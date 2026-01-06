@@ -7,6 +7,9 @@ use oxidize_common::benchmark::{BenchmarkComparison, Benchmarker, ThroughputBenc
 use oxidize_common::compression::{compress_data, decompress_data};
 use oxidize_common::fec::FecEncoder;
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
+use oxidize_common::security::{
+    generate_challenge, validate_packet, verify_challenge, SecurityConfig, SecurityManager,
+};
 use oxidize_common::udp_batch::UdpBatcher;
 use oxidize_common::zero_copy::BufferPool;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -24,6 +27,7 @@ static E2E_LATENCY: AtomicU64 = AtomicU64::new(0);
 static ROHC_RATIO: AtomicU64 = AtomicU64::new(0);
 static MEMORY_SUSTAINED_OPS: AtomicU64 = AtomicU64::new(0);
 static NETWORK_SIM_LATENCY: AtomicU64 = AtomicU64::new(0);
+static SECURITY_CHECK_NS: AtomicU64 = AtomicU64::new(0);
 
 fn main() {
     println!("╔════════════════════════════════════════════════════════════════╗");
@@ -44,6 +48,7 @@ fn main() {
 
     bench_network_simulation();
     bench_memory_pressure();
+    bench_security();
 
     print_key_takeaways();
 }
@@ -677,4 +682,69 @@ fn bench_memory_pressure() {
         "  • Pool efficiency: {:.1}%\n",
         pool_stats.reuses as f64 / (pool_stats.reuses + pool_stats.allocations) as f64 * 100.0
     );
+}
+
+/// Security Module Benchmarks
+fn bench_security() {
+    println!("## Security Benchmarks\n");
+
+    let bench = Benchmarker::new(100, 10000);
+    let mut comparison = BenchmarkComparison::new();
+
+    // SecurityManager check_connection benchmark
+    let config = SecurityConfig::default();
+    let mut mgr = SecurityManager::new(config);
+
+    // Warm up with some IPs
+    for i in 0..100u8 {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, i));
+        mgr.check_connection(ip);
+    }
+
+    let result = bench.run("check_connection", 1, || {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let _ = mgr.check_connection(ip);
+    });
+    SECURITY_CHECK_NS.store(result.avg_time_ns, Ordering::Relaxed);
+    comparison.add(result);
+
+    // Packet validation benchmark
+    let valid_packet = vec![0x80u8; 100]; // QUIC long header
+    comparison.add(bench.run("validate_packet", 100, || {
+        let _ = validate_packet(&valid_packet);
+    }));
+
+    // Challenge generation benchmark
+    let secret = [0u8; 32];
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    comparison.add(bench.run("generate_challenge", 1, || {
+        let _ = generate_challenge(ip, &secret);
+    }));
+
+    // Challenge verification benchmark
+    let token = generate_challenge(ip, &secret);
+    comparison.add(bench.run("verify_challenge", 1, || {
+        let _ = verify_challenge(ip, &secret, &token);
+    }));
+
+    // Blocklist/allowlist lookup benchmark
+    let mut mgr2 = SecurityManager::default();
+    for i in 0..1000u16 {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, (i >> 8) as u8, (i & 0xff) as u8, 1));
+        mgr2.block_ip(ip, Duration::from_secs(3600));
+    }
+    comparison.add(bench.run("blocklist_check (1000 IPs)", 1, || {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 50, 1));
+        let _ = mgr2.check_connection(ip);
+    }));
+
+    println!("{}", comparison.format_table());
+
+    println!("Security Performance Summary:");
+    println!(
+        "  • Connection check: ~{}ns per check",
+        SECURITY_CHECK_NS.load(Ordering::Relaxed)
+    );
+    println!("  • Suitable for high-throughput packet processing");
+    println!("  • Zero-copy validation where possible\n");
 }

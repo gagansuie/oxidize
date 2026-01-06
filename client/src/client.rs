@@ -87,7 +87,8 @@ impl RelayClient {
     }
 
     pub async fn run_with_tun(&self) -> Result<()> {
-        let tun_handler = TunHandler::new(self.config.clone())?;
+        let mut tun_handler =
+            TunHandler::new(self.config.clone())?.with_server_ip(self.server_addr.ip());
         let (tx, mut rx) = mpsc::channel(self.config.max_packet_queue);
 
         let tun_handle = {

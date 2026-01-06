@@ -1,412 +1,144 @@
-# Deploy Oxidize to Oracle Cloud Free Tier
+# Deploy to Oracle Cloud (Free Tier)
 
-Complete guide to deploying your relay on Oracle Cloud's Always Free tier.
+Deploy your Oxidize relay server on Oracle Cloud's **Always Free** tier.
 
-## What You Get (FREE Forever)
+## Free Tier Specs
 
-- **4 ARM CPUs** (Ampere A1)
-- **24GB RAM**
-- **200GB storage**
-- **10TB bandwidth/month**
-- **Public IPv4 address**
+| Resource | Amount |
+|----------|--------|
+| ARM CPUs | 4 (Ampere A1) |
+| RAM | 24GB |
+| Storage | 200GB |
+| Bandwidth | 10TB/month |
+| Cost | **$0 forever** |
 
-Perfect for running Oxidize 24/7 at no cost.
+## Quick Deploy (Copy-Paste)
 
-## Prerequisites
+### 1. Create Oracle VM
 
-1. Oracle Cloud account (no credit card required for free tier)
-2. SSH key pair
-3. 15 minutes
+1. [Sign up for Oracle Cloud](https://cloud.oracle.com) (no credit card required)
+2. **Compute** → **Instances** → **Create Instance**
+3. Configure:
+   - **Name:** `oxidize-relay`
+   - **Image:** Ubuntu 22.04 (ARM)
+   - **Shape:** VM.Standard.A1.Flex (4 OCPU, 24GB)
+   - **SSH Key:** Upload your public key
+4. Click **Create** (wait ~2 min)
 
-## Step 1: Create VM Instance
+### 2. Open Firewall
 
-### Create Instance
-1. Go to Oracle Cloud Console
-2. Navigate to **Compute** → **Instances**
-3. Click **Create Instance**
-
-### Configure Instance
+**Oracle Console:** Networking → VCN → Security Lists → Add Ingress Rule:
 ```
-Name: oxidize-relay
-Image: Ubuntu 22.04 Minimal (ARM)
-Shape: VM.Standard.A1.Flex
-  - OCPUs: 4
-  - Memory: 24GB
-Network: Create new VCN (default settings)
-SSH Keys: Upload your public key
+Protocol: UDP    Port: 4433    Source: 0.0.0.0/0
 ```
 
-Click **Create** and wait ~2 minutes.
-
-## Step 2: Configure Firewall
-
-### Oracle Cloud Security List
-1. Go to **Networking** → **Virtual Cloud Networks**
-2. Click your VCN → **Security Lists** → **Default Security List**
-3. Click **Add Ingress Rules**
-
-Add these rules:
-```
-Source CIDR: 0.0.0.0/0
-IP Protocol: UDP
-Destination Port: 4433
-Description: Oxidize QUIC
-
-Source CIDR: 0.0.0.0/0
-IP Protocol: UDP
-Destination Port: 51820
-Description: WireGuard (Mobile)
-
-Source CIDR: 0.0.0.0/0
-IP Protocol: TCP
-Destination Port: 9090
-Description: Prometheus Metrics
-
-Source CIDR: 0.0.0.0/0
-IP Protocol: TCP
-Destination Port: 22
-Description: SSH (already exists)
-```
-
-### Ubuntu Firewall (iptables)
-SSH into your instance:
+**On the VM:**
 ```bash
 ssh ubuntu@YOUR_PUBLIC_IP
-```
 
-Configure firewall:
-```bash
-# Allow QUIC traffic
-sudo iptables -I INPUT 6 -m state --state NEW -p udp --dport 4433 -j ACCEPT
-
-# Allow WireGuard (mobile clients)
-sudo iptables -I INPUT 6 -m state --state NEW -p udp --dport 51820 -j ACCEPT
-
-# Allow Prometheus metrics
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 9090 -j ACCEPT
-
-# Save rules
+# Open port
+sudo iptables -I INPUT 6 -p udp --dport 4433 -j ACCEPT
 sudo netfilter-persistent save
 ```
 
-## Step 3: Install Rust & Dependencies
+### 3. Install & Run
 
 ```bash
-# Update system
-sudo apt update && sudo apt upgrade -y
-
-# Install build tools
-sudo apt install -y build-essential pkg-config libssl-dev git curl
+# Install dependencies
+sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev git curl
 
 # Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 
-# Verify
-rustc --version
-```
-
-## Step 4: Deploy Oxidize
-
-### Clone & Build
-```bash
-# Clone repo
-git clone https://github.com/YOUR_USERNAME/oxidize.git
+# Clone and build (~10 min on ARM)
+git clone https://github.com/gagansuie/oxidize.git
 cd oxidize
-
-# Build release
 cargo build --release
 
-# This takes ~10-15 minutes on ARM
-# Binary will be in target/release/oxidize-server
+# Test run
+./target/release/oxidize-server --listen 0.0.0.0:4433
 ```
 
-### Create Config
+### 4. Setup Auto-Start Service
+
 ```bash
-cat > /home/ubuntu/oxidize/production.toml <<EOF
-max_connections = 10000
-enable_compression = true
-compression_threshold = 512
-enable_tcp_acceleration = true
-enable_deduplication = true
-rate_limit_per_ip = 100
-rate_limit_window_secs = 60
-
-# WireGuard for mobile clients (optional)
-# Generate keys with: ./target/release/oxidize-server --generate-wg-config
-enable_wireguard = false
-# wireguard_port = 51820
-# wireguard_private_key = "YOUR_KEY_HERE"
-EOF
-```
-
-### Test Run
-```bash
-./target/release/oxidize-server \
-  --listen 0.0.0.0:4433 \
-  --config production.toml \
-  --metrics-addr 0.0.0.0:9090
-```
-
-Verify it starts. Press Ctrl+C to stop.
-
-## Step 5: Setup Systemd Service
-
-Create service file:
-```bash
-sudo nano /etc/systemd/system/oxidize.service
-```
-
-Paste this:
-```ini
+sudo tee /etc/systemd/system/oxidize.service > /dev/null <<EOF
 [Unit]
-Description=Oxidize Network Relay
+Description=Oxidize Relay
 After=network.target
 
 [Service]
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/oxidize
-ExecStart=/home/ubuntu/oxidize/target/release/oxidize-server \
-  --listen 0.0.0.0:4433 \
-  --config /home/ubuntu/oxidize/production.toml \
-  --metrics-addr 0.0.0.0:9090
+ExecStart=/home/ubuntu/oxidize/target/release/oxidize-server --listen 0.0.0.0:4433
 Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now oxidize
 ```
 
-Enable & start:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable oxidize
-sudo systemctl start oxidize
+### 5. Verify
 
+```bash
 # Check status
 sudo systemctl status oxidize
 
 # View logs
 sudo journalctl -u oxidize -f
+
+# Test from your local machine
+./oxidize-client --server YOUR_ORACLE_IP:4433 --speedtest
 ```
 
-## Step 6: Setup Monitoring (Optional)
+**Done!** Your relay is running.
 
-### Install Prometheus
-```bash
-cd /tmp
-wget https://github.com/prometheus/prometheus/releases/download/v2.45.0/prometheus-2.45.0.linux-arm64.tar.gz
-tar xvf prometheus-2.45.0.linux-arm64.tar.gz
-sudo mv prometheus-2.45.0.linux-arm64 /opt/prometheus
-```
+---
 
-Create Prometheus config:
-```bash
-sudo nano /opt/prometheus/prometheus.yml
-```
-
-```yaml
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: 'oxidize'
-    static_configs:
-      - targets: ['localhost:9090']
-```
-
-Create Prometheus service:
-```bash
-sudo nano /etc/systemd/system/prometheus.service
-```
-
-```ini
-[Unit]
-Description=Prometheus
-After=network.target
-
-[Service]
-User=ubuntu
-ExecStart=/opt/prometheus/prometheus \
-  --config.file=/opt/prometheus/prometheus.yml \
-  --storage.tsdb.path=/opt/prometheus/data \
-  --web.listen-address=:9091
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Start Prometheus:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable prometheus
-sudo systemctl start prometheus
-```
-
-Access metrics: `http://YOUR_IP:9091`
-
-## Step 7: DNS Setup
-
-Point your domain to the VM:
-```
-oxidize.yourdomain.com → YOUR_ORACLE_IP
-```
-
-Update client connections:
-```bash
-./oxidize-client --server oxidize.yourdomain.com:4433
-```
-
-## Maintenance Commands
+## Performance Tuning (Optional)
 
 ```bash
-# View logs
-sudo journalctl -u oxidize -f
+# Increase file limits
+echo "ubuntu soft nofile 65536" | sudo tee -a /etc/security/limits.conf
+echo "ubuntu hard nofile 65536" | sudo tee -a /etc/security/limits.conf
 
-# Restart service
-sudo systemctl restart oxidize
-
-# Stop service
-sudo systemctl stop oxidize
-
-# Update binary
-cd /home/ubuntu/oxidize
-git pull
-cargo build --release
-sudo systemctl restart oxidize
-
-# Check metrics
-curl http://localhost:9090/metrics
-```
-
-## Performance Tuning
-
-### Increase file limits
-```bash
-sudo nano /etc/security/limits.conf
-```
-
-Add:
-```
-ubuntu soft nofile 65536
-ubuntu hard nofile 65536
-```
-
-### Kernel tuning
-```bash
-sudo nano /etc/sysctl.conf
-```
-
-Add:
-```
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
-net.ipv4.udp_mem = 65536 131072 262144
-```
-
-Apply:
-```bash
+# UDP buffer tuning
+echo "net.core.rmem_max = 134217728" | sudo tee -a /etc/sysctl.conf
+echo "net.core.wmem_max = 134217728" | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
+```
+
+## Common Commands
+
+```bash
+sudo systemctl status oxidize    # Status
+sudo systemctl restart oxidize   # Restart
+sudo journalctl -u oxidize -f    # Logs
+
+# Update
+cd ~/oxidize && git pull && cargo build --release && sudo systemctl restart oxidize
 ```
 
 ## Troubleshooting
 
-### Service won't start
-```bash
-# Check logs
-sudo journalctl -u oxidize -n 50
+| Problem | Fix |
+|---------|-----|
+| Can't connect | Check: `sudo iptables -L -n \| grep 4433` |
+| Service won't start | Check: `sudo journalctl -u oxidize -n 50` |
+| Port in use | Check: `sudo netstat -tulpn \| grep 4433` |
 
-# Check if port is in use
-sudo netstat -tulpn | grep 4433
+## Security Checklist
 
-# Test binary manually
-cd /home/ubuntu/oxidize
-./target/release/oxidize-server --listen 0.0.0.0:4433
-```
+- [ ] Disable password SSH: `PasswordAuthentication no` in `/etc/ssh/sshd_config`
+- [ ] Install fail2ban: `sudo apt install fail2ban -y`
+- [ ] Keep updated: `sudo apt update && sudo apt upgrade -y`
 
-### Can't connect from client
-```bash
-# Check firewall
-sudo iptables -L -n
+---
 
-# Check if service is listening
-sudo netstat -tulpn | grep 4433
-
-# Test from server
-curl http://localhost:9090/metrics
-```
-
-### High memory usage
-```bash
-# Check metrics
-curl http://localhost:9090/metrics | grep oxidize_relay_connections
-
-# Restart if needed
-sudo systemctl restart oxidize
-```
-
-## Security Best Practices
-
-1. **Keep system updated**
-   ```bash
-   sudo apt update && sudo apt upgrade -y
-   ```
-
-2. **Use SSH keys only** (disable password auth)
-   ```bash
-   sudo nano /etc/ssh/sshd_config
-   # Set: PasswordAuthentication no
-   sudo systemctl restart sshd
-   ```
-
-3. **Setup fail2ban**
-   ```bash
-   sudo apt install fail2ban -y
-   sudo systemctl enable fail2ban
-   ```
-
-4. **Monitor with Prometheus alerts** (see Prometheus setup)
-
-## Cost Monitoring
-
-Even though it's free, monitor usage:
-```bash
-# Bandwidth usage
-sudo vnstat
-
-# CPU/Memory
-htop
-
-# Disk usage
-df -h
-```
-
-Stay under 10TB/month bandwidth to remain free.
-
-## Step 8: CI/CD (Optional)
-
-Automate deployments with GitHub Actions.
-
-### Quick Setup
-1. Generate SSH key: `ssh-keygen -t ed25519 -f ~/.ssh/oxidize_ci -N ""`
-2. Add to Oracle: `ssh-copy-id -i ~/.ssh/oxidize_ci.pub ubuntu@YOUR_IP`
-3. GitHub repo → Settings → Secrets:
-   - `ORACLE_HOST` = your IP
-   - `ORACLE_SSH_KEY` = `base64 -w 0 ~/.ssh/oxidize_ci`
-4. Workflows in `.github/workflows/` will auto-deploy on push
-
-Every `git push origin main` now deploys automatically.
-
-## Next Steps
-
-- ✅ Setup automated backups (Oracle Cloud free)
-- ✅ Configure log rotation
-- ✅ Setup Grafana for visualization
-- ✅ Add health checks
-- ✅ Document disaster recovery
-
-Your relay is now running 24/7 on Oracle Cloud for **$0/month**! 🎉
+**Your relay is now running 24/7 for $0/month** 🎉

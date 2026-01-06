@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["rohc"]
 rohc = []
+relay-mesh = []  # Server-side only: relay-to-relay routing (not needed with anycast)
 
 [[bench]]
 name = "perf_bench"

@@ -1,16 +1,17 @@
 use anyhow::Result;
+use oxidize_common::security::{SecurityAction, SecurityConfig, SecurityManager};
 use oxidize_common::RelayMetrics;
 use quinn::{Connection, Endpoint, ServerConfig};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Duration;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::cache::DataCache;
 use crate::config::Config;
 use crate::connection::ConnectionHandler;
-use crate::rate_limiter::RateLimiter;
 use crate::tls::{load_tls_config, TlsConfig};
 
 pub struct RelayServer {
@@ -19,7 +20,7 @@ pub struct RelayServer {
     metrics: RelayMetrics,
     connections: Arc<RwLock<HashMap<u64, Arc<ConnectionHandler>>>>,
     cache: Arc<DataCache>,
-    rate_limiter: RateLimiter,
+    security: Arc<Mutex<SecurityManager>>,
 }
 
 impl RelayServer {
@@ -63,8 +64,17 @@ impl RelayServer {
 
         let endpoint = Endpoint::server(server_config, listen_addr)?;
 
-        let rate_limiter =
-            RateLimiter::new(config.rate_limit_per_ip, config.rate_limit_window_secs);
+        let security_config = SecurityConfig {
+            max_connections_per_ip: config.rate_limit_per_ip as u32,
+            rate_limit_window_secs: config.rate_limit_window_secs,
+            max_pps_per_ip: config.max_pps_per_ip,
+            max_bandwidth_per_ip: config.max_bandwidth_per_ip,
+            enable_stateless_retry: true,
+            blocklist_ttl: Duration::from_secs(3600),
+            auto_block_threshold: config.auto_block_threshold,
+            enable_challenges: config.enable_challenges,
+        };
+        let security = Arc::new(Mutex::new(SecurityManager::new(security_config)));
 
         Ok(Self {
             endpoint,
@@ -72,7 +82,7 @@ impl RelayServer {
             metrics: RelayMetrics::new(),
             connections: Arc::new(RwLock::new(HashMap::new())),
             cache: Arc::new(DataCache::new()),
-            rate_limiter,
+            security,
         })
     }
 
@@ -87,6 +97,16 @@ impl RelayServer {
     pub async fn run(&self) -> Result<()> {
         info!("Server running and accepting connections...");
 
+        // Spawn cleanup task
+        let security_cleanup = self.security.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                security_cleanup.lock().await.cleanup();
+            }
+        });
+
         loop {
             match self.endpoint.accept().await {
                 Some(incoming) => {
@@ -94,12 +114,38 @@ impl RelayServer {
                     let metrics = self.metrics.clone();
                     let config = self.config.clone();
                     let cache = self.cache.clone();
+                    let security = self.security.clone();
 
                     tokio::spawn(async move {
+                        // Get remote address before awaiting connection
+                        let remote_addr = incoming.remote_address();
+                        let client_ip = remote_addr.ip();
+
+                        // Security check
+                        let action = security.lock().await.check_connection(client_ip);
+                        match action {
+                            SecurityAction::Block => {
+                                warn!("Blocked connection from: {}", client_ip);
+                                return;
+                            }
+                            SecurityAction::RateLimit => {
+                                debug!("Rate limited connection from: {}", client_ip);
+                                return;
+                            }
+                            SecurityAction::Challenge => {
+                                debug!("Challenging connection from: {}", client_ip);
+                                // QUIC stateless retry handles this automatically
+                            }
+                            _ => {}
+                        }
+
                         match incoming.await {
                             Ok(connection) => {
                                 info!("New connection from: {}", connection.remote_address());
                                 metrics.record_connection_opened();
+
+                                // Mark as verified after successful handshake
+                                security.lock().await.mark_verified(client_ip);
 
                                 if let Err(e) = Self::handle_connection(
                                     connection,

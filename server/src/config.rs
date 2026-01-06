@@ -23,6 +23,16 @@ pub struct Config {
     #[serde(default = "default_rate_window")]
     pub rate_limit_window_secs: u64,
 
+    // Security settings
+    #[serde(default = "default_max_pps")]
+    pub max_pps_per_ip: u32,
+    #[serde(default = "default_max_bandwidth")]
+    pub max_bandwidth_per_ip: u64,
+    #[serde(default = "default_auto_block_threshold")]
+    pub auto_block_threshold: u32,
+    #[serde(default = "default_enable_challenges")]
+    pub enable_challenges: bool,
+
     // WireGuard settings
     #[serde(default = "default_enable_wireguard")]
     pub enable_wireguard: bool,
@@ -59,6 +69,22 @@ fn default_rate_window() -> u64 {
     60
 }
 
+fn default_max_pps() -> u32 {
+    1000
+}
+
+fn default_max_bandwidth() -> u64 {
+    10 * 1024 * 1024 // 10 MB/s
+}
+
+fn default_auto_block_threshold() -> u32 {
+    10
+}
+
+fn default_enable_challenges() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -79,6 +105,10 @@ impl Default for Config {
             wireguard_private_key: None,
             enable_rohc: true,
             rohc_max_size: 1500,
+            max_pps_per_ip: 1000,
+            max_bandwidth_per_ip: 10 * 1024 * 1024,
+            auto_block_threshold: 10,
+            enable_challenges: true,
         }
     }
 }

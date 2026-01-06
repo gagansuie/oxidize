@@ -8,7 +8,6 @@ mod cache;
 mod config;
 mod connection;
 mod prometheus;
-mod rate_limiter;
 mod server;
 mod tls;
 mod wireguard;
