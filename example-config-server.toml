@@ -55,3 +55,12 @@ rate_limit_window_secs = 60
 enable_wireguard = false
 # wireguard_port = 51820
 # wireguard_private_key = "YOUR_PRIVATE_KEY_HERE"
+
+# ROHC (Robust Header Compression) - RFC 3095
+# Compresses IP/UDP/TCP headers for bandwidth savings
+# Best for: Gaming, VoIP, high packet-rate workloads
+# Requires librohc to be installed (see docs/ROHC.md)
+enable_rohc = true
+
+# Maximum packet size for ROHC compression (bytes)
+rohc_max_size = 1500

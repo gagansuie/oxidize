@@ -14,6 +14,21 @@ pub struct ClientConfig {
     pub max_packet_queue: usize,
     pub tun_mtu: usize,
     pub enable_header_compression: bool,
+
+    /// Enable ROHC (Robust Header Compression) for IP/UDP/TCP headers
+    #[serde(default = "default_enable_rohc")]
+    pub enable_rohc: bool,
+    /// Maximum packet size for ROHC compression (larger packets use LZ4 only)
+    #[serde(default = "default_rohc_max_size")]
+    pub rohc_max_size: usize,
+}
+
+fn default_enable_rohc() -> bool {
+    true
+}
+
+fn default_rohc_max_size() -> usize {
+    1500
 }
 
 impl Default for ClientConfig {
@@ -29,6 +44,8 @@ impl Default for ClientConfig {
             max_packet_queue: 10000,
             tun_mtu: 1500,
             enable_header_compression: true,
+            enable_rohc: true,
+            rohc_max_size: 1500,
         }
     }
 }

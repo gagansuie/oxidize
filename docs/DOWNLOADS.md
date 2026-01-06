@@ -75,6 +75,15 @@ oxidize-client --help
 
 ## Quick Start
 
+### Test Your Connection First
+```bash
+# Run a speed test to see your improvement
+oxidize-client --server relay.yourdomain.com:4433 --speedtest
+
+# Get JSON output for scripting
+oxidize-client --server relay.yourdomain.com:4433 --speedtest --json
+```
+
 ### Connect to Public Relay
 ```bash
 # Basic connection

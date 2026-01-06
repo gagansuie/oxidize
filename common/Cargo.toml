@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["Oxidize Contributors"]
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+rohc = []
+
 [dependencies]
 tokio = { workspace = true }
 bytes = { workspace = true }

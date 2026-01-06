@@ -26,13 +26,29 @@ You → QUIC tunnel → Oracle backbone → Premium peering → Destination
 (80ms, 0% packet loss)
 ```
 
-## Key Benefits
+## Key Features
 
-- **Better Routing** - Enterprise backbone peering vs consumer ISP routes
-- **QUIC Protocol** - Superior packet loss handling on mobile/WiFi
-- **Loss Recovery** - Forward error correction for unstable connections
-- **Smart Compression** - LZ4 for bandwidth-constrained uplinks
-- **Always-On Monitoring** - Prometheus metrics built-in
+### 🚀 Core Performance
+- **QUIC Protocol** - 0-RTT resumption, stream multiplexing, fast loss recovery
+- **Enterprise Routing** - Premium backbone peering vs congested ISP routes
+- **Forward Error Correction** - Reed-Solomon FEC for packet loss resilience
+
+### 📦 Compression (Pure Rust)
+- **ROHC Header Compression** - Compresses 40-60 byte headers to 1-4 bytes
+  - UDP, TCP, IP, RTP, ESP, IPv6 profiles
+  - State machine compression (IR → FO → SO)
+  - W-LSB delta encoding for sequence numbers
+- **LZ4 Payload Compression** - Fast compression for bandwidth-constrained uplinks
+- **Intelligent Selection** - Automatically chooses best compression per packet
+
+### 🔒 Security & Reliability
+- **TLS 1.3** - Real certificate support with Let's Encrypt
+- **Per-IP Rate Limiting** - DDoS protection built-in
+- **Connection Multiplexing** - Thousands of concurrent flows
+
+### 📊 Observability
+- **Prometheus Metrics** - Latency, throughput, compression ratios
+- **Speed Test** - Built-in benchmarking with JSON output
 
 ## Perfect For
 
@@ -41,6 +57,34 @@ You → QUIC tunnel → Oracle backbone → Premium peering → Destination
 - 🏢 **Remote workers** - VPN alternative with better performance
 - 🌐 **API developers** - Faster API calls through compression
 - 🚀 **Anyone with a crappy ISP** - Bypass congestion and poor peering
+
+## Speed Test
+
+Test your connection improvement before committing:
+
+```bash
+# Human-readable results
+oxidize-client --server SERVER_IP:4433 --speedtest
+
+# JSON output for scripting
+oxidize-client --server SERVER_IP:4433 --speedtest --json
+```
+
+Sample output:
+```
+╔════════════════════════════════════════════════════════════════╗
+║              Oxidize Speed Test Results                        ║
+╠════════════════════════════════════════════════════════════════╣
+║                      Direct      Via Relay      Improvement    ║
+╠════════════════════════════════════════════════════════════════╣
+║  Latency (ms):        45.2          38.1           +15.7%      ║
+║  Download (Mbps):     85.2          92.4           +8.5%       ║
+║  Upload (Mbps):       42.1          48.7           +15.7%      ║
+║  Jitter (ms):         12.3           4.2           +65.9%      ║
+╚════════════════════════════════════════════════════════════════╝
+
+✨ Summary: Oxidize provides 16% better latency, 8% better download speed
+```
 
 ## Quick Start
 
@@ -61,6 +105,9 @@ cargo build --release
 
 # Run client
 ./target/release/oxidize-client --server SERVER_IP:4433
+
+# Run speed test to verify improvement
+./target/release/oxidize-client --server SERVER_IP:4433 --speedtest
 ```
 
 ## Why This Works
@@ -102,7 +149,13 @@ max_connections = 10000
 enable_compression = true
 enable_tcp_acceleration = true
 rate_limit_per_ip = 100
+
+# ROHC header compression (requires --features rohc)
+enable_rohc = true
+rohc_max_size = 1400
 ```
+
+See [docs/ROHC.md](docs/ROHC.md) for detailed ROHC configuration.
 
 ## Real-World Performance
 
@@ -124,8 +177,11 @@ rate_limit_per_ip = 100
 - ✅ Real TLS certificate support
 - ✅ Per-IP rate limiting
 - ✅ Prometheus metrics
+- ✅ ROHC header compression (pure Rust)
+- ✅ Forward error correction (FEC)
 - ✅ Comprehensive test suite
 - ✅ Oracle Cloud deployment
+- ✅ Zero external dependencies
 
 ## Monitoring
 

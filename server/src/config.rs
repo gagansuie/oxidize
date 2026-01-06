@@ -30,10 +30,25 @@ pub struct Config {
     pub wireguard_port: Option<u16>,
     #[serde(default)]
     pub wireguard_private_key: Option<String>,
+
+    /// Enable ROHC (Robust Header Compression) for IP/UDP/TCP headers
+    #[serde(default = "default_enable_rohc")]
+    pub enable_rohc: bool,
+    /// Maximum packet size for ROHC compression
+    #[serde(default = "default_rohc_max_size")]
+    pub rohc_max_size: usize,
 }
 
 fn default_enable_wireguard() -> bool {
     false
+}
+
+fn default_enable_rohc() -> bool {
+    true
+}
+
+fn default_rohc_max_size() -> usize {
+    1500
 }
 
 fn default_rate_limit() -> usize {
@@ -62,6 +77,8 @@ impl Default for Config {
             enable_wireguard: false,
             wireguard_port: None,
             wireguard_private_key: None,
+            enable_rohc: true,
+            rohc_max_size: 1500,
         }
     }
 }

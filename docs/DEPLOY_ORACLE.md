@@ -387,6 +387,20 @@ df -h
 
 Stay under 10TB/month bandwidth to remain free.
 
+## Step 8: CI/CD (Optional)
+
+Automate deployments with GitHub Actions.
+
+### Quick Setup
+1. Generate SSH key: `ssh-keygen -t ed25519 -f ~/.ssh/oxidize_ci -N ""`
+2. Add to Oracle: `ssh-copy-id -i ~/.ssh/oxidize_ci.pub ubuntu@YOUR_IP`
+3. GitHub repo → Settings → Secrets:
+   - `ORACLE_HOST` = your IP
+   - `ORACLE_SSH_KEY` = `base64 -w 0 ~/.ssh/oxidize_ci`
+4. Workflows in `.github/workflows/` will auto-deploy on push
+
+Every `git push origin main` now deploys automatically.
+
 ## Next Steps
 
 - ✅ Setup automated backups (Oracle Cloud free)

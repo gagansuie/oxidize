@@ -7,10 +7,12 @@ use tracing::info;
 mod client;
 mod config;
 mod dns_cache;
+mod speedtest;
 mod tun_handler;
 
 use client::RelayClient;
 use config::ClientConfig;
+use speedtest::SpeedTest;
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-client")]
@@ -27,6 +29,14 @@ struct Args {
 
     #[arg(long)]
     no_tun: bool,
+
+    /// Run a speed test comparing direct vs relay connection
+    #[arg(long)]
+    speedtest: bool,
+
+    /// Output speed test results as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]
@@ -55,6 +65,19 @@ async fn main() -> Result<()> {
     });
 
     let server_addr: SocketAddr = args.server.parse()?;
+
+    // Run speed test if requested
+    if args.speedtest {
+        let speedtest = SpeedTest::new(server_addr);
+        let results = speedtest.run().await?;
+
+        if args.json {
+            results.print_json()?;
+        } else {
+            results.print_human();
+        }
+        return Ok(());
+    }
 
     info!("🔗 Connecting to relay server: {}", server_addr);
     info!(

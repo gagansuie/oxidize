@@ -39,3 +39,13 @@ tun_mtu = 1500
 # Enable header compression (experimental)
 # Further reduces overhead for small packets
 enable_header_compression = true
+
+# ROHC (Robust Header Compression) - RFC 3095
+# Compresses IP/UDP/TCP headers from ~40 bytes to 1-4 bytes
+# Best for: Gaming, VoIP, small packet workloads
+# Requires librohc to be installed (see docs/ROHC.md)
+enable_rohc = true
+
+# Maximum packet size for ROHC compression (bytes)
+# Larger packets use LZ4 only (headers are negligible overhead)
+rohc_max_size = 1500
