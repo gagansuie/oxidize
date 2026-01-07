@@ -347,11 +347,8 @@ impl SpeedTestResults {
 
         let mut positive_improvements = Vec::new();
         for (name, value, lower_is_better) in improvements {
-            let is_improvement = if lower_is_better {
-                value > 0.0
-            } else {
-                value > 0.0
-            };
+            let _ = lower_is_better; // Used for display logic elsewhere
+            let is_improvement = value > 0.0;
             if is_improvement && value.abs() > 1.0 {
                 positive_improvements.push(format!("{:.0}% better {}", value.abs(), name));
             }

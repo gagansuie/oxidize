@@ -295,7 +295,7 @@ impl TunHandler {
                 .join("\n");
 
             let mut child = Command::new("resolvconf")
-                .args(&["-a", &format!("{}.oxidize", self.tun_config.name)])
+                .args(["-a", &format!("{}.oxidize", self.tun_config.name)])
                 .stdin(std::process::Stdio::piped())
                 .spawn()?;
 
@@ -307,9 +307,8 @@ impl TunHandler {
         } else {
             // Backup and modify resolv.conf directly
             warn!("resolvconf not found, modifying /etc/resolv.conf directly");
-            let backup = std::fs::read_to_string("/etc/resolv.conf").ok();
-            if backup.is_some() {
-                std::fs::write("/etc/resolv.conf.oxidize.bak", backup.unwrap())?;
+            if let Some(backup) = std::fs::read_to_string("/etc/resolv.conf").ok() {
+                std::fs::write("/etc/resolv.conf.oxidize.bak", backup)?;
             }
 
             let new_config = dns
@@ -340,7 +339,7 @@ impl TunHandler {
         {
             // Get default gateway
             let output = Command::new("ip")
-                .args(&["route", "show", "default"])
+                .args(["route", "show", "default"])
                 .output()?;
             let route_output = String::from_utf8_lossy(&output.stdout);
             if let Some(gateway) = route_output.split_whitespace().nth(2) {
@@ -402,7 +401,7 @@ impl TunHandler {
 
             // Remove resolvconf entry if used
             let _ = Command::new("resolvconf")
-                .args(&["-d", &format!("{}.oxidize", self.tun_config.name)])
+                .args(["-d", &format!("{}.oxidize", self.tun_config.name)])
                 .output();
         }
 

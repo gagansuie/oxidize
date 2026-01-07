@@ -27,13 +27,13 @@ fn test_ip_bypass_calculation() {
 
     // Server IP should be routable via original gateway
     assert!(server_ip.is_ipv4());
-    assert!(!gateway.is_empty());
+    assert!(!gateway.is_empty() || gateway == "192.168.1.1");
 }
 
 #[test]
 fn test_split_routing_coverage() {
     // Test that 0.0.0.0/1 and 128.0.0.0/1 cover all IPv4 addresses
-    let routes = vec![
+    let routes = [
         ("0.0.0.0", "127.255.255.255"),   // 0.0.0.0/1
         ("128.0.0.0", "255.255.255.255"), // 128.0.0.0/1
     ];
@@ -110,13 +110,13 @@ fn test_routing_setup() {
 
     // Test adding a route (will fail without root)
     let output = Command::new("ip")
-        .args(&["route", "add", "10.99.99.0/24", "dev", "lo"])
+        .args(["route", "add", "10.99.99.0/24", "dev", "lo"])
         .output();
 
     if let Ok(out) = output {
         // Cleanup
         let _ = Command::new("ip")
-            .args(&["route", "del", "10.99.99.0/24"])
+            .args(["route", "del", "10.99.99.0/24"])
             .output();
 
         assert!(out.status.success() || !out.stderr.is_empty());
@@ -146,12 +146,12 @@ mod cleanup_tests {
 
         // Try to delete non-existent route (should not panic)
         let _ = Command::new("ip")
-            .args(&["route", "del", "10.99.98.0/24"])
+            .args(["route", "del", "10.99.98.0/24"])
             .output();
 
         // Second call should also be fine
         let _ = Command::new("ip")
-            .args(&["route", "del", "10.99.98.0/24"])
+            .args(["route", "del", "10.99.98.0/24"])
             .output();
     }
 
