@@ -30,6 +30,6 @@ fn test_config_defaults() {
 
     let config = Config::default();
     assert_eq!(config.max_connections, 10000);
-    assert_eq!(config.enable_compression, true);
+    assert!(config.enable_compression);
     assert_eq!(config.rate_limit_per_ip, 100);
 }
