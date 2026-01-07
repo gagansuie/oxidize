@@ -178,6 +178,10 @@ keepalive_interval = 30
 # DNS settings
 enable_dns_prefetch = true
 dns_cache_size = 1000
+
+# Additional domains to bypass (not routed through tunnel)
+# Useful for IDE/dev tools that break when tunneled
+# bypass_domains = ["example.com", "api.example.com"]
 EOF
         echo -e "${GREEN}Config created at $CONFIG_DIR/client.toml${NC}"
     else
@@ -334,9 +338,17 @@ uninstall() {
     rm -rf "$SERVICE_DIR/oxidize.service.d"
     rm -rf "$CONFIG_DIR"
     
+    # Remove firewall rules if UFW is present
+    if command -v ufw &> /dev/null; then
+        ufw delete allow out on oxidize0 2>/dev/null || true
+        ufw delete allow in on oxidize0 2>/dev/null || true
+    fi
+    
     # macOS
     launchctl unload /Library/LaunchDaemons/com.oxidize.client.plist 2>/dev/null || true
     rm -f /Library/LaunchDaemons/com.oxidize.client.plist
+    rm -f /var/log/oxidize.log
+    rm -f /var/log/oxidize.error.log
     
     systemctl daemon-reload 2>/dev/null || true
     

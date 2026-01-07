@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
@@ -16,13 +16,13 @@ use config::ClientConfig;
 use speedtest::SpeedTest;
 
 #[derive(Parser, Debug)]
-#[command(name = "relay-client")]
+#[command(name = "oxidize-client")]
 #[command(about = "Oxidize - High-performance Network Relay Client", long_about = None)]
 struct Args {
     #[arg(short, long)]
-    server: String,
+    server: Option<String>,
 
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, default_value = "/etc/oxidize/client.toml")]
     config: String,
 
     #[arg(short, long)]
@@ -38,11 +38,44 @@ struct Args {
     /// Output speed test results as JSON
     #[arg(long)]
     json: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Manage bypass domains (domains not routed through tunnel)
+    Bypass {
+        #[command(subcommand)]
+        action: BypassAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BypassAction {
+    /// Add a domain to bypass list
+    Add {
+        /// Domain to bypass (e.g., "example.com")
+        domain: String,
+    },
+    /// Remove a domain from bypass list
+    Remove {
+        /// Domain to remove from bypass list
+        domain: String,
+    },
+    /// List all configured bypass domains
+    List,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Handle bypass subcommand first (no logging needed)
+    if let Some(Command::Bypass { action }) = args.command {
+        return handle_bypass_command(action, &args.config);
+    }
 
     let filter = if args.verbose {
         "oxidize_client=trace,oxidize_common=debug"
@@ -68,7 +101,11 @@ async fn main() -> Result<()> {
         ClientConfig::default()
     });
 
-    let server_addr: SocketAddr = resolve_server_address(&args.server).await?;
+    // Server is required for running the client
+    let server = args
+        .server
+        .ok_or_else(|| anyhow::anyhow!("Server address is required. Use --server <address>"))?;
+    let server_addr: SocketAddr = resolve_server_address(&server).await?;
 
     // Run speed test if requested
     if args.speedtest {
@@ -120,6 +157,80 @@ async fn main() -> Result<()> {
         client.run().await?;
     }
 
+    Ok(())
+}
+
+fn handle_bypass_command(action: BypassAction, config_path: &str) -> Result<()> {
+    use oxidize_common::traffic_classifier::ClassifierConfig;
+    use std::path::Path;
+
+    // Load or create config
+    let mut config = if Path::new(config_path).exists() {
+        ClientConfig::load(config_path).unwrap_or_default()
+    } else {
+        ClientConfig::default()
+    };
+
+    // Get default bypass domains for reference
+    let default_config = ClassifierConfig::default();
+    let default_domains = default_config.bypass_domains;
+
+    match action {
+        BypassAction::Add { domain } => {
+            let domain = domain.to_lowercase();
+            if config.bypass_domains.contains(&domain) {
+                println!("Domain '{}' is already in bypass list", domain);
+            } else if default_domains.iter().any(|d| d == &domain) {
+                println!("Domain '{}' is already bypassed by default", domain);
+            } else {
+                config.bypass_domains.push(domain.clone());
+                save_config(&config, config_path)?;
+                println!("Added '{}' to bypass list", domain);
+            }
+        }
+        BypassAction::Remove { domain } => {
+            let domain = domain.to_lowercase();
+            if let Some(pos) = config.bypass_domains.iter().position(|d| d == &domain) {
+                config.bypass_domains.remove(pos);
+                save_config(&config, config_path)?;
+                println!("Removed '{}' from bypass list", domain);
+            } else if default_domains.iter().any(|d| d == &domain) {
+                println!("Cannot remove '{}' - it's a built-in default. Use force_tunnel_domains to override.", domain);
+            } else {
+                println!("Domain '{}' not found in bypass list", domain);
+            }
+        }
+        BypassAction::List => {
+            println!("=== Default Bypass Domains (built-in) ===");
+            for domain in &default_domains {
+                println!("  {}", domain);
+            }
+            println!("\n=== Custom Bypass Domains (from config) ===");
+            if config.bypass_domains.is_empty() {
+                println!("  (none)");
+            } else {
+                for domain in &config.bypass_domains {
+                    println!("  {}", domain);
+                }
+            }
+            println!("\nConfig file: {}", config_path);
+        }
+    }
+
+    Ok(())
+}
+
+fn save_config(config: &ClientConfig, path: &str) -> Result<()> {
+    use std::fs;
+    use std::path::Path;
+
+    // Ensure parent directory exists
+    if let Some(parent) = Path::new(path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let content = toml::to_string_pretty(config)?;
+    fs::write(path, content)?;
     Ok(())
 }
 

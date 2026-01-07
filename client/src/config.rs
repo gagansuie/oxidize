@@ -22,6 +22,10 @@ pub struct ClientConfig {
     /// Maximum packet size for ROHC compression (larger packets use LZ4 only)
     #[serde(default = "default_rohc_max_size")]
     pub rohc_max_size: usize,
+
+    /// Additional domains to bypass (not routed through tunnel)
+    #[serde(default)]
+    pub bypass_domains: Vec<String>,
 }
 
 fn default_enable_rohc() -> bool {
@@ -51,6 +55,7 @@ impl Default for ClientConfig {
             enable_header_compression: true,
             enable_rohc: true,
             rohc_max_size: 1500,
+            bypass_domains: vec![],
         }
     }
 }

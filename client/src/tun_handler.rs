@@ -52,7 +52,13 @@ pub struct TunHandler {
 
 impl TunHandler {
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let classifier_config = ClassifierConfig::default();
+        let mut classifier_config = ClassifierConfig::default();
+        // Merge user-configured bypass domains with defaults
+        for domain in &config.bypass_domains {
+            if !classifier_config.bypass_domains.contains(domain) {
+                classifier_config.bypass_domains.push(domain.clone());
+            }
+        }
         let bypass_domains = classifier_config.bypass_domains.clone();
 
         Ok(Self {

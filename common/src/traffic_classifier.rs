@@ -102,6 +102,27 @@ impl Default for ClassifierConfig {
                 // Spotify (audio streaming)
                 "spotify.com".into(),
                 "scdn.co".into(),
+                // IDE/Dev tools (prevent breaking AI assistants)
+                "codeium.com".into(),
+                "windsurf.ai".into(),
+                "cursor.sh".into(),
+                "cursor.so".into(),
+                "copilot.github.com".into(),
+                "githubcopilot.com".into(),
+                "tabnine.com".into(),
+                // Cloud databases (connection stability)
+                "mongodb.net".into(),
+                "mongodb.com".into(),
+                "supabase.co".into(),
+                "supabase.com".into(),
+                "planetscale.com".into(),
+                "firebaseio.com".into(),
+                // Cloud provider consoles/APIs
+                "aws.amazon.com".into(),
+                "amazonaws.com".into(),
+                "cloud.google.com".into(),
+                "googleapis.com".into(),
+                "azure.com".into(),
             ],
             force_tunnel_domains: vec![
                 // Privacy-sensitive - always tunnel
