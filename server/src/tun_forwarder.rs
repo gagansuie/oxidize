@@ -117,7 +117,7 @@ impl SharedTunForwarder {
         let count = self
             .write_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count % 1000 == 0 {
+        if count.is_multiple_of(1000) {
             info!(
                 "TUN write #{}: proto={} {}→{} ({} bytes)",
                 count,
@@ -192,7 +192,7 @@ fn run_tun_reader(
                     let _ = tx.blocking_send(packet);
                 }
             }
-        } else if count % 1000 == 0 {
+        } else if count.is_multiple_of(1000) {
             info!(
                 "📥 TUN read #{}: {}→{} (no mapping for dst)",
                 count,
