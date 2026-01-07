@@ -13,6 +13,29 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+/// Certificate verifier that accepts any certificate (for self-signed certs)
+struct SkipServerVerification;
+
+impl SkipServerVerification {
+    fn new() -> Arc<Self> {
+        Arc::new(Self)
+    }
+}
+
+impl rustls::client::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct RelayClient {
@@ -28,9 +51,10 @@ impl RelayClient {
     pub async fn new(server_addr: SocketAddr, config: ClientConfig) -> Result<Self> {
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
 
+        // Use custom verifier to accept self-signed certificates
         let mut crypto = rustls::ClientConfig::builder()
             .with_safe_defaults()
-            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_custom_certificate_verifier(SkipServerVerification::new())
             .with_no_client_auth();
 
         crypto.alpn_protocols = vec![b"relay/1".to_vec()];
@@ -105,6 +129,26 @@ impl RelayClient {
     }
 
     pub async fn run_with_tun(&self) -> Result<()> {
+        // CRITICAL: Verify connection works BEFORE setting up TUN routing
+        // Otherwise, if connection fails, all system traffic gets black-holed
+        info!("Verifying server connection before TUN setup...");
+
+        let test_connection = self.endpoint.connect(self.server_addr, "localhost")?.await;
+
+        match test_connection {
+            Ok(conn) => {
+                info!("✅ Server connection verified");
+                conn.close(0u32.into(), b"test complete");
+            }
+            Err(e) => {
+                error!("❌ Cannot connect to server: {}", e);
+                error!("TUN setup aborted to prevent system lockup.");
+                error!("Fix the connection issue first, then retry.");
+                return Err(anyhow::anyhow!("Server connection failed: {}", e));
+            }
+        }
+
+        // Connection verified - now safe to set up TUN
         let mut tun_handler =
             TunHandler::new(self.config.clone())?.with_server_ip(self.server_addr.ip());
         let (tx, mut rx) = mpsc::channel(self.config.max_packet_queue);
