@@ -54,19 +54,19 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache target directory
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
@@ -99,7 +99,7 @@ jobs:
           fi
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: oxidize-${{ matrix.target }}
           path: |
@@ -155,7 +155,7 @@ jobs:
 
       - name: Download all artifacts
         if: steps.check_tag.outputs.should_release == 'true'
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
