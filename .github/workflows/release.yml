@@ -63,7 +63,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --package relay-client
 
       - name: Get version from Cargo.toml
         id: version
@@ -92,7 +92,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: oxidize-${{ matrix.target }}
+          name: oxidize-client-${{ steps.version.outputs.version }}-${{ matrix.target }}
           path: |
             *.tar.gz
             *.zip

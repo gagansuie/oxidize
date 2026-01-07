@@ -1,6 +1,6 @@
 #!/bin/bash
 # Oxidize Client Installer - One-Click Install
-# Usage: curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- SERVER:PORT
+# Usage: curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
 
 set -e
 
@@ -8,7 +8,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/oxidize"
 SERVICE_DIR="/etc/systemd/system"
 BINARY_NAME="oxidize-client"
-SERVER_ADDR=""
+SERVER_ADDR="oxd.sh:4433"
 
 # Colors
 RED='\033[0;31m'
@@ -26,34 +26,8 @@ print_banner() {
     echo -e "${NC}"
 }
 
-get_server_address() {
-    # Check if server address was passed as argument
-    if [ -n "$1" ] && [ "$1" != "uninstall" ]; then
-        SERVER_ADDR="$1"
-        echo -e "${GREEN}Server address: $SERVER_ADDR${NC}"
-        return
-    fi
-    
-    # Prompt user for server address
-    echo -e "${YELLOW}Enter your Oxidize relay server address:${NC}"
-    echo -e "${BLUE}(e.g., relay.example.com:4433 or 123.45.67.89:4433)${NC}"
-    echo ""
-    read -p "Server address: " SERVER_ADDR
-    
-    if [ -z "$SERVER_ADDR" ]; then
-        echo -e "${RED}Error: Server address is required.${NC}"
-        echo "Usage: $0 SERVER:PORT"
-        echo "Example: $0 relay.example.com:4433"
-        exit 1
-    fi
-    
-    # Validate format (basic check)
-    if [[ ! "$SERVER_ADDR" =~ :[0-9]+$ ]]; then
-        echo -e "${YELLOW}Warning: No port specified, using default :4433${NC}"
-        SERVER_ADDR="${SERVER_ADDR}:4433"
-    fi
-    
-    echo -e "${GREEN}Server address: $SERVER_ADDR${NC}"
+show_server_info() {
+    echo -e "${GREEN}Server: $SERVER_ADDR${NC}"
 }
 
 check_root() {
@@ -376,7 +350,7 @@ main() {
     fi
     
     check_root
-    get_server_address "$1"
+    show_server_info
     detect_os
     install_dependencies
     download_binary
