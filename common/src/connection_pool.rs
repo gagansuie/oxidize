@@ -340,9 +340,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_limits() {
-        let mut config = PoolConfig::default();
-        config.max_per_endpoint = 2;
-        config.max_total = 3;
+        let config = PoolConfig {
+            max_per_endpoint: 2,
+            max_total: 3,
+            ..Default::default()
+        };
 
         let pool = ConnectionPool::new(config);
         let endpoint1 = "127.0.0.1:4433".parse().unwrap();

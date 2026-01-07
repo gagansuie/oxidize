@@ -434,10 +434,11 @@ mod tests {
 
     #[test]
     fn test_loss_handling() {
-        let mut cc = CongestionController::default();
-        cc.cwnd = 100 * 1460;
-        // Need some packets sent to have a meaningful loss rate
-        cc.packets_sent = 100;
+        let mut cc = CongestionController {
+            cwnd: 100 * 1460,
+            packets_sent: 100,
+            ..Default::default()
+        };
 
         cc.on_loss(1460);
 

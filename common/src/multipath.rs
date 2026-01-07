@@ -314,9 +314,11 @@ mod tests {
 
     #[test]
     fn test_path_metrics_score() {
-        let mut metrics = PathMetrics::default();
-        metrics.rtt_ms = 50.0;
-        metrics.loss_rate = 0.01;
+        let metrics = PathMetrics {
+            rtt_ms: 50.0,
+            loss_rate: 0.01,
+            ..Default::default()
+        };
 
         let score = metrics.score();
         assert!(score > 0.5); // Good path should have high score
@@ -329,11 +331,15 @@ mod tests {
         let path1 = make_path(5000);
         let path2 = make_path(5001);
 
-        let mut metrics1 = PathMetrics::default();
-        metrics1.rtt_ms = 20.0;
+        let metrics1 = PathMetrics {
+            rtt_ms: 20.0,
+            ..Default::default()
+        };
 
-        let mut metrics2 = PathMetrics::default();
-        metrics2.rtt_ms = 100.0;
+        let metrics2 = PathMetrics {
+            rtt_ms: 100.0,
+            ..Default::default()
+        };
 
         scheduler.add_path(path1, metrics1);
         scheduler.add_path(path2, metrics2);
@@ -350,8 +356,10 @@ mod tests {
         let path1 = make_path(5000);
         let path2 = make_path(5001);
 
-        let mut metrics1 = PathMetrics::default();
-        metrics1.loss_rate = 0.8; // Unhealthy
+        let metrics1 = PathMetrics {
+            loss_rate: 0.8, // Unhealthy
+            ..Default::default()
+        };
 
         let metrics2 = PathMetrics::default(); // Healthy
 
