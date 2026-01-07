@@ -22,7 +22,7 @@ You → Congested ISP routes → Destination
 (120ms, 2% packet loss)
 
 ✅ Via Oxidize:
-You → QUIC tunnel → Oracle backbone → Premium peering → Destination
+You → QUIC tunnel → Fly.io edge → Premium peering → Destination
 (80ms, 0% packet loss)
 ```
 
@@ -33,7 +33,7 @@ Oxidize uses a simple **client-server model**:
 ```
 ┌─────────────────┐         ┌─────────────────┐
 │   Your Device   │  QUIC   │  Relay Server   │
-│                 │ ──────► │  (Oracle Cloud) │ ──────► Internet
+│                 │ ──────► │    (Fly.io)     │ ──────► Internet
 │  oxidize-client │         │  oxidize-server │
 └─────────────────┘         └─────────────────┘
 ```
@@ -146,7 +146,7 @@ Sample output:
 curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
 
 # Or specify server directly
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- relay.example.com:4433
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- oxd.sh:4433
 ```
 
 The installer handles everything: downloads binary, configures service, and starts automatically.
@@ -159,14 +159,14 @@ The installer handles everything: downloads binary, configures service, and star
 # Build
 cargo build --release
 
-# Run server (on your Oracle/cloud instance)
+# Run server (on your Fly.io/cloud instance)
 ./target/release/oxidize-server --listen 0.0.0.0:4433
 
 # Run client (on your device)
-./target/release/oxidize-client --server SERVER_IP:4433
+./target/release/oxidize-client --server oxd.sh:4433
 
 # Run speed test to verify improvement
-./target/release/oxidize-client --server SERVER_IP:4433 --speedtest
+./target/release/oxidize-client --server oxd.sh:4433 --speedtest
 ```
 
 ## Why This Works
@@ -179,10 +179,10 @@ Consumer ISP Routing:
 - No QoS guarantees
 - Variable packet loss
 
-Oracle Cloud Backbone:
+Fly.io Edge Network:
 - Premium peering with major networks
-- Low-latency backbone routes
-- 10TB/month free bandwidth
+- Low-latency global edge locations
+- Simple scaling to multiple regions
 - Enterprise SLAs
 ```
 
@@ -254,7 +254,7 @@ enable_priority_scheduler = true
 - ✅ Predictive prefetching
 - ✅ DDoS protection & auto-blocking
 - ✅ Comprehensive test suite (70+ tests)
-- ✅ Oracle Cloud Free Tier deployment
+- ✅ Fly.io deployment (~$5/mo)
 - ✅ One-click client installer
 - ✅ Smart traffic classification
 - ✅ Zero external dependencies
@@ -268,7 +268,7 @@ curl http://localhost:9090/metrics
 
 ## Deployment
 
-See [DEPLOY_ORACLE.md](DEPLOY_ORACLE.md) for production deployment guide.
+See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 ## Documentation
 
@@ -276,7 +276,7 @@ See [DEPLOY_ORACLE.md](DEPLOY_ORACLE.md) for production deployment guide.
 - [TUN.md](docs/TUN.md) - Full system tunneling (VPN-like mode)
 - [STREAMING.md](docs/STREAMING.md) - Streaming service compatibility (Netflix, etc.)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [DEPLOY_ORACLE.md](docs/DEPLOY_ORACLE.md) - Server deployment guide
+- [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io)
 
 ## Testing
 

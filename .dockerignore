@@ -1,0 +1,24 @@
+# flyctl launch added from .gitignore
+# Rust
+target
+**/**/*.rs.bk
+**/*.pdb
+# Keep Cargo.lock for reproducible builds
+
+# IDE
+**/.vscode
+**/.idea
+**/*.swp
+**/*.swo
+**/*~
+
+# OS
+**/.DS_Store
+**/Thumbs.db
+
+# Config with secrets
+**/*.key
+**/*.pem
+**/*.crt
+**/production.toml
+fly.toml

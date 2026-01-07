@@ -99,8 +99,8 @@ match security.check_connection(client_ip) {
 For volumetric attacks, use upstream protection:
 
 ```bash
-# Oracle Cloud - Free DDoS protection
-# Included with Oracle Cloud Infrastructure
+# Fly.io - Built-in DDoS protection
+# Included with Fly.io infrastructure
 
 # Cloudflare Spectrum (paid)
 # Proxies UDP/TCP through Cloudflare's network

@@ -8,7 +8,7 @@ Complete setup guide for **desktop** and **mobile** devices.
 
 ```bash
 # Install and auto-start
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- YOUR_SERVER:4433
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- oxd.sh:4433
 ```
 
 ### Manual Install
@@ -42,10 +42,10 @@ sudo mv oxidize-client /usr/local/bin/
 
 ```bash
 # Test your connection
-oxidize-client --server YOUR_SERVER:4433 --speedtest
+oxidize-client --server oxd.sh:4433 --speedtest
 
 # Run with TUN (routes all traffic)
-sudo oxidize-client --server YOUR_SERVER:4433
+sudo oxidize-client --server oxd.sh:4433
 ```
 
 ---
@@ -71,7 +71,7 @@ wireguard_private_key = "YOUR_KEY"
 
 Generate keys:
 ```bash
-./oxidize-server --generate-wg-config --wg-endpoint YOUR_SERVER_IP:51820
+./oxidize-server --generate-wg-config --wg-endpoint oxd.sh:51820
 ```
 
 Open firewall:
@@ -84,7 +84,7 @@ sudo iptables -I INPUT -p udp --dport 51820 -j ACCEPT
 Generate QR on server:
 ```bash
 sudo apt install qrencode
-./oxidize-server --generate-wg-config --wg-endpoint YOUR_IP:51820 | tail -n +10 | qrencode -t ansiutf8
+./oxidize-server --generate-wg-config --wg-endpoint oxd.sh:51820 | tail -n +10 | qrencode -t ansiutf8
 ```
 
 On mobile:
@@ -104,7 +104,7 @@ DNS = 1.1.1.1
 
 [Peer]
 PublicKey = SERVER_PUBLIC_KEY
-Endpoint = YOUR_SERVER_IP:51820
+Endpoint = oxd.sh:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 ```
@@ -163,7 +163,7 @@ cargo build --release
 ```bash
 # Desktop
 oxidize-client --version
-oxidize-client --server YOUR_SERVER:4433 --speedtest
+oxidize-client --server oxd.sh:4433 --speedtest
 
 # Mobile
 # Check WireGuard app shows "Active" status
@@ -174,6 +174,6 @@ oxidize-client --server YOUR_SERVER:4433 --speedtest
 
 ## Next Steps
 
-- [Deploy Server](DEPLOY_ORACLE.md) - Set up your relay server
+- [Deploy Server](DEPLOY.md) - Set up your relay server on Fly.io
 - [Security Guide](SECURITY.md) - Harden your setup
 - [Streaming Guide](STREAMING.md) - Netflix/streaming compatibility

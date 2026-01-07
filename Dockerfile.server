@@ -1,0 +1,63 @@
+# Oxidize Relay Server - Production Dockerfile
+FROM rust:1.83-slim-bookworm AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+COPY common/Cargo.toml common/
+COPY server/Cargo.toml server/
+COPY client/Cargo.toml client/
+
+# Create dummy source files for dependency caching
+RUN mkdir -p common/src server/src client/src common/benches \
+    && echo "pub fn dummy() {}" > common/src/lib.rs \
+    && echo "fn main() {}" > server/src/main.rs \
+    && echo "fn main() {}" > client/src/main.rs \
+    && echo "fn main() {}" > common/benches/perf_bench.rs
+
+# Build dependencies only (cached layer)
+RUN cargo build --release --package relay-server || true
+
+# Copy actual source code
+COPY common/src common/src
+COPY server/src server/src
+
+# Build the server
+RUN touch common/src/lib.rs server/src/main.rs \
+    && cargo build --release --package relay-server
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the built binary
+COPY --from=builder /app/target/release/oxidize-server /usr/local/bin/
+
+# Generate self-signed certs for QUIC (replace with real certs in production)
+RUN apt-get update && apt-get install -y openssl && \
+    openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes \
+    -subj "/CN=oxidize-relay" && \
+    apt-get remove -y openssl && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Expose QUIC port
+EXPOSE 4433/udp
+EXPOSE 4433/tcp
+EXPOSE 9090/tcp
+
+ENV RUST_LOG=info
+
+CMD ["oxidize-server", "--listen", "0.0.0.0:4433", "--metrics-addr", "0.0.0.0:9090"]

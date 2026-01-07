@@ -1,0 +1,41 @@
+# fly.toml app configuration file generated for oxidize-relay on 2026-01-06T16:14:41-06:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'oxidize-relay'
+primary_region = 'ord'
+
+[build]
+  dockerfile = 'Dockerfile.server'
+
+[env]
+  OXIDIZE_PORT = '4433'
+  RUST_LOG = 'info'
+
+[[services]]
+  protocol = 'udp'
+  internal_port = 4433
+
+  [[services.ports]]
+    port = 4433
+
+[[services]]
+  protocol = 'tcp'
+  internal_port = 4433
+
+  [[services.ports]]
+    port = 4433
+
+[[services]]
+  protocol = 'tcp'
+  internal_port = 9090
+
+  [[services.ports]]
+    port = 9090
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
