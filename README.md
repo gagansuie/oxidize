@@ -40,7 +40,7 @@ Your ISP's routing is suboptimal:
 └─────────────────┘         └─────────────────┘
 ```
 
-- **Your relay, your traffic** — no peer-to-peer, no bandwidth sharing
+- **Dedicated infrastructure** — no peer-to-peer, no bandwidth sharing with strangers
 - **Smart routing** — gaming tunneled, streaming bypassed for zero latency
 
 ## Perfect For
@@ -205,7 +205,7 @@ enable_priority_scheduler = true
 
 ## Production Ready
 
-✅ TLS 1.3 &nbsp;·&nbsp; ✅ Rate limiting &nbsp;·&nbsp; ✅ Prometheus metrics &nbsp;·&nbsp; ✅ DDoS protection &nbsp;·&nbsp; ✅ 70+ tests &nbsp;·&nbsp; ✅ Zero external deps &nbsp;·&nbsp; ✅ ~$5/mo on Fly.io
+✅ TLS 1.3 &nbsp;·&nbsp; ✅ Rate limiting &nbsp;·&nbsp; ✅ Prometheus metrics &nbsp;·&nbsp; ✅ DDoS protection &nbsp;·&nbsp; ✅ 70+ tests &nbsp;·&nbsp; ✅ Zero external deps
 
 ## Monitoring
 
