@@ -7,6 +7,7 @@ use oxidize_common::benchmark::{BenchmarkComparison, Benchmarker, ThroughputBenc
 use oxidize_common::compression::{compress_data, decompress_data};
 use oxidize_common::fec::FecEncoder;
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
+use oxidize_common::parallel_compression::ParallelCompressor;
 use oxidize_common::security::{
     generate_challenge, validate_packet, verify_challenge, SecurityConfig, SecurityManager,
 };
@@ -28,6 +29,7 @@ static ROHC_RATIO: AtomicU64 = AtomicU64::new(0);
 static MEMORY_SUSTAINED_OPS: AtomicU64 = AtomicU64::new(0);
 static NETWORK_SIM_LATENCY: AtomicU64 = AtomicU64::new(0);
 static SECURITY_CHECK_NS: AtomicU64 = AtomicU64::new(0);
+static PARALLEL_COMPRESSION_THROUGHPUT: AtomicU64 = AtomicU64::new(0);
 
 fn main() {
     println!("╔════════════════════════════════════════════════════════════════╗");
@@ -35,6 +37,7 @@ fn main() {
     println!("╚════════════════════════════════════════════════════════════════╝\n");
 
     bench_compression();
+    bench_parallel_compression();
     bench_fec();
     bench_adaptive_fec();
     bench_buffer_pool();
@@ -104,6 +107,67 @@ fn bench_compression() {
     }));
 
     println!("{}", decomp_comparison.format_table());
+}
+
+fn bench_parallel_compression() {
+    println!("## Parallel Compression Benchmarks (Multi-threaded)\n");
+
+    let compressor = ParallelCompressor::new(100);
+    let _bench = Benchmarker::new(50, 500);
+
+    // Create batch of packets for parallel compression
+    let packets: Vec<Vec<u8>> = (0..64).map(|i| vec![i as u8; 1400]).collect();
+
+    // Single-threaded baseline (process one at a time)
+    let single_start = std::time::Instant::now();
+    for _ in 0..100 {
+        for packet in &packets {
+            let _ = compress_data(packet);
+        }
+    }
+    let single_duration = single_start.elapsed();
+    let single_throughput = (100 * 64 * 1400) as f64 / single_duration.as_secs_f64() / 1_000_000.0;
+
+    // Parallel compression (batch all at once)
+    let parallel_start = std::time::Instant::now();
+    for _ in 0..100 {
+        let _ = compressor.compress_batch(&packets);
+    }
+    let parallel_duration = parallel_start.elapsed();
+    let parallel_throughput =
+        (100 * 64 * 1400) as f64 / parallel_duration.as_secs_f64() / 1_000_000.0;
+
+    let speedup = parallel_throughput / single_throughput;
+    let num_cores = rayon::current_num_threads();
+
+    println!("Batch size: 64 packets × 1400 bytes = 89.6 KB per batch");
+    println!("CPU cores available: {}", num_cores);
+    println!();
+    println!("┌─────────────────────────────────────────────────────────────────┐");
+    println!("│              Parallel vs Single-Threaded LZ4                    │");
+    println!("├───────────────────────┬───────────────────────┬─────────────────┤");
+    println!("│ Mode                  │ Throughput            │ Speedup         │");
+    println!("├───────────────────────┼───────────────────────┼─────────────────┤");
+    println!(
+        "│ Single-threaded       │ {:>8.1} MB/s         │ baseline        │",
+        single_throughput
+    );
+    println!(
+        "│ Parallel ({} cores)    │ {:>8.1} MB/s         │ {:.1}x           │",
+        num_cores, parallel_throughput, speedup
+    );
+    println!("└───────────────────────┴───────────────────────┴─────────────────┘");
+    println!();
+
+    // Calculate max supported line rate
+    let gbps_supported = parallel_throughput * 8.0 / 1000.0;
+    println!(
+        "📊 Max line rate with compression: {:.1} Gbps",
+        gbps_supported
+    );
+    println!();
+
+    PARALLEL_COMPRESSION_THROUGHPUT.store((parallel_throughput * 10.0) as u64, Ordering::Relaxed);
 }
 
 fn bench_fec() {

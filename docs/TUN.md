@@ -22,7 +22,8 @@ Oxidize supports full system traffic tunneling via a TUN (network tunnel) interf
                                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Oxidize Client                            │
-│  • Reads packets from TUN                                    │
+│  • Reads packets from TUN (batched)                         │
+│  • Classifies traffic (gaming→datagrams, other→streams)     │
 │  • Compresses with LZ4/ROHC                                 │
 │  • Encrypts with QUIC/TLS 1.3                               │
 │  • Sends to relay server                                    │
@@ -32,7 +33,9 @@ Oxidize supports full system traffic tunneling via a TUN (network tunnel) interf
 ┌─────────────────────────────────────────────────────────────┐
 │                    Oxidize Relay Server                      │
 │  • Decrypts traffic                                         │
-│  • Forwards to destination                                  │
+│  • Handles streams + datagrams in parallel                  │
+│  • Batched TUN writes (10-50x syscall reduction)            │
+│  • Forwards to destination via NAT                          │
 │  • Returns responses                                        │
 └─────────────────────────────────────────────────────────────┘
                           │
@@ -117,6 +120,19 @@ buffer_size = 65536
 max_packet_queue = 10000
 reconnect_interval = 5
 keepalive_interval = 30
+
+# === MASQUE-inspired performance (NEW) ===
+
+# QUIC datagrams for real-time traffic
+enable_datagrams = true
+realtime_ports = [3074, 3478, 27015, 7777, 5060]
+
+# 0-RTT session resumption
+enable_0rtt = true
+session_cache_path = "/tmp/oxidize-session-cache"
+
+# Connection migration
+enable_migration = true
 ```
 
 ### TUN-Specific Options
@@ -233,6 +249,66 @@ ip route show | grep <server-ip>  # Should show via original gateway
 3. **Buffer Sizing**: Increase `max_packet_queue` for high-throughput scenarios
 
 4. **Keepalive**: Adjust `keepalive_interval` based on NAT timeout (usually 30-60s)
+
+5. **QUIC Datagrams**: Enable for gaming/VoIP to bypass head-of-line blocking (see below)
+
+## MASQUE-Inspired Optimizations (NEW)
+
+Oxidize implements several optimizations inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-warp-with-a-masque/):
+
+### Batched TUN I/O
+
+Packet writes are batched to reduce syscall overhead:
+
+```
+Without batching: write() write() write() write()  (4 syscalls)
+With batching:    batch → flush()                   (1 syscall)
+```
+
+**Impact:** 10-50x fewer syscalls on high packet rates.
+
+### QUIC Datagrams for Real-time Traffic
+
+Gaming and VoIP traffic uses QUIC datagrams instead of streams:
+
+```toml
+# Enable in client config
+enable_datagrams = true
+
+# Ports that use datagrams
+realtime_ports = [
+    3074, 3478,  # Xbox Live
+    3658, 3659,  # PlayStation
+    27015,       # Steam
+    7777,        # Unreal Engine
+    5060, 5061,  # SIP/VoIP
+]
+```
+
+**Why it matters:** Stream packets are delivered in order. If packet 1 is lost, packets 2-3 wait. Datagrams deliver immediately without blocking.
+
+### 0-RTT Session Resumption
+
+Reconnections skip TLS handshake using cached session tickets:
+
+```toml
+enable_0rtt = true
+session_cache_path = "/tmp/oxidize-session-cache"
+```
+
+**Impact:** Instant reconnects instead of 1-2 RTT delay.
+
+### Connection Migration
+
+QUIC connections survive IP changes (WiFi → cellular):
+
+```toml
+enable_migration = true
+```
+
+**Impact:** Zero reconnect delay when switching networks.
+
+See the **Performance Tips** section above and [README](../README.md) for more details.
 
 ## Security Considerations
 

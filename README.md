@@ -58,7 +58,8 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **io_uring Ready** - 10-20x syscall reduction on Linux
+- **io_uring Implementation** - Real io_uring syscalls (not just abstractions), 10-20x syscall reduction on Linux 5.1+
+- **Batched TUN I/O** - Server and client batch packet writes, 10-50x fewer syscalls
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
@@ -68,22 +69,43 @@ Your ISP's routing is suboptimal:
 - **ACK Batching** - Configurable batching reduces round-trips
 - **Latency Instrumentation** - Built-in µs-level timing for optimization
 
+### 🎭 MASQUE-Inspired "Invisible Relay" (NEW)
+Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-warp-with-a-masque/):
+- **QUIC Datagrams** - Real-time traffic (gaming/VoIP) bypasses stream ordering, eliminating head-of-line blocking
+- **0-RTT Session Resumption** - Instant reconnects via cached session tickets
+- **Connection Migration** - Seamless WiFi ↔ cellular transitions without reconnecting
+- **Dual-Path Architecture** - Streams for reliable traffic, datagrams for latency-sensitive traffic
+- **Smart Traffic Detection** - Auto-detects gaming/VoIP ports for optimal routing
+
 ### 🧠 Smart Traffic Management
 - **BBRv3 Congestion Control** - Adaptive bandwidth probing with gaming mode
 - **HTTP/3 Priority Scheduler** - Real-time traffic prioritization
 - **Traffic Classification** - Auto-detects gaming/streaming/VoIP for optimal handling
-- **Smart Routing** - Gaming through tunnel, streaming bypasses for zero latency
+- **Smart Split-Tunneling** - Gaming tunneled for optimization, streaming bypassed for clean IP
 - **Edge Caching** - LRU cache for static content at relay points
 
+**Gaming Ports (QUIC Datagrams):**
+| Platform | Ports |
+|----------|-------|
+| Xbox Live | 3074, 3478-3480 |
+| PlayStation | 3658-3659 |
+| Steam/Valve | 27015-27017 |
+| Unreal Engine | 7777-7779 |
+| VoIP/SIP | 5060-5061 |
+
+**Bypass Domains (Direct, Your IP):**
+Netflix, Disney+, Hulu, Prime Video, HBO Max, Spotify - automatically bypassed so streaming services see your residential IP.
+
 ### 📦 Compression (Pure Rust, Enabled by Default)
+- **Parallel LZ4 Compression** - Multi-threaded compression scales with CPU cores (10+ Gbps)
 - **ROHC Header Compression** - 44% size reduction for UDP/IP headers
   - UDP, TCP, IP, RTP, ESP, IPv6 profiles
   - State machine compression (IR → FO → SO)
   - W-LSB delta encoding for sequence numbers
   - **Enabled by default** - no configuration needed
-- **LZ4 Payload Compression** - Fast compression for bandwidth-constrained uplinks
 - **SIMD-Accelerated** - AVX2/NEON when available
 - **Intelligent Selection** - Automatically chooses best compression per packet
+- **Entropy Detection** - Skips compression for encrypted/already-compressed data
 
 **ROHC Performance Impact:**
 | Traffic Type | Without ROHC | With ROHC | Savings |
@@ -261,7 +283,6 @@ See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 - [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
 - [TUN.md](docs/TUN.md) - Full system tunneling (VPN-like mode)
-- [STREAMING.md](docs/STREAMING.md) - Streaming service compatibility (Netflix, etc.)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
 - [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io)
 

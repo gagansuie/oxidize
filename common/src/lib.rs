@@ -27,6 +27,12 @@ pub mod rohc;
 #[cfg(target_os = "linux")]
 pub mod io_uring_support;
 
+#[cfg(target_os = "linux")]
+pub mod io_uring_impl;
+
+pub mod high_perf_tun;
+pub mod parallel_compression;
+
 pub use compression::*;
 pub use metrics::*;
 pub use packet::*;

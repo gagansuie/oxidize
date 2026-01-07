@@ -5,8 +5,13 @@ use oxidize_common::traffic_classifier::{
 use std::net::{IpAddr, Ipv4Addr};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+/// Batch configuration for TUN writes
+const WRITE_BATCH_SIZE: usize = 32;
+const WRITE_BATCH_FLUSH_US: u64 = 200; // 200 microseconds
 
 use crate::config::ClientConfig;
 
@@ -453,16 +458,26 @@ impl TunHandler {
         let dev = self.setup().await?;
         let mtu = self.config.tun_mtu;
 
-        // Duplicate fd for separate read/write (avoid lock contention)
-        use std::os::unix::io::{AsRawFd, FromRawFd};
-        let raw_fd = dev.as_raw_fd();
-        let write_fd = unsafe { libc::dup(raw_fd) };
-        if write_fd < 0 {
-            return Err(anyhow::anyhow!("Failed to dup TUN fd"));
-        }
-        let write_file = Arc::new(std::sync::Mutex::new(unsafe {
-            std::fs::File::from_raw_fd(write_fd)
-        }));
+        // On Unix: duplicate fd for separate read/write (avoid lock contention)
+        // On Windows: use shared device directly (wintun doesn't support handle duplication)
+        #[cfg(unix)]
+        let write_file: Option<Arc<std::sync::Mutex<std::fs::File>>> = {
+            use std::os::unix::io::{AsRawFd, FromRawFd};
+            let raw_fd = dev.as_raw_fd();
+            let write_fd = unsafe { libc::dup(raw_fd) };
+            if write_fd < 0 {
+                return Err(anyhow::anyhow!("Failed to dup TUN fd"));
+            }
+            Some(Arc::new(std::sync::Mutex::new(unsafe {
+                std::fs::File::from_raw_fd(write_fd)
+            })))
+        };
+
+        #[cfg(windows)]
+        let write_file: Option<Arc<std::sync::Mutex<std::fs::File>>> = None;
+
+        // On Windows, we'll use a shared device for both read and write
+        let shared_dev = Arc::new(std::sync::Mutex::new(dev));
 
         // Setup cleanup on Ctrl+C
         let cleanup_handler = self.clone_for_cleanup();
@@ -479,27 +494,73 @@ impl TunHandler {
         let classifier = self.classifier.clone();
         let dns_detector = self.dns_detector.clone();
 
-        // Spawn writer task for response packets from server
+        // Spawn batched writer task for response packets from server
+        // Batching reduces syscall overhead by writing multiple packets per lock acquire
         let write_file_clone = write_file.clone();
+        let shared_dev_write = shared_dev.clone();
         tokio::spawn(async move {
-            use std::io::Write;
-            while let Some(packet) = rx.recv().await {
-                if let Ok(mut file) = write_file_clone.lock() {
-                    if let Err(e) = file.write_all(&packet) {
-                        error!("TUN write error: {}", e);
+            let mut batch: Vec<Vec<u8>> = Vec::with_capacity(WRITE_BATCH_SIZE);
+            let mut last_flush = Instant::now();
+            let flush_interval = Duration::from_micros(WRITE_BATCH_FLUSH_US);
+            let mut packets_written: u64 = 0;
+            let mut batches_written: u64 = 0;
+
+            loop {
+                // Use timeout to ensure periodic flushing
+                let timeout =
+                    tokio::time::timeout(Duration::from_micros(WRITE_BATCH_FLUSH_US), rx.recv())
+                        .await;
+
+                match timeout {
+                    Ok(Some(packet)) => {
+                        batch.push(packet);
+                    }
+                    Ok(None) => {
+                        // Channel closed, flush and exit
+                        if !batch.is_empty() {
+                            flush_tun_batch(&batch, &write_file_clone, &shared_dev_write);
+                        }
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - flush if we have data
+                    }
+                }
+
+                // Flush if batch is full or enough time has passed
+                let should_flush = batch.len() >= WRITE_BATCH_SIZE
+                    || (!batch.is_empty() && last_flush.elapsed() >= flush_interval);
+
+                if should_flush {
+                    flush_tun_batch(&batch, &write_file_clone, &shared_dev_write);
+                    packets_written += batch.len() as u64;
+                    batches_written += 1;
+                    batch.clear();
+                    last_flush = Instant::now();
+
+                    // Log stats periodically
+                    if batches_written % 1000 == 0 {
+                        let avg_batch = packets_written as f64 / batches_written as f64;
+                        debug!(
+                            "TUN write stats: {} packets, {} batches, avg {:.1} per batch",
+                            packets_written, batches_written, avg_batch
+                        );
                     }
                 }
             }
         });
 
         // Spawn blocking reader for TUN device
-        let mut dev = dev;
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut buffer = vec![0u8; mtu + 4];
 
             loop {
-                match dev.read(&mut buffer) {
+                let result = {
+                    let mut dev = shared_dev.lock().unwrap();
+                    dev.read(&mut buffer)
+                };
+                match result {
                     Ok(len) if len > 0 => {
                         let packet = buffer[..len].to_vec();
                         if raw_tx.blocking_send(packet).is_err() {
@@ -620,4 +681,39 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Flush a batch of packets to the TUN device
+/// This reduces syscall overhead by writing multiple packets per lock acquire
+fn flush_tun_batch(
+    batch: &[Vec<u8>],
+    write_file: &Option<Arc<std::sync::Mutex<std::fs::File>>>,
+    shared_dev: &Arc<std::sync::Mutex<tun::platform::Device>>,
+) {
+    use std::io::Write;
+
+    if batch.is_empty() {
+        return;
+    }
+
+    // Use duplicated fd on Unix, shared device on Windows
+    if let Some(ref wf) = write_file {
+        if let Ok(mut file) = wf.lock() {
+            for packet in batch {
+                if let Err(e) = file.write_all(packet) {
+                    tracing::error!("TUN batch write error: {}", e);
+                    break;
+                }
+            }
+        }
+    } else {
+        if let Ok(mut dev) = shared_dev.lock() {
+            for packet in batch {
+                if let Err(e) = dev.write_all(packet) {
+                    tracing::error!("TUN batch write error: {}", e);
+                    break;
+                }
+            }
+        }
+    }
 }

@@ -49,3 +49,46 @@ enable_rohc = true
 # Maximum packet size for ROHC compression (bytes)
 # Larger packets use LZ4 only (headers are negligible overhead)
 rohc_max_size = 1500
+
+# === MASQUE-INSPIRED PERFORMANCE OPTIONS ===
+# These options make the relay feel invisible by optimizing
+# connection speed and real-time traffic handling
+
+# Enable 0-RTT session resumption for instant reconnects
+# Saves ~1 RTT on reconnection by caching session tickets
+enable_0rtt = true
+
+# Path to session ticket cache file
+session_cache_path = "/tmp/oxidize-session-cache"
+
+# Enable QUIC datagrams for real-time traffic (gaming/VoIP)
+# Datagrams bypass stream ordering = no head-of-line blocking
+# Result: Ultra-low latency for gaming/VoIP traffic
+enable_datagrams = true
+
+# Latency threshold (ms) - use datagrams for latency-sensitive traffic
+datagram_latency_threshold_ms = 50
+
+# Enable connection migration for seamless IP changes
+# Maintains connection when switching WiFi -> cellular, etc.
+enable_migration = true
+
+# Enable multiplexed streams by traffic type
+# Separates bulk vs interactive traffic for better responsiveness
+enable_stream_multiplexing = true
+
+# Ports considered real-time/gaming traffic (use datagrams)
+# Traffic to these ports bypasses stream ordering for lowest latency
+realtime_ports = [
+    # Gaming
+    3074, 3478, 3479, 3480,  # Xbox Live
+    3658, 3659,               # PlayStation
+    27015, 27016, 27017,      # Steam/Valve
+    7777, 7778, 7779,         # Unreal Engine
+    # VoIP
+    5060, 5061,               # SIP
+    16384, 16482,             # RTP range
+    19302, 19305,             # Google STUN
+    # Streaming
+    1935,                     # RTMP
+]

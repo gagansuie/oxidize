@@ -206,4 +206,4 @@ This will:
 
 - [Deploy Server](DEPLOY.md) - Set up your relay server on Fly.io
 - [Security Guide](SECURITY.md) - Harden your setup
-- [Streaming Guide](STREAMING.md) - Netflix/streaming compatibility
+- [TUN Guide](TUN.md) - Full system tunneling

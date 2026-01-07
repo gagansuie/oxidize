@@ -204,6 +204,16 @@ impl RelayServer {
         cache: Arc<DataCache>,
         forwarder: Arc<SharedTunForwarder>,
     ) -> Result<()> {
+        // === MASQUE-INSPIRED: Spawn datagram handler for real-time traffic ===
+        let datagram_connection = connection.clone();
+        let datagram_forwarder = forwarder.clone();
+        let datagram_metrics = metrics.clone();
+
+        let datagram_handle = tokio::spawn(async move {
+            Self::handle_datagrams(datagram_connection, datagram_forwarder, datagram_metrics).await;
+        });
+
+        // Handle stream-based traffic (reliable)
         loop {
             match connection.accept_bi().await {
                 Ok((send, recv)) => {
@@ -239,6 +249,47 @@ impl RelayServer {
             }
         }
 
+        datagram_handle.abort();
         Ok(())
+    }
+
+    /// Handle QUIC datagrams for real-time traffic (gaming, VoIP)
+    /// This bypasses stream ordering for ultra-low latency
+    async fn handle_datagrams(
+        connection: Connection,
+        forwarder: Arc<SharedTunForwarder>,
+        metrics: RelayMetrics,
+    ) {
+        loop {
+            match connection.read_datagram().await {
+                Ok(datagram) => {
+                    metrics.record_received(datagram.len() as u64);
+
+                    // Parse minimal header: connection_id (8) + sequence (8) + payload
+                    if datagram.len() < 16 {
+                        debug!("Datagram too small, skipping");
+                        continue;
+                    }
+
+                    let connection_id =
+                        u64::from_le_bytes(datagram[0..8].try_into().unwrap_or([0; 8]));
+                    // Sequence is bytes 8-16 (unused for now, could track for stats)
+                    let payload = &datagram[16..];
+
+                    // Forward directly to TUN - no framing overhead
+                    if let Err(e) = forwarder.forward(connection_id, payload.to_vec()).await {
+                        debug!("Datagram forward error: {}", e);
+                    }
+                }
+                Err(quinn::ConnectionError::ApplicationClosed(_)) => {
+                    debug!("Datagram connection closed");
+                    break;
+                }
+                Err(e) => {
+                    debug!("Datagram read error: {}", e);
+                    break;
+                }
+            }
+        }
     }
 }

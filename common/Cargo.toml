@@ -24,3 +24,8 @@ tracing = { workspace = true }
 lz4_flex = { workspace = true }
 etherparse = { workspace = true }
 reed-solomon-erasure = { workspace = true }
+rayon = { workspace = true }
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true }
