@@ -141,9 +141,11 @@ Sample output:
 ```bash
 # Install and auto-start (defaults to oxd.sh:4433)
 curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
+```
 
+```bash
 # Or specify a custom server
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- your-server:4433
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- oxd.sh:4433
 ```
 
 The installer handles everything: downloads binary, configures service, and starts automatically.
@@ -169,7 +171,7 @@ cargo build --release
 ./target/release/oxidize-client
 
 # Or specify a custom server
-./target/release/oxidize-client --server your-server:4433
+./target/release/oxidize-client --server oxd.sh:4433
 
 # Run speed test
 ./target/release/oxidize-client --speedtest
