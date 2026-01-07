@@ -151,7 +151,7 @@ impl SecurityManager {
         }
 
         // Get or create tracker
-        let tracker = self.trackers.entry(ip).or_insert_with(IpTracker::default);
+        let tracker = self.trackers.entry(ip).or_default();
         let now = Instant::now();
 
         // Reset window if expired
@@ -197,7 +197,7 @@ impl SecurityManager {
             return SecurityAction::Block;
         }
 
-        let tracker = self.trackers.entry(ip).or_insert_with(IpTracker::default);
+        let tracker = self.trackers.entry(ip).or_default();
         let now = Instant::now();
 
         // Reset window if expired

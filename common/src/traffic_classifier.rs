@@ -203,9 +203,7 @@ impl TrafficClassifier {
             }
             Protocol::Tcp => {
                 // HTTPS
-                if dest_port == 443 {
-                    TrafficClass::Web
-                } else if dest_port == 80 {
+                if dest_port == 443 || dest_port == 80 {
                     TrafficClass::Web
                 } else {
                     TrafficClass::General

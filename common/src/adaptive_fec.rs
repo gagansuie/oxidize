@@ -167,7 +167,7 @@ impl AdaptiveFec {
         }
 
         let encoder = self.encoder.as_ref().unwrap();
-        let shard_size = (data.len() + data_shards - 1) / data_shards;
+        let shard_size = data.len().div_ceil(data_shards);
         let mut shards: Vec<Vec<u8>> = Vec::with_capacity(data_shards + parity_shards);
 
         // Split data into shards
@@ -299,10 +299,8 @@ impl AdaptiveFec {
 
         // Combine data shards
         let mut result = Vec::with_capacity(data_shards * packet.shard_size);
-        for i in 0..data_shards {
-            if let Some(ref shard) = option_shards[i] {
-                result.extend_from_slice(shard);
-            }
+        for shard in option_shards.iter().take(data_shards).flatten() {
+            result.extend_from_slice(shard);
         }
 
         Ok(result)

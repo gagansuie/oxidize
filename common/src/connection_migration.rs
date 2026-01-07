@@ -219,7 +219,7 @@ impl MigrationManager {
         let paths = self.paths.get_mut(&conn_id)?;
 
         // Check if packet is from known path
-        for (_idx, path) in paths.iter_mut().enumerate() {
+        for path in paths.iter_mut() {
             if path.local == local && path.remote == remote {
                 path.last_active = Instant::now();
                 path.packets_received += 1;

@@ -94,17 +94,8 @@ pub fn is_compressible(data: &[u8]) -> bool {
 
     match SlicedPacket::from_ip(data) {
         Ok(packet) => {
-            if let Some(transport) = packet.transport {
-                match transport {
-                    TransportSlice::Tcp(tcp) => {
-                        let port = tcp.destination_port();
-                        match port {
-                            443 | 22 | 993 | 995 => false,
-                            _ => true,
-                        }
-                    }
-                    _ => true,
-                }
+            if let Some(TransportSlice::Tcp(tcp)) = packet.transport {
+                !matches!(tcp.destination_port(), 443 | 22 | 993 | 995)
             } else {
                 true
             }

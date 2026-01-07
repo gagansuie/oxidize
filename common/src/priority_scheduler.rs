@@ -7,24 +7,19 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 /// Stream priority levels (HTTP/3 urgency)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Priority {
     /// Highest - real-time gaming/VoIP
     Realtime = 0,
     /// High - interactive (mouse clicks, keypresses)
     Interactive = 1,
     /// Normal - web browsing
+    #[default]
     Normal = 2,
     /// Low - prefetch, background
     Background = 3,
     /// Lowest - bulk transfers
     Bulk = 4,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Normal
-    }
 }
 
 impl From<u8> for Priority {

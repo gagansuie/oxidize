@@ -128,8 +128,8 @@ impl Prefetcher {
             let interval = pattern.last_access.elapsed();
             pattern.count += 1;
             pattern.avg_interval = Duration::from_nanos(
-                (pattern.avg_interval.as_nanos() as u64 * (pattern.count - 1) / pattern.count
-                    + interval.as_nanos() as u64 / pattern.count) as u64,
+                pattern.avg_interval.as_nanos() as u64 * (pattern.count - 1) / pattern.count
+                    + interval.as_nanos() as u64 / pattern.count,
             );
             pattern.last_access = now;
         } else {

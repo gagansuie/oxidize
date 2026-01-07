@@ -315,6 +315,7 @@ impl RohcDecompressor {
     }
 
     /// Build a complete IPv4/TCP packet from components
+    #[allow(clippy::too_many_arguments)]
     fn build_tcp_packet(
         &self,
         src_addr: u32,
@@ -368,6 +369,7 @@ impl RohcDecompressor {
     }
 
     /// Build a complete IPv4/UDP packet from components
+    #[allow(clippy::too_many_arguments)]
     fn build_udp_packet(
         &self,
         src_addr: u32,

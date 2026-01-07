@@ -86,11 +86,12 @@ impl UdpBatcher {
 
         while let Some(packet) = self.pending.pop_front() {
             // Start new batch if destination changes or batch is full
-            if current_dest.is_some() && current_dest != Some(packet.dest) {
-                if !current_batch.is_empty() {
-                    batches.push(current_batch);
-                    current_batch = GsoBatch::new(self.segment_size);
-                }
+            if current_dest.is_some()
+                && current_dest != Some(packet.dest)
+                && !current_batch.is_empty()
+            {
+                batches.push(current_batch);
+                current_batch = GsoBatch::new(self.segment_size);
             }
 
             if current_batch.count >= self.max_batch {

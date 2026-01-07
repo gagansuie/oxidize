@@ -225,7 +225,7 @@ impl ConnectionPool {
     pub async fn close(&self, id: u64) {
         let mut conns = self.connections.write().await;
         for pool in conns.values_mut() {
-            pool.retain(|conn| if conn.id == id { false } else { true });
+            pool.retain(|conn| conn.id != id);
         }
         self.stats
             .connections_closed
@@ -239,11 +239,7 @@ impl ConnectionPool {
 
         for pool in conns.values_mut() {
             pool.retain(|conn| {
-                if conn.state == ConnectionState::Available && conn.last_used.elapsed() > timeout {
-                    false
-                } else {
-                    true
-                }
+                !(conn.state == ConnectionState::Available && conn.last_used.elapsed() > timeout)
             });
         }
     }

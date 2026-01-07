@@ -26,7 +26,7 @@ impl FecEncoder {
     /// Encode data with FEC
     /// Returns original shards + parity shards
     pub fn encode(&self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
-        let shard_size = (data.len() + self.data_shards - 1) / self.data_shards;
+        let shard_size = data.len().div_ceil(self.data_shards);
         let mut shards: Vec<Vec<u8>> = Vec::with_capacity(self.data_shards + self.parity_shards);
 
         // Split data into shards
@@ -72,10 +72,8 @@ impl FecEncoder {
 
         // Combine data shards
         let mut result = Vec::new();
-        for i in 0..self.data_shards {
-            if let Some(ref shard) = option_shards[i] {
-                result.extend_from_slice(shard);
-            }
+        for shard in option_shards.iter().take(self.data_shards).flatten() {
+            result.extend_from_slice(shard);
         }
 
         Ok(result)
