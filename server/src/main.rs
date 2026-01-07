@@ -10,6 +10,7 @@ mod connection;
 mod prometheus;
 mod server;
 mod tls;
+mod tun_forwarder;
 mod wireguard;
 
 use config::Config;

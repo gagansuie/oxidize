@@ -438,9 +438,25 @@ impl TunHandler {
     /// Run TUN handler with smart traffic classification
     /// - Gaming/general traffic → QUIC tunnel (tx channel)
     /// - Streaming traffic → bypass (sent directly)
-    pub async fn run(&mut self, tx: mpsc::Sender<Vec<u8>>) -> Result<()> {
-        let mut dev = self.setup().await?;
+    /// - rx: receives response packets from server to write to TUN
+    pub async fn run(
+        &mut self,
+        tx: mpsc::Sender<Vec<u8>>,
+        mut rx: mpsc::Receiver<Vec<u8>>,
+    ) -> Result<()> {
+        let dev = self.setup().await?;
         let mtu = self.config.tun_mtu;
+
+        // Duplicate fd for separate read/write (avoid lock contention)
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let raw_fd = dev.as_raw_fd();
+        let write_fd = unsafe { libc::dup(raw_fd) };
+        if write_fd < 0 {
+            return Err(anyhow::anyhow!("Failed to dup TUN fd"));
+        }
+        let write_file = Arc::new(std::sync::Mutex::new(unsafe {
+            std::fs::File::from_raw_fd(write_fd)
+        }));
 
         // Setup cleanup on Ctrl+C
         let cleanup_handler = self.clone_for_cleanup();
@@ -457,7 +473,21 @@ impl TunHandler {
         let classifier = self.classifier.clone();
         let dns_detector = self.dns_detector.clone();
 
+        // Spawn writer task for response packets from server
+        let write_file_clone = write_file.clone();
+        tokio::spawn(async move {
+            use std::io::Write;
+            while let Some(packet) = rx.recv().await {
+                if let Ok(mut file) = write_file_clone.lock() {
+                    if let Err(e) = file.write_all(&packet) {
+                        error!("TUN write error: {}", e);
+                    }
+                }
+            }
+        });
+
         // Spawn blocking reader for TUN device
+        let mut dev = dev;
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut buffer = vec![0u8; mtu + 4];
@@ -481,6 +511,11 @@ impl TunHandler {
 
         // Process packets with smart routing
         while let Some(packet) = raw_rx.recv().await {
+            // Skip non-IPv4 packets (IPv6 starts with 0x6x, IPv4 with 0x4x)
+            if packet.is_empty() || (packet[0] >> 4) != 4 {
+                continue;
+            }
+
             // Parse packet to get routing info
             if let Some((dest_ip, dest_port, protocol)) = Self::parse_ipv4_packet(&packet) {
                 // Check if we know the domain for this IP (from DNS tracking)

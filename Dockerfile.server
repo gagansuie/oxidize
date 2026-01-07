@@ -39,6 +39,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    iproute2 \
+    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -53,6 +55,10 @@ RUN apt-get update && apt-get install -y openssl && \
     apt-get remove -y openssl && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # Expose QUIC port
 EXPOSE 4433/udp
 EXPOSE 4433/tcp
@@ -60,4 +66,5 @@ EXPOSE 9090/tcp
 
 ENV RUST_LOG=info
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["oxidize-server", "--listen", "0.0.0.0:4433", "--metrics-addr", "0.0.0.0:9090"]

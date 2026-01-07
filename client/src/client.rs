@@ -10,6 +10,7 @@ use quinn::Endpoint;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -151,12 +152,16 @@ impl RelayClient {
         // Connection verified - now safe to set up TUN
         let mut tun_handler =
             TunHandler::new(self.config.clone())?.with_server_ip(self.server_addr.ip());
+
+        // tx: TUN reads -> client sends to server
+        // response_tx: client receives from server -> TUN writes
         let (tx, mut rx) = mpsc::channel(self.config.max_packet_queue);
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>(4096);
 
         let tun_handle = {
             let tx = tx.clone();
             tokio::spawn(async move {
-                if let Err(e) = tun_handler.run(tx).await {
+                if let Err(e) = tun_handler.run(tx, response_rx).await {
                     error!("TUN handler error: {}", e);
                 }
             })
@@ -166,7 +171,10 @@ impl RelayClient {
             let client = self.clone_for_task();
             tokio::spawn(async move {
                 loop {
-                    match client.connect_and_run_with_packets(&mut rx).await {
+                    match client
+                        .connect_and_run_with_packets(&mut rx, response_tx.clone())
+                        .await
+                    {
                         Ok(_) => break,
                         Err(e) => {
                             error!("Connection error: {}, reconnecting...", e);
@@ -271,7 +279,11 @@ impl RelayClient {
         Ok(())
     }
 
-    async fn connect_and_run_with_packets(&self, rx: &mut mpsc::Receiver<Vec<u8>>) -> Result<()> {
+    async fn connect_and_run_with_packets(
+        &self,
+        rx: &mut mpsc::Receiver<Vec<u8>>,
+        response_tx: mpsc::Sender<Vec<u8>>,
+    ) -> Result<()> {
         let connection = self
             .endpoint
             .connect(self.server_addr, "localhost")?
@@ -303,7 +315,12 @@ impl RelayClient {
 
                             // Process all complete messages
                             while let Ok(Some(message)) = framer.try_decode() {
-                                if let Err(e) = self.handle_message(message).await {
+                                // Handle Data messages - write to TUN
+                                if message.msg_type == MessageType::Data {
+                                    if response_tx.send(message.payload).await.is_err() {
+                                        error!("Failed to send response to TUN");
+                                    }
+                                } else if let Err(e) = self.handle_message(message).await {
                                     error!("Failed to handle message: {}", e);
                                 }
                             }
@@ -342,6 +359,7 @@ impl RelayClient {
 
         let encoded = message.encode()?;
         send.write_all(&encoded).await?;
+        send.flush().await?; // Ensure data is actually sent over QUIC
         self.metrics.record_sent(encoded.len() as u64);
 
         Ok(())

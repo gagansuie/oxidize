@@ -13,6 +13,7 @@ use crate::cache::DataCache;
 use crate::config::Config;
 use crate::connection::ConnectionHandler;
 use crate::tls::{load_tls_config, TlsConfig};
+use crate::tun_forwarder::SharedTunForwarder;
 
 pub struct RelayServer {
     endpoint: Endpoint,
@@ -21,6 +22,7 @@ pub struct RelayServer {
     connections: Arc<RwLock<HashMap<u64, Arc<ConnectionHandler>>>>,
     cache: Arc<DataCache>,
     security: Arc<Mutex<SecurityManager>>,
+    forwarder: Arc<SharedTunForwarder>,
 }
 
 impl RelayServer {
@@ -95,6 +97,9 @@ impl RelayServer {
         };
         let security = Arc::new(Mutex::new(SecurityManager::new(security_config)));
 
+        // Initialize shared TUN forwarder at server startup
+        let forwarder = SharedTunForwarder::new().await?;
+
         Ok(Self {
             endpoint,
             config,
@@ -102,6 +107,7 @@ impl RelayServer {
             connections: Arc::new(RwLock::new(HashMap::new())),
             cache: Arc::new(DataCache::new()),
             security,
+            forwarder,
         })
     }
 
@@ -132,6 +138,7 @@ impl RelayServer {
             let config = self.config.clone();
             let cache = self.cache.clone();
             let security = self.security.clone();
+            let forwarder = self.forwarder.clone();
 
             tokio::spawn(async move {
                 // Get remote address before awaiting connection
@@ -170,6 +177,7 @@ impl RelayServer {
                             metrics.clone(),
                             config,
                             cache,
+                            forwarder,
                         )
                         .await
                         {
@@ -194,6 +202,7 @@ impl RelayServer {
         metrics: RelayMetrics,
         config: Config,
         cache: Arc<DataCache>,
+        forwarder: Arc<SharedTunForwarder>,
     ) -> Result<()> {
         loop {
             match connection.accept_bi().await {
@@ -202,9 +211,12 @@ impl RelayServer {
                     let metrics = metrics.clone();
                     let config = config.clone();
                     let cache = cache.clone();
+                    let forwarder = forwarder.clone();
 
                     tokio::spawn(async move {
-                        let handler = ConnectionHandler::new(send, recv, metrics, config, cache);
+                        let handler =
+                            ConnectionHandler::new(send, recv, metrics, config, cache, forwarder)
+                                .await;
 
                         let conn_id = handler.id();
 

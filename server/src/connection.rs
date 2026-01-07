@@ -14,6 +14,7 @@ use tracing::{debug, error, info};
 
 use crate::cache::DataCache;
 use crate::config::Config;
+use crate::tun_forwarder::SharedTunForwarder;
 
 static CONNECTION_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -40,17 +41,23 @@ pub struct ConnectionHandler {
     cache: Arc<DataCache>,
     pending_acks: Vec<(u64, u64)>,
     framer: MessageFramer,
+    forwarder: Arc<SharedTunForwarder>,
+    response_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 }
 
 impl ConnectionHandler {
-    pub fn new(
+    pub async fn new(
         send_stream: SendStream,
         recv_stream: RecvStream,
         metrics: RelayMetrics,
         config: Config,
         cache: Arc<DataCache>,
+        forwarder: Arc<SharedTunForwarder>,
     ) -> Self {
         let id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        // Register this connection to receive response packets
+        let response_rx = forwarder.register_connection(id).await;
 
         Self {
             id,
@@ -61,6 +68,8 @@ impl ConnectionHandler {
             cache,
             pending_acks: Vec::with_capacity(16),
             framer: MessageFramer::with_capacity(65536),
+            forwarder,
+            response_rx,
         }
     }
 
@@ -84,52 +93,65 @@ impl ConnectionHandler {
         let mut raw_buf = vec![0u8; self.config.buffer_size];
 
         loop {
-            match self.recv_stream.read(&mut raw_buf).await {
-                Ok(Some(len)) => {
-                    let process_start = Instant::now();
-                    self.metrics.record_received(len as u64);
+            tokio::select! {
+                // Handle incoming data from client
+                result = self.recv_stream.read(&mut raw_buf) => {
+                    match result {
+                        Ok(Some(len)) => {
+                            let process_start = Instant::now();
+                            self.metrics.record_received(len as u64);
 
-                    // Feed data to the framer (handles partial reads correctly)
-                    self.framer.extend(&raw_buf[..len]);
+                            // Feed data to the framer (handles partial reads correctly)
+                            self.framer.extend(&raw_buf[..len]);
 
-                    // Process all complete messages in this batch
-                    loop {
-                        let decode_start = Instant::now();
-                        match self.framer.try_decode() {
-                            Ok(Some(message)) => {
-                                self.metrics.record_decode_latency(decode_start.elapsed());
+                            // Process all complete messages in this batch
+                            loop {
+                                let decode_start = Instant::now();
+                                match self.framer.try_decode() {
+                                    Ok(Some(message)) => {
+                                        self.metrics.record_decode_latency(decode_start.elapsed());
 
-                                if let Err(e) = self.process_message(message).await {
-                                    error!("Failed to process message: {}", e);
+                                        if let Err(e) = self.process_message(message).await {
+                                            error!("Failed to process message: {}", e);
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        // Need more data, break inner loop
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to decode message: {}", e);
+                                        break;
+                                    }
                                 }
                             }
-                            Ok(None) => {
-                                // Need more data, break inner loop
-                                break;
-                            }
-                            Err(e) => {
-                                error!("Failed to decode message: {}", e);
-                                break;
+
+                            self.metrics.record_process_latency(process_start.elapsed());
+
+                            // Batch ACKs (configurable via config.ack_batch_size)
+                            if self.pending_acks.len() >= self.config.ack_batch_size {
+                                self.flush_acks().await;
                             }
                         }
-                    }
-
-                    self.metrics.record_process_latency(process_start.elapsed());
-
-                    // Batch ACKs (configurable via config.ack_batch_size)
-                    if self.pending_acks.len() >= self.config.ack_batch_size {
-                        self.flush_acks().await;
+                        Ok(None) => {
+                            debug!("Stream closed");
+                            // Flush any remaining ACKs
+                            self.flush_acks().await;
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Read error: {}", e);
+                            break;
+                        }
                     }
                 }
-                Ok(None) => {
-                    debug!("Stream closed");
-                    // Flush any remaining ACKs
-                    self.flush_acks().await;
-                    break;
-                }
-                Err(e) => {
-                    error!("Read error: {}", e);
-                    break;
+                // Handle responses from the internet (forwarded packets)
+                Some(response_packet) = self.response_rx.recv() => {
+                    // Send response back to client as Data message
+                    let response_msg = RelayMessage::data(self.id, 0, response_packet);
+                    if let Err(e) = self.send_message(response_msg).await {
+                        error!("Failed to send response to client: {}", e);
+                    }
                 }
             }
         }
@@ -206,6 +228,15 @@ impl ConnectionHandler {
             }
             self.cache.insert(message.payload.clone()).await;
         }
+
+        // Forward the IP packet to the internet
+        // Use self.id (server's connection ID) not message.connection_id (client's ID)
+        // This ensures responses route back to the correct subscriber
+        let forward_start = Instant::now();
+        if let Err(e) = self.forwarder.forward(self.id, message.payload).await {
+            debug!("Forward error: {}", e);
+        }
+        self.metrics.record_forward_latency(forward_start.elapsed());
 
         if self.config.enable_tcp_acceleration {
             self.pending_acks
