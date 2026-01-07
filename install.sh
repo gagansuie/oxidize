@@ -1,6 +1,6 @@
 #!/bin/bash
 # Oxidize Client Installer - One-Click Install
-# Usage: curl -fsSL https://oxidize.network/install.sh | sudo bash -s -- SERVER:PORT
+# Usage: curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- SERVER:PORT
 
 set -e
 
@@ -123,15 +123,32 @@ download_binary() {
         cp "./target/release/$BINARY_NAME" "$INSTALL_DIR/"
     else
         # Download from releases
-        RELEASE_URL="https://github.com/oxidize-network/oxidize/releases/latest/download"
-        BINARY_URL="$RELEASE_URL/oxidize-client-$ARCH-$PLATFORM"
+        REPO="gagansuie/oxidize"
+        TARGET="$ARCH-$PLATFORM"
         
-        echo "Downloading from: $BINARY_URL"
-        if ! curl -fsSL "$BINARY_URL" -o "$INSTALL_DIR/$BINARY_NAME"; then
-            echo -e "${RED}Download failed. Building from source...${NC}"
+        # Get latest release tag
+        LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [ -z "$LATEST_TAG" ]; then
+            echo -e "${RED}Failed to get latest release. Building from source...${NC}"
             build_from_source
             return
         fi
+        
+        ARCHIVE_URL="https://github.com/$REPO/releases/download/$LATEST_TAG/oxidize-client-$LATEST_TAG-$TARGET.tar.gz"
+        
+        echo "Downloading from: $ARCHIVE_URL"
+        TEMP_DIR=$(mktemp -d)
+        if ! curl -fsSL "$ARCHIVE_URL" -o "$TEMP_DIR/oxidize-client.tar.gz"; then
+            echo -e "${RED}Download failed. Building from source...${NC}"
+            rm -rf "$TEMP_DIR"
+            build_from_source
+            return
+        fi
+        
+        # Extract binary
+        tar -xzf "$TEMP_DIR/oxidize-client.tar.gz" -C "$TEMP_DIR"
+        cp "$TEMP_DIR/$BINARY_NAME" "$INSTALL_DIR/"
+        rm -rf "$TEMP_DIR"
     fi
     
     chmod +x "$INSTALL_DIR/$BINARY_NAME"

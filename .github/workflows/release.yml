@@ -87,21 +87,15 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p release
           
-          # Server
-          cp target/${{ matrix.target }}/release/oxidize-server${{ matrix.suffix }} release/
-          
-          # Client
+          # Client only (server is deployed to Fly.io)
           cp target/${{ matrix.target }}/release/oxidize-client${{ matrix.suffix }} release/
-          
-          # Config examples
-          cp deploy/config/production.toml release/server-config-example.toml 2>/dev/null || true
           
           # Create archives
           cd release
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a ../oxidize-$VERSION-${{ matrix.target }}.zip *
+            7z a ../oxidize-client-$VERSION-${{ matrix.target }}.zip *
           else
-            tar czf ../oxidize-$VERSION-${{ matrix.target }}.tar.gz *
+            tar czf ../oxidize-client-$VERSION-${{ matrix.target }}.tar.gz *
           fi
 
       - name: Upload artifacts

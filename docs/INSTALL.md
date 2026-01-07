@@ -15,28 +15,43 @@ curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh |
 
 #### Linux (x86_64)
 ```bash
-wget https://github.com/gagansuie/oxidize/releases/latest/download/oxidize-client-linux-x86_64.tar.gz
-tar xzf oxidize-client-linux-x86_64.tar.gz
+# Get latest version
+VERSION=$(curl -s https://api.github.com/repos/gagansuie/oxidize/releases/latest | grep tag_name | cut -d'"' -f4)
+wget https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+tar xzf oxidize-client-$VERSION-x86_64-unknown-linux-gnu.tar.gz
 sudo mv oxidize-client /usr/local/bin/
 ```
 
 #### Linux (ARM64)
 ```bash
-wget https://github.com/gagansuie/oxidize/releases/latest/download/oxidize-client-linux-arm64.tar.gz
-tar xzf oxidize-client-linux-arm64.tar.gz
+VERSION=$(curl -s https://api.github.com/repos/gagansuie/oxidize/releases/latest | grep tag_name | cut -d'"' -f4)
+wget https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-aarch64-unknown-linux-gnu.tar.gz
+tar xzf oxidize-client-$VERSION-aarch64-unknown-linux-gnu.tar.gz
 sudo mv oxidize-client /usr/local/bin/
 ```
 
-#### macOS
+#### macOS (Intel)
 ```bash
-curl -L -o oxidize.tar.gz https://github.com/gagansuie/oxidize/releases/latest/download/oxidize-client-macos.tar.gz
+VERSION=$(curl -s https://api.github.com/repos/gagansuie/oxidize/releases/latest | grep tag_name | cut -d'"' -f4)
+curl -L -o oxidize.tar.gz https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-x86_64-apple-darwin.tar.gz
+tar xzf oxidize.tar.gz
+sudo mv oxidize-client /usr/local/bin/
+```
+
+#### macOS (Apple Silicon)
+```bash
+VERSION=$(curl -s https://api.github.com/repos/gagansuie/oxidize/releases/latest | grep tag_name | cut -d'"' -f4)
+curl -L -o oxidize.tar.gz https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-aarch64-apple-darwin.tar.gz
 tar xzf oxidize.tar.gz
 sudo mv oxidize-client /usr/local/bin/
 ```
 
 #### Windows
-1. Download [oxidize-client-windows.zip](https://github.com/gagansuie/oxidize/releases/latest)
-2. Extract and run `oxidize-client.exe`
+```powershell
+# Download from GitHub Releases
+# https://github.com/gagansuie/oxidize/releases/latest
+# Extract oxidize-client-{version}-x86_64-pc-windows-msvc.zip and run oxidize-client.exe
+```
 
 ### Connect
 

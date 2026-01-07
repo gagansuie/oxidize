@@ -46,7 +46,7 @@ Oxidize supports full system traffic tunneling via a TUN (network tunnel) interf
 
 ```bash
 # Download and install
-curl -fsSL https://raw.githubusercontent.com/oxidize-network/oxidize/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
 
 # Or build from source
 cargo build --release --package relay-client
