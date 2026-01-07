@@ -10,6 +10,7 @@ use quinn::Endpoint;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -313,15 +314,22 @@ impl RelayClient {
                             self.metrics.record_received(len as u64);
                             framer.extend(&recv_buf[..len]);
 
-                            // Process all complete messages
-                            while let Ok(Some(message)) = framer.try_decode() {
-                                // Handle Data messages - write to TUN
-                                if message.msg_type == MessageType::Data {
-                                    if response_tx.send(message.payload).await.is_err() {
-                                        error!("Failed to send response to TUN");
+                            // Process all complete messages with decode timing
+                            loop {
+                                let decode_start = Instant::now();
+                                match framer.try_decode() {
+                                    Ok(Some(message)) => {
+                                        self.metrics.record_decode_latency(decode_start.elapsed());
+                                        // Handle Data messages - write to TUN
+                                        if message.msg_type == MessageType::Data {
+                                            if response_tx.send(message.payload).await.is_err() {
+                                                error!("Failed to send response to TUN");
+                                            }
+                                        } else if let Err(e) = self.handle_message(message).await {
+                                            error!("Failed to handle message: {}", e);
+                                        }
                                     }
-                                } else if let Err(e) = self.handle_message(message).await {
-                                    error!("Failed to handle message: {}", e);
+                                    _ => break,
                                 }
                             }
                         }
@@ -340,6 +348,7 @@ impl RelayClient {
     }
 
     async fn send_packet(&self, send: &mut quinn::SendStream, packet: Vec<u8>) -> Result<()> {
+        let process_start = Instant::now();
         let sequence = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         let mut message = RelayMessage::data(self.connection_id, sequence, packet);
@@ -357,10 +366,17 @@ impl RelayClient {
             }
         }
 
+        let encode_start = Instant::now();
         let encoded = message.encode()?;
+        self.metrics.record_encode_latency(encode_start.elapsed());
+
+        let forward_start = Instant::now();
         send.write_all(&encoded).await?;
-        send.flush().await?; // Ensure data is actually sent over QUIC
+        send.flush().await?;
+        self.metrics.record_forward_latency(forward_start.elapsed());
+
         self.metrics.record_sent(encoded.len() as u64);
+        self.metrics.record_process_latency(process_start.elapsed());
 
         Ok(())
     }
