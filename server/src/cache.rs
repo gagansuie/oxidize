@@ -17,6 +17,12 @@ pub struct DataCache {
     entries: Arc<RwLock<HashMap<u64, CacheEntry>>>,
 }
 
+impl Default for DataCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DataCache {
     pub fn new() -> Self {
         Self {

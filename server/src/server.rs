@@ -107,70 +107,63 @@ impl RelayServer {
             }
         });
 
-        loop {
-            match self.endpoint.accept().await {
-                Some(incoming) => {
-                    let connections = self.connections.clone();
-                    let metrics = self.metrics.clone();
-                    let config = self.config.clone();
-                    let cache = self.cache.clone();
-                    let security = self.security.clone();
+        while let Some(incoming) = self.endpoint.accept().await {
+            let connections = self.connections.clone();
+            let metrics = self.metrics.clone();
+            let config = self.config.clone();
+            let cache = self.cache.clone();
+            let security = self.security.clone();
 
-                    tokio::spawn(async move {
-                        // Get remote address before awaiting connection
-                        let remote_addr = incoming.remote_address();
-                        let client_ip = remote_addr.ip();
+            tokio::spawn(async move {
+                // Get remote address before awaiting connection
+                let remote_addr = incoming.remote_address();
+                let client_ip = remote_addr.ip();
 
-                        // Security check
-                        let action = security.lock().await.check_connection(client_ip);
-                        match action {
-                            SecurityAction::Block => {
-                                warn!("Blocked connection from: {}", client_ip);
-                                return;
-                            }
-                            SecurityAction::RateLimit => {
-                                debug!("Rate limited connection from: {}", client_ip);
-                                return;
-                            }
-                            SecurityAction::Challenge => {
-                                debug!("Challenging connection from: {}", client_ip);
-                                // QUIC stateless retry handles this automatically
-                            }
-                            _ => {}
+                // Security check
+                let action = security.lock().await.check_connection(client_ip);
+                match action {
+                    SecurityAction::Block => {
+                        warn!("Blocked connection from: {}", client_ip);
+                        return;
+                    }
+                    SecurityAction::RateLimit => {
+                        debug!("Rate limited connection from: {}", client_ip);
+                        return;
+                    }
+                    SecurityAction::Challenge => {
+                        debug!("Challenging connection from: {}", client_ip);
+                        // QUIC stateless retry handles this automatically
+                    }
+                    _ => {}
+                }
+
+                match incoming.await {
+                    Ok(connection) => {
+                        info!("New connection from: {}", connection.remote_address());
+                        metrics.record_connection_opened();
+
+                        // Mark as verified after successful handshake
+                        security.lock().await.mark_verified(client_ip);
+
+                        if let Err(e) = Self::handle_connection(
+                            connection,
+                            connections,
+                            metrics.clone(),
+                            config,
+                            cache,
+                        )
+                        .await
+                        {
+                            error!("Connection error: {}", e);
                         }
 
-                        match incoming.await {
-                            Ok(connection) => {
-                                info!("New connection from: {}", connection.remote_address());
-                                metrics.record_connection_opened();
-
-                                // Mark as verified after successful handshake
-                                security.lock().await.mark_verified(client_ip);
-
-                                if let Err(e) = Self::handle_connection(
-                                    connection,
-                                    connections,
-                                    metrics.clone(),
-                                    config,
-                                    cache,
-                                )
-                                .await
-                                {
-                                    error!("Connection error: {}", e);
-                                }
-
-                                metrics.record_connection_closed();
-                            }
-                            Err(e) => {
-                                error!("Connection failed: {}", e);
-                            }
-                        }
-                    });
+                        metrics.record_connection_closed();
+                    }
+                    Err(e) => {
+                        error!("Connection failed: {}", e);
+                    }
                 }
-                None => {
-                    break;
-                }
-            }
+            });
         }
 
         Ok(())

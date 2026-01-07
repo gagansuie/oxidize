@@ -347,6 +347,7 @@ pub struct WireGuardServer {
     forwarder: Arc<PacketForwarder>,
     /// Channel for sending responses back to peers
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
+    #[allow(clippy::type_complexity)]
     response_rx: Arc<RwLock<mpsc::Receiver<(Vec<u8>, SocketAddr)>>>,
 }
 
@@ -442,13 +443,10 @@ impl WireGuardServer {
             let mut peers_lock = peers.write().await;
             for (_, peer) in peers_lock.iter_mut() {
                 let mut buf = vec![0u8; 256];
-                match peer.tunnel.encapsulate(&[], &mut buf) {
-                    TunnResult::WriteToNetwork(data) => {
-                        if let Err(e) = socket.send_to(data, peer.endpoint).await {
-                            debug!("Failed to send keepalive: {}", e);
-                        }
+                if let TunnResult::WriteToNetwork(data) = peer.tunnel.encapsulate(&[], &mut buf) {
+                    if let Err(e) = socket.send_to(data, peer.endpoint).await {
+                        debug!("Failed to send keepalive: {}", e);
                     }
-                    _ => {}
                 }
             }
         }
@@ -519,7 +517,7 @@ impl WireGuardServerRef {
         if let Some(peer_key) = Self::extract_peer_public_key(packet) {
             let mut peers = self.peers.write().await;
 
-            if !peers.contains_key(&peer_key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = peers.entry(peer_key) {
                 info!("New WireGuard peer connecting: {:?}", peer_addr);
 
                 // Allocate IP for this peer
@@ -543,20 +541,17 @@ impl WireGuardServerRef {
                     None,
                 ) {
                     Ok(tunnel) => {
-                        peers.insert(
-                            peer_key,
-                            PeerState {
-                                tunnel,
-                                last_activity: Instant::now(),
-                                endpoint: peer_addr,
-                                assigned_ip,
-                                allowed_ips,
-                            },
-                        );
+                        e.insert(PeerState {
+                            tunnel,
+                            last_activity: Instant::now(),
+                            endpoint: peer_addr,
+                            assigned_ip,
+                            allowed_ips,
+                        });
                         info!("Created tunnel for peer, assigned IP: {}", assigned_ip);
                     }
-                    Err(e) => {
-                        error!("Failed to create tunnel: {:?}", e);
+                    Err(err) => {
+                        error!("Failed to create tunnel: {:?}", err);
                         return Ok(None);
                     }
                 }
@@ -567,7 +562,7 @@ impl WireGuardServerRef {
 
         // For data packets, find peer by checking all tunnels
         let peers = self.peers.read().await;
-        for (key, _) in peers.iter() {
+        if let Some((key, _)) = peers.iter().next() {
             return Ok(Some(*key));
         }
 
