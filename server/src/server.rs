@@ -50,11 +50,30 @@ impl RelayServer {
         let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
 
         let mut transport_config = quinn::TransportConfig::default();
+
+        // Stream limits for high concurrency
         transport_config.max_concurrent_bidi_streams(1000u32.into());
         transport_config.max_concurrent_uni_streams(1000u32.into());
         transport_config.max_idle_timeout(Some(
             std::time::Duration::from_secs(config.connection_timeout).try_into()?,
         ));
+
+        // === HIGH-PERFORMANCE QUIC TUNING ===
+
+        // Larger receive/send windows for high throughput (16MB default, increase to 64MB)
+        transport_config.receive_window(64_000_000u32.into());
+        transport_config.send_window(64_000_000u64);
+        transport_config.stream_receive_window(16_000_000u32.into());
+
+        // Faster keepalive for low latency connection recovery (15s instead of default)
+        transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
+
+        // Allow more data in flight before ACKs (helps throughput on high-latency links)
+        transport_config.initial_rtt(Duration::from_millis(50));
+
+        // Enable QUIC datagrams for unreliable low-latency traffic (gaming/VoIP)
+        transport_config.datagram_receive_buffer_size(Some(65536));
+        transport_config.datagram_send_buffer_size(65536);
 
         // Enable BBR congestion control for better throughput on lossy networks
         transport_config

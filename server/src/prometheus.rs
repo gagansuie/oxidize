@@ -9,6 +9,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{error, info};
 
+/// Histogram buckets optimized for µs-level latency measurements
+/// Ranges from 0.1µs to 10ms to capture both fast operations and outliers
+const LATENCY_BUCKETS_US: &[f64] = &[
+    0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+    10000.0,
+];
+
 #[derive(Clone)]
 pub struct PrometheusMetrics {
     registry: Arc<Registry>,
@@ -21,6 +28,15 @@ pub struct PrometheusMetrics {
     pub compression_saved_bytes: Counter,
     #[allow(dead_code)]
     pub request_duration: HistogramVec,
+    // µs-level latency histograms (used via record_* methods)
+    #[allow(dead_code)]
+    pub encode_latency_us: HistogramVec,
+    #[allow(dead_code)]
+    pub decode_latency_us: HistogramVec,
+    #[allow(dead_code)]
+    pub process_latency_us: HistogramVec,
+    #[allow(dead_code)]
+    pub forward_latency_us: HistogramVec,
 }
 
 impl PrometheusMetrics {
@@ -82,6 +98,51 @@ impl PrometheusMetrics {
         )?;
         registry.register(Box::new(request_duration.clone()))?;
 
+        // µs-level latency histograms for performance analysis
+        let encode_latency_us = HistogramVec::new(
+            HistogramOpts::new(
+                "relay_encode_latency_microseconds",
+                "Message encoding latency in microseconds",
+            )
+            .namespace("oxidize")
+            .buckets(LATENCY_BUCKETS_US.to_vec()),
+            &["msg_type"],
+        )?;
+        registry.register(Box::new(encode_latency_us.clone()))?;
+
+        let decode_latency_us = HistogramVec::new(
+            HistogramOpts::new(
+                "relay_decode_latency_microseconds",
+                "Message decoding latency in microseconds",
+            )
+            .namespace("oxidize")
+            .buckets(LATENCY_BUCKETS_US.to_vec()),
+            &["msg_type"],
+        )?;
+        registry.register(Box::new(decode_latency_us.clone()))?;
+
+        let process_latency_us = HistogramVec::new(
+            HistogramOpts::new(
+                "relay_process_latency_microseconds",
+                "Per-packet processing latency in microseconds",
+            )
+            .namespace("oxidize")
+            .buckets(LATENCY_BUCKETS_US.to_vec()),
+            &["msg_type"],
+        )?;
+        registry.register(Box::new(process_latency_us.clone()))?;
+
+        let forward_latency_us = HistogramVec::new(
+            HistogramOpts::new(
+                "relay_forward_latency_microseconds",
+                "Time to forward packet to destination in microseconds",
+            )
+            .namespace("oxidize")
+            .buckets(LATENCY_BUCKETS_US.to_vec()),
+            &["destination"],
+        )?;
+        registry.register(Box::new(forward_latency_us.clone()))?;
+
         Ok(Self {
             registry,
             connections_total,
@@ -92,6 +153,10 @@ impl PrometheusMetrics {
             packets_received_total,
             compression_saved_bytes,
             request_duration,
+            encode_latency_us,
+            decode_latency_us,
+            process_latency_us,
+            forward_latency_us,
         })
     }
 
@@ -107,6 +172,42 @@ impl PrometheusMetrics {
             .inc_by(stats.packets_received as f64);
         self.compression_saved_bytes
             .inc_by(stats.compression_saved as f64);
+    }
+
+    /// Record encode latency in microseconds
+    #[inline]
+    #[allow(dead_code)]
+    pub fn record_encode_latency(&self, msg_type: &str, latency_us: f64) {
+        self.encode_latency_us
+            .with_label_values(&[msg_type])
+            .observe(latency_us);
+    }
+
+    /// Record decode latency in microseconds
+    #[inline]
+    #[allow(dead_code)]
+    pub fn record_decode_latency(&self, msg_type: &str, latency_us: f64) {
+        self.decode_latency_us
+            .with_label_values(&[msg_type])
+            .observe(latency_us);
+    }
+
+    /// Record process latency in microseconds
+    #[inline]
+    #[allow(dead_code)]
+    pub fn record_process_latency(&self, msg_type: &str, latency_us: f64) {
+        self.process_latency_us
+            .with_label_values(&[msg_type])
+            .observe(latency_us);
+    }
+
+    /// Record forward latency in microseconds
+    #[inline]
+    #[allow(dead_code)]
+    pub fn record_forward_latency(&self, destination: &str, latency_us: f64) {
+        self.forward_latency_us
+            .with_label_values(&[destination])
+            .observe(latency_us);
     }
 
     async fn serve_metrics(self, _req: Request<Body>) -> Result<Response<Body>, hyper::Error> {

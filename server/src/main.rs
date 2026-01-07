@@ -89,7 +89,10 @@ async fn main() -> Result<()> {
     info!("Starting Oxidize Server v{}", env!("CARGO_PKG_VERSION"));
     info!("Listening on {}", args.listen);
     info!("╔════════════════════════════════════════╗");
-    info!("║   Oxidize Server v0.1.0                ║");
+    info!(
+        "║   Oxidize Server v{}                ║",
+        env!("CARGO_PKG_VERSION")
+    );
     info!("╚════════════════════════════════════════╝");
 
     let config = Config::load(&args.config).unwrap_or_else(|_| {

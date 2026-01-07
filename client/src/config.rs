@@ -13,6 +13,7 @@ pub struct ClientConfig {
     pub dns_cache_size: usize,
     pub max_packet_queue: usize,
     pub tun_mtu: usize,
+    #[serde(default = "default_enable_header_compression")]
     pub enable_header_compression: bool,
 
     /// Enable ROHC (Robust Header Compression) for IP/UDP/TCP headers
@@ -29,6 +30,10 @@ fn default_enable_rohc() -> bool {
 
 fn default_rohc_max_size() -> usize {
     1500
+}
+
+fn default_enable_header_compression() -> bool {
+    true
 }
 
 impl Default for ClientConfig {

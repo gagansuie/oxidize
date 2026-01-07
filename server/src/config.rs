@@ -47,6 +47,11 @@ pub struct Config {
     /// Maximum packet size for ROHC compression
     #[serde(default = "default_rohc_max_size")]
     pub rohc_max_size: usize,
+
+    /// ACK batch size - number of ACKs to accumulate before sending
+    /// Lower values = lower latency, higher values = higher throughput
+    #[serde(default = "default_ack_batch_size")]
+    pub ack_batch_size: usize,
 }
 
 fn default_enable_wireguard() -> bool {
@@ -59,6 +64,10 @@ fn default_enable_rohc() -> bool {
 
 fn default_rohc_max_size() -> usize {
     1500
+}
+
+fn default_ack_batch_size() -> usize {
+    8 // Good balance between latency and throughput
 }
 
 fn default_rate_limit() -> usize {
@@ -105,6 +114,7 @@ impl Default for Config {
             wireguard_private_key: None,
             enable_rohc: true,
             rohc_max_size: 1500,
+            ack_batch_size: 8,
             max_pps_per_ip: 1000,
             max_bandwidth_per_ip: 10 * 1024 * 1024,
             auto_block_threshold: 10,

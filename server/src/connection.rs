@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use bytes::BufMut;
 use oxidize_common::zero_copy::BufferPool;
-use oxidize_common::{decompress_data, MessageType, RelayMessage, RelayMetrics};
+use oxidize_common::{
+    decompress_data, MessageBatch, MessageFramer, MessageType, RelayMessage, RelayMetrics,
+};
 use quinn::{RecvStream, SendStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,6 +27,8 @@ fn get_buffer_pool() -> &'static Mutex<BufferPool> {
 /// Optimized connection handler with:
 /// - Split streams (no mutex on hot path)
 /// - Zero-copy buffer pooling
+/// - Proper stream framing (handles partial reads)
+/// - Binary protocol (no JSON overhead)
 /// - Latency instrumentation
 /// - Batched ACKs to reduce round-trips
 pub struct ConnectionHandler {
@@ -36,6 +39,7 @@ pub struct ConnectionHandler {
     config: Config,
     cache: Arc<DataCache>,
     pending_acks: Vec<(u64, u64)>,
+    framer: MessageFramer,
 }
 
 impl ConnectionHandler {
@@ -56,6 +60,7 @@ impl ConnectionHandler {
             config,
             cache,
             pending_acks: Vec::with_capacity(16),
+            framer: MessageFramer::with_capacity(65536),
         }
     }
 
@@ -66,6 +71,7 @@ impl ConnectionHandler {
     pub async fn handle(mut self) -> Result<()> {
         debug!("Starting optimized connection handler for {}", self.id);
 
+        // Get a pooled buffer for reading
         let mut buffer = {
             let mut pool = get_buffer_pool().lock().await;
             pool.get()
@@ -83,33 +89,42 @@ impl ConnectionHandler {
                     let process_start = Instant::now();
                     self.metrics.record_received(len as u64);
 
-                    buffer.clear();
-                    buffer.put_slice(&raw_buf[..len]);
-                    let data = buffer.clone().freeze();
+                    // Feed data to the framer (handles partial reads correctly)
+                    self.framer.extend(&raw_buf[..len]);
 
-                    let decode_start = Instant::now();
-                    match RelayMessage::decode(data) {
-                        Ok(message) => {
-                            self.metrics.record_decode_latency(decode_start.elapsed());
+                    // Process all complete messages in this batch
+                    loop {
+                        let decode_start = Instant::now();
+                        match self.framer.try_decode() {
+                            Ok(Some(message)) => {
+                                self.metrics.record_decode_latency(decode_start.elapsed());
 
-                            if let Err(e) = self.process_message(message).await {
-                                error!("Failed to process message: {}", e);
+                                if let Err(e) = self.process_message(message).await {
+                                    error!("Failed to process message: {}", e);
+                                }
                             }
-                        }
-                        Err(e) => {
-                            error!("Failed to decode message: {}", e);
+                            Ok(None) => {
+                                // Need more data, break inner loop
+                                break;
+                            }
+                            Err(e) => {
+                                error!("Failed to decode message: {}", e);
+                                break;
+                            }
                         }
                     }
 
                     self.metrics.record_process_latency(process_start.elapsed());
 
-                    // Always batch ACKs (8 per batch for optimal performance)
-                    if self.pending_acks.len() >= 8 {
+                    // Batch ACKs (configurable via config.ack_batch_size)
+                    if self.pending_acks.len() >= self.config.ack_batch_size {
                         self.flush_acks().await;
                     }
                 }
                 Ok(None) => {
                     debug!("Stream closed");
+                    // Flush any remaining ACKs
+                    self.flush_acks().await;
                     break;
                 }
                 Err(e) => {
@@ -119,8 +134,10 @@ impl ConnectionHandler {
             }
         }
 
+        // Return buffer to pool
         {
             let mut pool = get_buffer_pool().lock().await;
+            buffer.clear();
             pool.put(buffer);
         }
 
@@ -203,11 +220,18 @@ impl ConnectionHandler {
             return;
         }
 
-        let acks: Vec<_> = self.pending_acks.drain(..).collect();
-        for (conn_id, seq) in acks {
-            let ack = RelayMessage::data_ack(conn_id, seq);
-            if let Err(e) = self.send_message(ack).await {
-                debug!("Failed to send batched ACK: {}", e);
+        // Use MessageBatch for efficient encoding of multiple ACKs
+        let mut batch = MessageBatch::new();
+        for (conn_id, seq) in self.pending_acks.drain(..) {
+            batch.push(&RelayMessage::data_ack(conn_id, seq));
+        }
+
+        if !batch.is_empty() {
+            let encoded = batch.finish();
+            if let Err(e) = self.send_stream.write_all(&encoded).await {
+                debug!("Failed to send batched ACKs: {}", e);
+            } else {
+                self.metrics.record_sent(encoded.len() as u64);
             }
         }
     }

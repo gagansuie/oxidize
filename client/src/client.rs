@@ -2,8 +2,9 @@ use crate::config::ClientConfig;
 use crate::dns_cache::DnsCache;
 use crate::tun_handler::TunHandler;
 use anyhow::{Context, Result};
-use bytes::Bytes;
-use oxidize_common::{compress_data, should_compress, MessageType, RelayMessage, RelayMetrics};
+use oxidize_common::{
+    compress_data, should_compress, MessageFramer, MessageType, RelayMessage, RelayMetrics,
+};
 use quinn::ClientConfig as QuinnClientConfig;
 use quinn::Endpoint;
 use std::net::SocketAddr;
@@ -38,6 +39,23 @@ impl RelayClient {
 
         let mut transport_config = quinn::TransportConfig::default();
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(300).try_into()?));
+
+        // === HIGH-PERFORMANCE QUIC TUNING ===
+
+        // Larger receive/send windows for high throughput
+        transport_config.receive_window(64_000_000u32.into());
+        transport_config.send_window(64_000_000u64);
+        transport_config.stream_receive_window(16_000_000u32.into());
+
+        // Faster keepalive for low latency connection recovery
+        transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
+
+        // Initial RTT estimate for better initial performance
+        transport_config.initial_rtt(std::time::Duration::from_millis(50));
+
+        // Enable QUIC datagrams for unreliable low-latency traffic (gaming/VoIP)
+        transport_config.datagram_receive_buffer_size(Some(65536));
+        transport_config.datagram_send_buffer_size(65536);
 
         // Enable BBR congestion control for better throughput
         transport_config
@@ -152,6 +170,7 @@ impl RelayClient {
         send.write_all(&encoded).await?;
 
         let mut buffer = vec![0u8; self.config.buffer_size];
+        let mut framer = MessageFramer::with_capacity(self.config.buffer_size);
 
         let keepalive_handle = {
             let interval = self.config.keepalive_interval;
@@ -170,9 +189,23 @@ impl RelayClient {
                         Ok(Some(len)) => {
                             self.metrics.record_received(len as u64);
 
-                            let data = Bytes::copy_from_slice(&buffer[..len]);
-                            if let Ok(message) = RelayMessage::decode(data) {
-                                self.handle_message(message).await?;
+                            // Use framer for proper stream handling
+                            framer.extend(&buffer[..len]);
+
+                            // Process all complete messages
+                            loop {
+                                match framer.try_decode() {
+                                    Ok(Some(message)) => {
+                                        if let Err(e) = self.handle_message(message).await {
+                                            error!("Failed to handle message: {}", e);
+                                        }
+                                    }
+                                    Ok(None) => break, // Need more data
+                                    Err(e) => {
+                                        error!("Failed to decode message: {}", e);
+                                        break;
+                                    }
+                                }
                             }
                         }
                         Ok(None) => {
@@ -209,6 +242,7 @@ impl RelayClient {
         send.write_all(&connect_msg.encode()?).await?;
 
         let mut recv_buf = vec![0u8; self.config.buffer_size];
+        let mut framer = MessageFramer::with_capacity(self.config.buffer_size);
 
         loop {
             tokio::select! {
@@ -219,8 +253,22 @@ impl RelayClient {
                 }
                 result = recv.read(&mut recv_buf) => {
                     match result {
-                        Ok(Some(_)) => {}
-                        _ => break,
+                        Ok(Some(len)) => {
+                            self.metrics.record_received(len as u64);
+                            framer.extend(&recv_buf[..len]);
+
+                            // Process all complete messages
+                            while let Ok(Some(message)) = framer.try_decode() {
+                                if let Err(e) = self.handle_message(message).await {
+                                    error!("Failed to handle message: {}", e);
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            error!("Read error: {}", e);
+                            break;
+                        }
                     }
                 }
             }

@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::lookup_host;
 use tracing::info;
 
 mod client;
@@ -56,7 +57,10 @@ async fn main() -> Result<()> {
         .init();
 
     info!("╔════════════════════════════════════════╗");
-    info!("║   Oxidize Client v0.1.0                ║");
+    info!(
+        "║   Oxidize Client v{}                ║",
+        env!("CARGO_PKG_VERSION")
+    );
     info!("╚════════════════════════════════════════╝");
 
     let config = ClientConfig::load(&args.config).unwrap_or_else(|_| {
@@ -64,7 +68,7 @@ async fn main() -> Result<()> {
         ClientConfig::default()
     });
 
-    let server_addr: SocketAddr = args.server.parse()?;
+    let server_addr: SocketAddr = resolve_server_address(&args.server).await?;
 
     // Run speed test if requested
     if args.speedtest {
@@ -117,4 +121,25 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve a server address that can be either:
+/// - A direct SocketAddr like "1.2.3.4:4433"
+/// - A hostname:port like "oxd.sh:4433"
+async fn resolve_server_address(server: &str) -> Result<SocketAddr> {
+    // First try parsing as a direct SocketAddr
+    if let Ok(addr) = server.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // Otherwise, resolve via DNS
+    let addrs: Vec<SocketAddr> = lookup_host(server)
+        .await
+        .with_context(|| format!("Failed to resolve server address: {}", server))?
+        .collect();
+
+    addrs
+        .into_iter()
+        .next()
+        .with_context(|| format!("No addresses found for: {}", server))
 }
