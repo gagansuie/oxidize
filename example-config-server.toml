@@ -64,3 +64,12 @@ enable_rohc = true
 
 # Maximum packet size for ROHC compression (bytes)
 rohc_max_size = 1500
+
+# ============================================
+# Performance Optimizations (Always Enabled)
+# ============================================
+# The following optimizations are always on:
+# - Zero-copy buffer pooling (eliminates allocations)
+# - Lock-free stream handling (no mutex on hot path)
+# - ACK batching (8 per batch, reduces round-trips)
+# - Latency instrumentation (µs-level timing)

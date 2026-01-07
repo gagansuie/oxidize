@@ -185,11 +185,9 @@ impl RelayServer {
                     let cache = cache.clone();
 
                     tokio::spawn(async move {
-                        let handler =
-                            Arc::new(ConnectionHandler::new(send, recv, metrics, config, cache));
+                        let handler = ConnectionHandler::new(send, recv, metrics, config, cache);
 
                         let conn_id = handler.id();
-                        connections.write().await.insert(conn_id, handler.clone());
 
                         if let Err(e) = handler.handle().await {
                             error!("Handler error for connection {}: {}", conn_id, e);

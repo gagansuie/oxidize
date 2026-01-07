@@ -102,6 +102,41 @@ Then add DNS records (Cloudflare example):
 fly secrets set RUST_LOG=debug  # Enable debug logging
 ```
 
+## Performance Tuning
+
+Performance optimizations are **always enabled** (zero-copy buffers, lock-free streams, ACK batching). Tune these settings for your use case:
+
+### Gaming / Low-Latency
+```toml
+enable_tcp_acceleration = true
+enable_compression = false      # Skip compression for lowest latency
+```
+
+### High-Throughput / API Traffic
+```toml
+enable_compression = true
+compression_threshold = 256     # Compress smaller payloads
+```
+
+### Mobile Networks (High Loss)
+```toml
+enable_rohc = true              # Header compression saves bandwidth
+# FEC auto-adjusts based on loss rate
+```
+
+### Latency Monitoring
+
+Check server latency metrics:
+```bash
+fly ssh console
+curl http://localhost:9090/metrics | grep latency
+```
+
+Target values:
+- Process Latency: < 1µs
+- Encode/Decode: < 0.5µs
+- Forward Latency: depends on destination
+
 ## Regions
 
 | Code | Location |

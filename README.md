@@ -64,6 +64,9 @@ Your ISP's routing is suboptimal:
 - **Ring Buffers** - Lock-free packet queuing
 - **Connection Pooling** - QUIC connection reuse, 10x handshake reduction
 - **SIMD Acceleration** - AVX2/NEON optimized operations
+- **Lock-Free Streams** - No mutex contention on hot path
+- **ACK Batching** - Configurable batching reduces round-trips
+- **Latency Instrumentation** - Built-in µs-level timing for optimization
 
 ### 🧠 Smart Traffic Management
 - **BBRv3 Congestion Control** - Adaptive bandwidth probing with gaming mode
@@ -196,7 +199,22 @@ congestion_algorithm = "bbr_v3"
 
 # Priority scheduling
 enable_priority_scheduler = true
+
+# Performance optimizations are always enabled:
+# - Zero-copy buffer pooling
+# - Lock-free stream handling  
+# - ACK batching (8 per batch)
+# - Latency instrumentation
 ```
+
+### Feature Interactions
+
+| Feature Combo | Interaction | Status |
+|--------------|-------------|--------|
+| FEC + Compression | FEC adds redundancy before compression | ✅ Auto-adapts |
+| ROHC + Small Packets | ROHC best for <200B packets | ✅ Auto-selects per packet |
+| Zero-copy + Compression | Compression into pooled buffer | ✅ No conflict |
+| Priority Scheduler + ACK Batching | Real-time traffic prioritized | ✅ ACKs respect priority |
 
 
 ## Real-World Performance
@@ -224,6 +242,16 @@ enable_priority_scheduler = true
 # Metrics endpoint
 curl http://localhost:9090/metrics
 ```
+
+**Latency Metrics** (new):
+```
+║ Avg Process Latency: 0.7µs    # Per-packet processing time
+║ Avg Forward Latency: 12.3µs   # Time to forward to destination
+║ Avg Encode Latency:  0.2µs    # Message encoding time
+║ Avg Decode Latency:  0.3µs    # Message decoding time
+```
+
+Use these metrics to identify bottlenecks and tune `ack_batch_size` for your workload.
 
 ## Deployment
 
