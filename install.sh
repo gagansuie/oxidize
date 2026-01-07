@@ -202,6 +202,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=$CONFIG_DIR/oxidize.env
 ExecStart=$INSTALL_DIR/$BINARY_NAME --server \${SERVER_ADDR} --config $CONFIG_DIR/client.toml
 ExecStop=/bin/kill -SIGTERM \$MAINPID
 Restart=always
