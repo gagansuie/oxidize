@@ -60,7 +60,7 @@ install_dependencies() {
     echo -e "${YELLOW}Installing dependencies...${NC}"
     
     case $OS in
-        ubuntu|debian)
+        ubuntu|debian|pop|linuxmint|elementary|zorin)
             apt-get update -qq
             apt-get install -y -qq iproute2 iptables resolvconf curl
             ;;
@@ -180,7 +180,6 @@ enable_dns_prefetch = true
 dns_cache_size = 1000
 EOF
         echo -e "${GREEN}Config created at $CONFIG_DIR/client.toml${NC}"
-        echo -e "${YELLOW}⚠️  Edit $CONFIG_DIR/client.toml and set your server address!${NC}"
     else
         echo "Config already exists, skipping..."
     fi
