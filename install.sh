@@ -26,7 +26,11 @@ print_banner() {
     echo -e "${NC}"
 }
 
-show_server_info() {
+set_server_address() {
+    # Allow override via argument, otherwise use default (oxd.sh:4433)
+    if [ -n "$1" ] && [ "$1" != "uninstall" ]; then
+        SERVER_ADDR="$1"
+    fi
     echo -e "${GREEN}Server: $SERVER_ADDR${NC}"
 }
 
@@ -88,7 +92,7 @@ download_binary() {
     
     case $OS in
         macos) PLATFORM="apple-darwin" ;;
-        *) PLATFORM="unknown-linux-gnu" ;;
+        *) PLATFORM="unknown-linux-musl" ;;
     esac
     
     # Check if binary exists locally (for development)
@@ -350,7 +354,7 @@ main() {
     fi
     
     check_root
-    show_server_info
+    set_server_address "$1"
     detect_os
     install_dependencies
     download_binary

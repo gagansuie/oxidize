@@ -17,17 +17,17 @@ curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh |
 ```bash
 # Get latest version
 VERSION=$(curl -s https://api.github.com/repos/gagansuie/oxidize/releases/latest | grep tag_name | cut -d'"' -f4)
-wget https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-x86_64-unknown-linux-gnu.tar.gz
-tar xzf oxidize-client-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+wget https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-x86_64-unknown-linux-musl.tar.gz
+tar xzf oxidize-client-$VERSION-x86_64-unknown-linux-musl.tar.gz
 sudo mv oxidize-client /usr/local/bin/
 ```
 
 #### Linux (ARM64)
 ```bash
-VERSION=$(curl -s https://api.github.com/repos/gagansuie/oxidize/releases/latest | grep tag_name | cut -d'"' -f4)
-wget https://github.com/gagansuie/oxidize/releases/download/$VERSION/oxidize-client-$VERSION-aarch64-unknown-linux-gnu.tar.gz
-tar xzf oxidize-client-$VERSION-aarch64-unknown-linux-gnu.tar.gz
-sudo mv oxidize-client /usr/local/bin/
+# ARM64 Linux: build from source (no prebuilt binary available)
+git clone https://github.com/gagansuie/oxidize.git && cd oxidize
+cargo build --release --package relay-client
+sudo cp target/release/oxidize-client /usr/local/bin/
 ```
 
 #### macOS (Intel)
@@ -184,6 +184,21 @@ oxidize-client --server oxd.sh:4433 --speedtest
 # Check WireGuard app shows "Active" status
 # Visit https://ifconfig.me - should show server IP
 ```
+
+---
+
+## Uninstall
+
+```bash
+# Run the installer with uninstall argument
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- uninstall
+```
+
+This will:
+- Stop and disable the Oxidize service
+- Remove the binary from `/usr/local/bin/`
+- Remove configuration from `/etc/oxidize/`
+- Clean up service files
 
 ---
 

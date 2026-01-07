@@ -139,16 +139,22 @@ Sample output:
 ### One-Click Client Install
 
 ```bash
-# Install and auto-start (prompts for server address)
+# Install and auto-start (defaults to oxd.sh:4433)
 curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
 
-# Or specify server directly
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- oxd.sh:4433
+# Or specify a custom server
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- your-server:4433
 ```
 
 The installer handles everything: downloads binary, configures service, and starts automatically.
 
 > **Review the script:** [install.sh](install.sh)
+
+### Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- uninstall
+```
 
 ### Build from Source
 
@@ -159,11 +165,14 @@ cargo build --release
 # Run server (on your Fly.io/cloud instance)
 ./target/release/oxidize-server --listen 0.0.0.0:4433
 
-# Run client (on your device)
-./target/release/oxidize-client --server oxd.sh:4433
+# Run client (defaults to oxd.sh:4433)
+./target/release/oxidize-client
 
-# Run speed test to verify improvement
-./target/release/oxidize-client --server oxd.sh:4433 --speedtest
+# Or specify a custom server
+./target/release/oxidize-client --server your-server:4433
+
+# Run speed test
+./target/release/oxidize-client --speedtest
 ```
 
 ## Configuration
