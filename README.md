@@ -1,50 +1,55 @@
-# oxidize
+<div align="center">
 
-Enterprise-grade network backbone for everyone. Built in Rust using QUIC protocol.
+# 🦀 Oxidize
 
-## Why Oxidize?
+**Enterprise-grade network backbone for everyone.**
 
-Your ISP's routing is suboptimal. We fix that.
+*Route your traffic through premium infrastructure. Built in Rust with QUIC.*
 
-**The Problem:**
-- Consumer ISPs use congested peering points
-- Last-mile connections have packet loss
-- Poor routing adds 50-200ms of unnecessary latency
+[![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
+[![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-**The Solution:**
-Route your traffic through enterprise-grade backbone infrastructure with premium peering.
+[Installation](#quick-start) · [Documentation](docs/) · [Speed Test](#speed-test) · [Deploy](docs/DEPLOY.md)
 
-## How It Works
+</div>
+
+---
+
+## The Problem
+
+Your ISP's routing is suboptimal:
+- **Congested peering points** → packet loss
+- **Cost-optimized routes** → unnecessary latency (+50-200ms)
+- **No QoS guarantees** → inconsistent performance
+
+## The Solution
 
 ```
-❌ Direct (Your ISP):
-You → Congested ISP routes → Destination
-(120ms, 2% packet loss)
-
-✅ Via Oxidize:
-You → QUIC tunnel → Fly.io edge → Premium peering → Destination
-(80ms, 0% packet loss)
+❌ Direct (Your ISP):     You → Congested ISP routes → Destination     (120ms, 2% loss)
+✅ Via Oxidize:           You → QUIC tunnel → Premium edge → Destination (80ms, 0% loss)
 ```
 
 ## Architecture
 
-Oxidize uses a simple **client-server model**:
-
 ```
 ┌─────────────────┐         ┌─────────────────┐
 │   Your Device   │  QUIC   │  Relay Server   │
-│                 │ ──────► │    (Fly.io)     │ ──────► Internet
-│  oxidize-client │         │  oxidize-server │
+│  oxidize-client │ ──────► │  oxidize-server │ ──────► Internet
 └─────────────────┘         └─────────────────┘
 ```
 
-**Key Points:**
-- **Client** connects to a **centralized relay server** you control
-- **No peer-to-peer** - your traffic only goes through your relay
-- **No bandwidth sharing** - each user has their own connection
-- **Smart Routing** - Gaming tunneled for optimization, streaming bypasses for zero latency
+- **Your relay, your traffic** — no peer-to-peer, no bandwidth sharing
+- **Smart routing** — gaming tunneled, streaming bypassed for zero latency
 
-## Key Features
+## Perfect For
+
+| 🎮 Gamers | 📱 Mobile Users | 🏢 Remote Workers | 🚀 Bad ISPs |
+|-----------|-----------------|-------------------|-------------|
+| Reduce jitter & packet loss | Better than carrier routing | VPN alternative, better perf | Bypass congestion |
+
+## Features
 
 ### 🚀 Core Performance
 - **QUIC Protocol** - 0-RTT resumption, stream multiplexing, fast loss recovery
@@ -100,14 +105,6 @@ Oxidize uses a simple **client-server model**:
 ### 📊 Observability
 - **Prometheus Metrics** - Latency, throughput, compression ratios
 - **Speed Test** - Built-in benchmarking with JSON output
-
-## Perfect For
-
-- 🎮 **Gamers** - Reduce jitter and packet loss
-- 📱 **Mobile users** - Better than your carrier's routing
-- 🏢 **Remote workers** - VPN alternative with better performance
-- 🌐 **API developers** - Faster API calls through compression
-- 🚀 **Anyone with a crappy ISP** - Bypass congestion and poor peering
 
 ## Speed Test
 
@@ -169,36 +166,6 @@ cargo build --release
 ./target/release/oxidize-client --server oxd.sh:4433 --speedtest
 ```
 
-## Why This Works
-
-**Network Quality Difference:**
-```
-Consumer ISP Routing:
-- Congested peering points
-- Cost-optimized (cheapest) routes
-- No QoS guarantees
-- Variable packet loss
-
-Fly.io Edge Network:
-- Premium peering with major networks
-- Low-latency global edge locations
-- Simple scaling to multiple regions
-- Enterprise SLAs
-```
-
-**Protocol Advantages:**
-```
-TCP (Direct):
-- Head-of-line blocking
-- Slow congestion recovery
-- 3-RTT connection setup
-
-QUIC (Oxidize):
-- Stream multiplexing
-- Fast loss recovery
-- 0-RTT resumption
-```
-
 ## Configuration
 
 Create `config.toml`:
@@ -236,28 +203,9 @@ enable_priority_scheduler = true
 
 **Honest benchmarks, no marketing BS.**
 
-## Production Features
+## Production Ready
 
-- ✅ Real TLS certificate support
-- ✅ Per-IP rate limiting
-- ✅ Prometheus metrics
-- ✅ ROHC header compression (pure Rust, enabled by default)
-- ✅ Forward error correction (adaptive FEC)
-- ✅ Multi-path QUIC (WiFi + LTE aggregation)
-- ✅ BBRv3 congestion control with gaming mode
-- ✅ HTTP/3 priority scheduling
-- ✅ Connection pooling
-- ✅ Edge caching
-- ✅ SIMD acceleration (AVX2/NEON)
-- ✅ Connection migration (network handoff)
-- ✅ Relay mesh (multi-server ready)
-- ✅ Predictive prefetching
-- ✅ DDoS protection & auto-blocking
-- ✅ Comprehensive test suite (70+ tests)
-- ✅ Fly.io deployment (~$5/mo)
-- ✅ One-click client installer
-- ✅ Smart traffic classification
-- ✅ Zero external dependencies
+✅ TLS 1.3 &nbsp;·&nbsp; ✅ Rate limiting &nbsp;·&nbsp; ✅ Prometheus metrics &nbsp;·&nbsp; ✅ DDoS protection &nbsp;·&nbsp; ✅ 70+ tests &nbsp;·&nbsp; ✅ Zero external deps &nbsp;·&nbsp; ✅ ~$5/mo on Fly.io
 
 ## Monitoring
 
@@ -308,13 +256,12 @@ cargo bench --package oxidize-common
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
-## CI/CD
-
-[![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
-[![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
-
-Automatic builds for Linux, macOS, and Windows on every release tag.
-
 ## License
 
 MIT OR Apache-2.0
+
+---
+
+<div align="center">
+<sub>Built with 🦀 by <a href="https://github.com/gagansuie">gagansuie</a></sub>
+</div>
