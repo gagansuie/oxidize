@@ -307,7 +307,7 @@ impl TunHandler {
         } else {
             // Backup and modify resolv.conf directly
             warn!("resolvconf not found, modifying /etc/resolv.conf directly");
-            if let Some(backup) = std::fs::read_to_string("/etc/resolv.conf").ok() {
+            if let Ok(backup) = std::fs::read_to_string("/etc/resolv.conf") {
                 std::fs::write("/etc/resolv.conf.oxidize.bak", backup)?;
             }
 

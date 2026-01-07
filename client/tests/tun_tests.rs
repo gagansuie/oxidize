@@ -27,7 +27,7 @@ fn test_ip_bypass_calculation() {
 
     // Server IP should be routable via original gateway
     assert!(server_ip.is_ipv4());
-    assert!(!gateway.is_empty() || gateway == "192.168.1.1");
+    assert_eq!(gateway, "192.168.1.1");
 }
 
 #[test]
