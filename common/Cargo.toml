@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 default = ["rohc"]
 rohc = []
 relay-mesh = []  # Server-side only: relay-to-relay routing (not needed with anycast)
+ai = []  # AI-powered heuristic engine for smart compression, loss prediction, congestion control
 
 [[bench]]
 name = "perf_bench"

@@ -539,7 +539,7 @@ impl TunHandler {
                     last_flush = Instant::now();
 
                     // Log stats periodically
-                    if batches_written % 1000 == 0 {
+                    if batches_written.is_multiple_of(1000) {
                         let avg_batch = packets_written as f64 / batches_written as f64;
                         debug!(
                             "TUN write stats: {} packets, {} batches, avg {:.1} per batch",
@@ -706,13 +706,11 @@ fn flush_tun_batch(
                 }
             }
         }
-    } else {
-        if let Ok(mut dev) = shared_dev.lock() {
-            for packet in batch {
-                if let Err(e) = dev.write_all(packet) {
-                    tracing::error!("TUN batch write error: {}", e);
-                    break;
-                }
+    } else if let Ok(mut dev) = shared_dev.lock() {
+        for packet in batch {
+            if let Err(e) = dev.write_all(packet) {
+                tracing::error!("TUN batch write error: {}", e);
+                break;
             }
         }
     }

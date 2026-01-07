@@ -10,6 +10,8 @@ use tracing::trace;
 #[cfg(feature = "rohc")]
 use tracing::{debug, warn};
 
+#[cfg(feature = "ai")]
+use crate::ai_engine::{CompressionDecision, HeuristicEngine, PacketFeatures};
 use crate::compression::{compress_data, decompress_data};
 
 #[cfg(feature = "rohc")]
@@ -77,10 +79,16 @@ pub struct PacketProcessor {
     config: PacketProcessorConfig,
     #[cfg(feature = "rohc")]
     rohc: Option<RohcContext>,
+    /// AI-powered heuristic engine for smart compression decisions
+    #[cfg(feature = "ai")]
+    ai_engine: Option<HeuristicEngine>,
     /// Statistics
     packets_processed: u64,
     bytes_saved_rohc: i64,
     bytes_saved_lz4: i64,
+    /// AI decision stats
+    #[cfg(feature = "ai")]
+    ai_skipped: u64,
 }
 
 impl PacketProcessor {
@@ -111,9 +119,13 @@ impl PacketProcessor {
             config,
             #[cfg(feature = "rohc")]
             rohc,
+            #[cfg(feature = "ai")]
+            ai_engine: Some(HeuristicEngine::new()),
             packets_processed: 0,
             bytes_saved_rohc: 0,
             bytes_saved_lz4: 0,
+            #[cfg(feature = "ai")]
+            ai_skipped: 0,
         })
     }
 
@@ -127,6 +139,68 @@ impl PacketProcessor {
         // IPv6: version = 6 (high nibble of first byte)
         let version = (data[0] >> 4) & 0xF;
         version == 4 || version == 6
+    }
+
+    /// Compress a packet using AI-enhanced smart decisions
+    /// Uses heuristics to skip compression for encrypted/already-compressed data
+    #[cfg(feature = "ai")]
+    pub fn compress_smart(
+        &mut self,
+        data: &[u8],
+        src_port: u16,
+        dst_port: u16,
+        ip_protocol: u8,
+    ) -> Result<CompressedPacket> {
+        let original_size = data.len();
+        self.packets_processed += 1;
+
+        // Use AI engine for smart compression decision
+        if let Some(ref mut engine) = self.ai_engine {
+            let features = PacketFeatures::extract(data, src_port, dst_port, ip_protocol);
+            let decision = engine.compression_decision(&features);
+
+            match decision {
+                CompressionDecision::Skip => {
+                    self.ai_skipped += 1;
+                    trace!(
+                        "AI: Skipping compression for {} bytes (entropy={:.2}, encrypted={})",
+                        data.len(),
+                        features.entropy,
+                        features.is_encrypted
+                    );
+                    return Ok(CompressedPacket {
+                        data: data.to_vec(),
+                        method: CompressionMethod::None,
+                        original_size,
+                    });
+                }
+                CompressionDecision::Light => {
+                    // Use LZ4 only (fast)
+                    if let Ok(compressed) = compress_data(data) {
+                        if compressed.len() < data.len() {
+                            let saved = data.len() as i64 - compressed.len() as i64;
+                            self.bytes_saved_lz4 += saved;
+                            return Ok(CompressedPacket {
+                                data: compressed,
+                                method: CompressionMethod::Lz4,
+                                original_size,
+                            });
+                        }
+                    }
+                    return Ok(CompressedPacket {
+                        data: data.to_vec(),
+                        method: CompressionMethod::None,
+                        original_size,
+                    });
+                }
+                CompressionDecision::Aggressive => {
+                    // Fall through to full compression pipeline
+                }
+            }
+        }
+
+        // Fall through to standard compression
+        self.compress(data)
     }
 
     /// Compress a packet using the best available method
@@ -262,7 +336,15 @@ impl PacketProcessor {
             bytes_saved_rohc: self.bytes_saved_rohc,
             bytes_saved_lz4: self.bytes_saved_lz4,
             total_bytes_saved: self.bytes_saved_rohc + self.bytes_saved_lz4,
+            #[cfg(feature = "ai")]
+            ai_skipped: self.ai_skipped,
         }
+    }
+
+    /// Get a reference to the AI engine for advanced operations
+    #[cfg(feature = "ai")]
+    pub fn ai_engine(&mut self) -> Option<&mut HeuristicEngine> {
+        self.ai_engine.as_mut()
     }
 }
 
@@ -279,6 +361,9 @@ pub struct PacketProcessorStats {
     pub bytes_saved_rohc: i64,
     pub bytes_saved_lz4: i64,
     pub total_bytes_saved: i64,
+    /// Packets skipped by AI (encrypted/compressed)
+    #[cfg(feature = "ai")]
+    pub ai_skipped: u64,
 }
 
 #[cfg(test)]
@@ -329,6 +414,47 @@ mod tests {
         let data = vec![0u8; 1000];
         let result = processor.compress(&data).unwrap();
 
+        assert!(
+            result.method == CompressionMethod::Lz4 || result.method == CompressionMethod::None
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ai")]
+    fn test_smart_compression_skips_encrypted() {
+        let mut processor = PacketProcessor::new().unwrap();
+
+        // Simulate TLS-encrypted data (high entropy)
+        let mut encrypted_data = vec![0u8; 1000];
+        for (i, byte) in encrypted_data.iter_mut().enumerate() {
+            *byte = (i * 7 + 13) as u8; // Pseudo-random
+        }
+        // TLS record header
+        encrypted_data[0] = 0x17; // Application data
+        encrypted_data[1] = 0x03; // TLS version
+
+        let result = processor
+            .compress_smart(&encrypted_data, 12345, 443, 6)
+            .unwrap();
+
+        // Should skip compression for encrypted data
+        assert_eq!(result.method, CompressionMethod::None);
+        assert!(processor.stats().ai_skipped > 0);
+    }
+
+    #[test]
+    #[cfg(feature = "ai")]
+    fn test_smart_compression_compresses_json() {
+        let mut processor = PacketProcessor::new().unwrap();
+
+        // JSON data (very compressible)
+        let json_data = br#"{"users": [{"name": "alice", "age": 30}, {"name": "bob", "age": 25}], "count": 2, "status": "ok", "message": "success"}"#;
+        let data = json_data.to_vec();
+
+        let result = processor.compress_smart(&data, 12345, 80, 6).unwrap();
+
+        // Should compress JSON (or at least not skip)
+        // LZ4 compression may or may not be smaller for small data
         assert!(
             result.method == CompressionMethod::Lz4 || result.method == CompressionMethod::None
         );

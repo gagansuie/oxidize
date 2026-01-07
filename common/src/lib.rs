@@ -1,4 +1,7 @@
 pub mod adaptive_fec;
+
+#[cfg(feature = "ai")]
+pub mod ai_engine;
 pub mod benchmark;
 pub mod compression;
 pub mod congestion_control;

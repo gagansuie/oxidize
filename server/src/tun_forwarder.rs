@@ -140,7 +140,7 @@ impl SharedTunForwarder {
             .write_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if count % 10000 == 0 {
+        if count.is_multiple_of(10000) {
             let batches = self.stats.load(std::sync::atomic::Ordering::Relaxed);
             let syscalls_saved = count.saturating_sub(batches);
             info!(
