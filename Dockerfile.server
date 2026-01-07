@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY common/Cargo.toml common/
 COPY server/Cargo.toml server/
 COPY client/Cargo.toml client/
@@ -22,8 +22,8 @@ RUN mkdir -p common/src server/src client/src common/benches \
     && echo "fn main() {}" > client/src/main.rs \
     && echo "fn main() {}" > common/benches/perf_bench.rs
 
-# Build dependencies only (cached layer)
-RUN cargo build --release --package relay-server || true
+# Generate Cargo.lock and build dependencies (cached layer)
+RUN cargo generate-lockfile && cargo build --release --package relay-server || true
 
 # Copy actual source code
 COPY common/src common/src
