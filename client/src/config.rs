@@ -55,6 +55,21 @@ pub struct ClientConfig {
     /// Ports considered real-time/gaming traffic (use datagrams)
     #[serde(default = "default_realtime_ports")]
     pub realtime_ports: Vec<u16>,
+
+    // === Multi-path Support ===
+    /// Enable multi-path for bandwidth aggregation and failover
+    #[serde(default = "default_enable_multipath")]
+    pub enable_multipath: bool,
+
+    // === Predictive Prefetching ===
+    /// Enable predictive DNS/connection prefetching
+    #[serde(default = "default_enable_prefetch")]
+    pub enable_prefetch: bool,
+
+    // === AI/Heuristic Engine ===
+    /// Enable AI-powered heuristic engine for smart compression decisions
+    #[serde(default = "default_enable_ai_engine")]
+    pub enable_ai_engine: bool,
 }
 
 fn default_enable_rohc() -> bool {
@@ -111,6 +126,18 @@ fn default_realtime_ports() -> Vec<u16> {
     ]
 }
 
+fn default_enable_multipath() -> bool {
+    true
+}
+
+fn default_enable_prefetch() -> bool {
+    true
+}
+
+fn default_enable_ai_engine() -> bool {
+    true
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -134,6 +161,9 @@ impl Default for ClientConfig {
             enable_migration: default_enable_migration(),
             enable_stream_multiplexing: default_enable_stream_multiplexing(),
             realtime_ports: default_realtime_ports(),
+            enable_multipath: default_enable_multipath(),
+            enable_prefetch: default_enable_prefetch(),
+            enable_ai_engine: default_enable_ai_engine(),
         }
     }
 }

@@ -365,7 +365,10 @@ impl HeuristicCompressionOracle {
             return true;
         }
         // Check if mostly printable ASCII
-        let printable_count = header.iter().filter(|&&b| b >= 0x20 && b < 0x7F).count();
+        let printable_count = header
+            .iter()
+            .filter(|&&b| (0x20..0x7F).contains(&b))
+            .count();
         printable_count > 12
     }
 }
@@ -565,8 +568,7 @@ impl CongestionController for HeuristicCongestionController {
         };
 
         let new_cwnd = ((bdp as f32 * self.cwnd_gain * loss_factor * buffer_factor) as u32)
-            .max(1460) // At least 1 MSS
-            .min(1_048_576); // Cap at 1MB
+            .clamp(1460, 1_048_576);
 
         let pacing_rate = (self.max_bw_bps as f32 * self.pacing_gain * loss_factor) as u64;
 
@@ -817,6 +819,7 @@ pub struct NetworkStateTracker {
     /// Packets acked in current window
     packets_acked: u64,
     /// Last update time
+    #[allow(dead_code)]
     last_update: Instant,
     /// Window duration
     window: Duration,

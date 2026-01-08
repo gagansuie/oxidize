@@ -155,23 +155,61 @@ async fn main() -> Result<()> {
         let wg_port = config_ref.wireguard_port.unwrap_or(51820);
         let wg_addr: SocketAddr = format!("0.0.0.0:{}", wg_port).parse()?;
 
-        if let Some(ref private_key_b64) = config_ref.wireguard_private_key {
-            use base64::{engine::general_purpose, Engine as _};
-            let key_bytes = general_purpose::STANDARD.decode(private_key_b64)?;
-            let mut private_key = [0u8; 32];
-            private_key.copy_from_slice(&key_bytes);
+        // Auto-generate keys if not configured
+        let (private_key, public_key_b64) =
+            if let Some(ref private_key_b64) = config_ref.wireguard_private_key {
+                use base64::{engine::general_purpose, Engine as _};
+                let key_bytes = general_purpose::STANDARD.decode(private_key_b64)?;
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(&key_bytes);
 
-            let wg_server = WireGuardServer::new(wg_addr, private_key).await?;
-            info!("📱 WireGuard server listening on {}", wg_addr);
+                // Derive public key for display
+                use boringtun::x25519;
+                let secret = x25519::StaticSecret::from(pk);
+                let public = x25519::PublicKey::from(&secret);
+                let pub_b64 = general_purpose::STANDARD.encode(public.as_bytes());
 
-            tokio::spawn(async move {
-                if let Err(e) = wg_server.run().await {
-                    warn!("WireGuard server error: {}", e);
-                }
-            });
-        } else {
-            warn!("WireGuard enabled but no private key configured");
+                (pk, pub_b64)
+            } else {
+                // Auto-generate new keys
+                info!("🔑 Auto-generating WireGuard keys...");
+                let (private_b64, public_b64, private_key) = generate_server_config()?;
+
+                info!("╔════════════════════════════════════════════════════════════════╗");
+                info!("║              WireGuard Auto-Generated Keys                      ║");
+                info!("╠════════════════════════════════════════════════════════════════╣");
+                info!("║ Add to config.toml to persist:                                 ║");
+                info!("║ wireguard_private_key = \"{}\"  ║", private_b64);
+                info!("╚════════════════════════════════════════════════════════════════╝");
+
+                (private_key, public_b64)
+            };
+
+        let wg_server = WireGuardServer::new(wg_addr, private_key).await?;
+        info!("📱 WireGuard server listening on {}", wg_addr);
+
+        // Auto-display client config for mobile users
+        let endpoint = format!("{}:{}", args.listen.ip(), wg_port);
+        let client_config = generate_client_config(&endpoint, &public_key_b64, None)?;
+
+        info!("╔════════════════════════════════════════════════════════════════╗");
+        info!("║              WireGuard Mobile Client Config                     ║");
+        info!("╠════════════════════════════════════════════════════════════════╣");
+        info!("║ Scan QR code or import config in WireGuard app:                ║");
+        info!("╚════════════════════════════════════════════════════════════════╝");
+        for line in client_config.lines() {
+            info!("  {}", line);
         }
+        info!(
+            "Generate QR: echo '{}' | qrencode -t ansiutf8",
+            client_config.replace('\n', "\\n")
+        );
+
+        tokio::spawn(async move {
+            if let Err(e) = wg_server.run().await {
+                warn!("WireGuard server error: {}", e);
+            }
+        });
     }
 
     server.run().await?;

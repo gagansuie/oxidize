@@ -4,6 +4,12 @@
 //! Falls back to scalar implementation on unsupported platforms.
 //! Provides 2-4x speedup on modern CPUs.
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Check if SIMD is available at runtime
@@ -126,9 +132,64 @@ impl SimdOps {
     /// SIMD memcpy implementation
     #[inline(always)]
     fn simd_memcpy(&self, dst: &mut [u8], src: &[u8], len: usize) {
-        // For now, use the standard library's optimized copy
-        // In a real implementation, you'd use platform-specific SIMD intrinsics
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.capability == SimdCapability::Avx2 {
+                unsafe { self.memcpy_avx2(dst, src, len) };
+                return;
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if self.capability == SimdCapability::Neon {
+                unsafe { self.memcpy_neon(dst, src, len) };
+                return;
+            }
+        }
+
         dst[..len].copy_from_slice(&src[..len]);
+    }
+
+    /// AVX2-accelerated memcpy
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn memcpy_avx2(&self, dst: &mut [u8], src: &[u8], len: usize) {
+        let mut i = 0;
+
+        // Process 32 bytes at a time with AVX2
+        while i + 32 <= len {
+            let chunk = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, chunk);
+            i += 32;
+        }
+
+        // Handle remaining bytes
+        while i < len {
+            *dst.get_unchecked_mut(i) = *src.get_unchecked(i);
+            i += 1;
+        }
+    }
+
+    /// NEON-accelerated memcpy for ARM64
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    unsafe fn memcpy_neon(&self, dst: &mut [u8], src: &[u8], len: usize) {
+        let mut i = 0;
+
+        // Process 16 bytes at a time with NEON
+        while i + 16 <= len {
+            let chunk = vld1q_u8(src.as_ptr().add(i));
+            vst1q_u8(dst.as_mut_ptr().add(i), chunk);
+            i += 16;
+        }
+
+        // Handle remaining bytes
+        while i < len {
+            *dst.get_unchecked_mut(i) = *src.get_unchecked(i);
+            i += 1;
+        }
     }
 
     /// SIMD-accelerated XOR operation (useful for FEC)
@@ -138,7 +199,17 @@ impl SimdOps {
         #[cfg(target_arch = "x86_64")]
         {
             if self.capability == SimdCapability::Avx2 && len >= 32 {
-                self.xor_avx2(dst, src, len);
+                // SAFETY: We've verified AVX2 is available
+                unsafe { self.xor_avx2(dst, src, len) };
+                return;
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if self.capability == SimdCapability::Neon && len >= 16 {
+                // SAFETY: NEON is always available on AArch64
+                unsafe { self.xor_neon_impl(dst, src, len) };
                 return;
             }
         }
@@ -158,20 +229,55 @@ impl SimdOps {
         }
     }
 
+    /// AVX2-accelerated XOR operation
     #[cfg(target_arch = "x86_64")]
-    #[inline(always)]
-    fn xor_avx2(&self, dst: &mut [u8], src: &[u8], len: usize) {
-        // Placeholder for AVX2 XOR implementation
-        // In production, use std::arch intrinsics
-        let chunks = len / 32;
-        for i in 0..chunks {
-            let idx = i * 32;
-            for j in 0..32 {
-                dst[idx + j] ^= src[idx + j];
-            }
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn xor_avx2(&self, dst: &mut [u8], src: &[u8], len: usize) {
+        let mut i = 0;
+
+        // Process 32 bytes at a time with AVX2
+        while i + 32 <= len {
+            let a = _mm256_loadu_si256(dst.as_ptr().add(i) as *const __m256i);
+            let b = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+            let result = _mm256_xor_si256(a, b);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, result);
+            i += 32;
         }
-        for i in (chunks * 32)..len {
-            dst[i] ^= src[i];
+
+        // Handle remaining bytes
+        while i < len {
+            *dst.get_unchecked_mut(i) ^= *src.get_unchecked(i);
+            i += 1;
+        }
+    }
+
+    /// NEON-accelerated XOR operation for ARM64
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    pub fn xor_neon(&self, dst: &mut [u8], src: &[u8]) {
+        let len = dst.len().min(src.len());
+        unsafe { self.xor_neon_impl(dst, src, len) };
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    unsafe fn xor_neon_impl(&self, dst: &mut [u8], src: &[u8], len: usize) {
+        let mut i = 0;
+
+        // Process 16 bytes at a time with NEON
+        while i + 16 <= len {
+            let a = vld1q_u8(dst.as_ptr().add(i));
+            let b = vld1q_u8(src.as_ptr().add(i));
+            let result = veorq_u8(a, b);
+            vst1q_u8(dst.as_mut_ptr().add(i), result);
+            i += 16;
+        }
+
+        // Handle remaining bytes
+        while i < len {
+            *dst.get_unchecked_mut(i) ^= *src.get_unchecked(i);
+            i += 1;
         }
     }
 

@@ -2,6 +2,9 @@ use crate::config::ClientConfig;
 use crate::dns_cache::DnsCache;
 use crate::tun_handler::TunHandler;
 use anyhow::{Context, Result};
+use oxidize_common::ai_engine::HeuristicEngine;
+use oxidize_common::multipath::{MultipathScheduler, SchedulingStrategy};
+use oxidize_common::prefetch::{PrefetchConfig, Prefetcher};
 use oxidize_common::{
     compress_data, should_compress, MessageFramer, MessageType, RelayMessage, RelayMetrics,
 };
@@ -15,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 /// Certificate verifier that accepts any certificate (for self-signed certs)
@@ -53,7 +56,13 @@ pub struct RelayClient {
     /// Ports that should use QUIC datagrams for low-latency
     realtime_ports: HashSet<u16>,
     /// Cached session ticket for 0-RTT resumption
-    session_ticket: Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    session_ticket: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Multi-path scheduler for bandwidth aggregation
+    multipath: Arc<Mutex<MultipathScheduler>>,
+    /// Predictive prefetcher for DNS/connections
+    prefetcher: Arc<Mutex<Prefetcher>>,
+    /// AI/Heuristic engine for smart compression
+    ai_engine: Arc<Mutex<HeuristicEngine>>,
 }
 
 impl RelayClient {
@@ -107,9 +116,35 @@ impl RelayClient {
         let realtime_ports: HashSet<u16> = config.realtime_ports.iter().cloned().collect();
 
         // Load cached session ticket for 0-RTT
-        let session_ticket = Arc::new(tokio::sync::Mutex::new(Self::load_session_ticket(
+        let session_ticket = Arc::new(Mutex::new(Self::load_session_ticket(
             &config.session_cache_path,
         )));
+
+        // Initialize multi-path scheduler
+        let multipath = Arc::new(Mutex::new(MultipathScheduler::new(
+            SchedulingStrategy::Weighted,
+        )));
+
+        // Initialize predictive prefetcher
+        let prefetch_config = PrefetchConfig {
+            prefetch_dns: config.enable_dns_prefetch,
+            prefetch_connections: config.enable_prefetch,
+            ..Default::default()
+        };
+        let prefetcher = Arc::new(Mutex::new(Prefetcher::new(prefetch_config)));
+
+        // Initialize AI/Heuristic engine
+        let ai_engine = Arc::new(Mutex::new(HeuristicEngine::new()));
+
+        if config.enable_multipath {
+            info!("🔀 Multi-path support enabled");
+        }
+        if config.enable_prefetch {
+            info!("🔮 Predictive prefetching enabled");
+        }
+        if config.enable_ai_engine {
+            info!("🧠 AI heuristic engine enabled");
+        }
 
         Ok(Self {
             endpoint,
@@ -120,6 +155,9 @@ impl RelayClient {
             dns_cache,
             realtime_ports,
             session_ticket,
+            multipath,
+            prefetcher,
+            ai_engine,
         })
     }
 
@@ -472,9 +510,18 @@ impl RelayClient {
 
         let mut message = RelayMessage::data(self.connection_id, sequence, packet);
 
-        if self.config.enable_compression
-            && should_compress(&message.payload, self.config.compression_threshold)
-        {
+        // Use AI engine for smart compression decision if enabled
+        let should_compress_packet = if self.config.enable_ai_engine {
+            let ai = self.ai_engine.lock().await;
+            // Extract destination port from IP packet for AI decision
+            let dst_port = Self::extract_dst_port(&message.payload);
+            !ai.should_skip_compression(&message.payload, dst_port)
+        } else {
+            self.config.enable_compression
+                && should_compress(&message.payload, self.config.compression_threshold)
+        };
+
+        if should_compress_packet {
             let compressed = compress_data(&message.payload)?;
 
             if compressed.len() < message.payload.len() {
@@ -498,6 +545,22 @@ impl RelayClient {
         self.metrics.record_process_latency(process_start.elapsed());
 
         Ok(())
+    }
+
+    /// Extract destination port from IP packet
+    fn extract_dst_port(packet: &[u8]) -> u16 {
+        if packet.len() < 24 {
+            return 0;
+        }
+        let version = packet[0] >> 4;
+        if version != 4 {
+            return 0;
+        }
+        let ihl = (packet[0] & 0x0f) as usize * 4;
+        if packet.len() < ihl + 4 {
+            return 0;
+        }
+        u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]])
     }
 
     async fn handle_message(&self, message: RelayMessage) -> Result<()> {
@@ -529,6 +592,9 @@ impl RelayClient {
             dns_cache: self.dns_cache.clone(),
             realtime_ports: self.realtime_ports.clone(),
             session_ticket: self.session_ticket.clone(),
+            multipath: self.multipath.clone(),
+            prefetcher: self.prefetcher.clone(),
+            ai_engine: self.ai_engine.clone(),
         }
     }
 }

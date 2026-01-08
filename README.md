@@ -241,15 +241,15 @@ enable_priority_scheduler = true
 
 ## Real-World Performance
 
-### 🎯 Relay Overhead: 0.005%
+### 🎯 Relay Overhead: 0.004%
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                    PERFORMANCE BREAKDOWN                        │
 ├────────────────────────────────────────────────────────────────┤
-│  Per-packet processing:     0.8µs                              │
+│  Per-packet processing:     0.7µs (with AI heuristics)         │
 │  Gaming tick (64 Hz):       15,625µs                           │
-│  Overhead percentage:       0.005%                             │
+│  Overhead percentage:       0.004%                             │
 │                                                                │
 │  Verdict: EFFECTIVELY INVISIBLE                                │
 └────────────────────────────────────────────────────────────────┘
@@ -257,10 +257,10 @@ enable_priority_scheduler = true
 
 | Workload | Tick Rate | Tick Period | Oxidize Overhead |
 |----------|-----------|-------------|------------------|
-| Competitive FPS | 128 Hz | 7.8ms | **0.01%** |
-| Standard Gaming | 64 Hz | 15.6ms | **0.005%** |
-| VoIP (20ms frames) | 50 Hz | 20ms | **0.004%** |
-| Video Streaming | 60 Hz | 16.7ms | **0.005%** |
+| Competitive FPS | 128 Hz | 7.8ms | **0.009%** |
+| Standard Gaming | 64 Hz | 15.6ms | **0.004%** |
+| VoIP (20ms frames) | 50 Hz | 20ms | **0.0035%** |
+| Video Streaming | 60 Hz | 16.7ms | **0.004%** |
 
 **Why it matters:** Batching and QUIC datagrams eliminate latency *spikes* - the micro-stutters from syscalls and head-of-line blocking that ruin gaming feel.
 

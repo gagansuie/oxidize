@@ -52,6 +52,22 @@ pub struct Config {
     /// Lower values = lower latency, higher values = higher throughput
     #[serde(default = "default_ack_batch_size")]
     pub ack_batch_size: usize,
+
+    // === Edge Caching ===
+    /// Enable edge caching for static content
+    #[serde(default = "default_enable_edge_cache")]
+    pub enable_edge_cache: bool,
+    /// Maximum edge cache size in bytes (default 64MB)
+    #[serde(default = "default_edge_cache_size")]
+    pub edge_cache_size: usize,
+    /// Maximum number of cache entries
+    #[serde(default = "default_edge_cache_entries")]
+    pub edge_cache_entries: usize,
+
+    // === AI/Heuristic Engine ===
+    /// Enable AI-powered heuristic engine for smart compression/FEC
+    #[serde(default = "default_enable_ai_engine")]
+    pub enable_ai_engine: bool,
 }
 
 fn default_enable_wireguard() -> bool {
@@ -94,6 +110,22 @@ fn default_enable_challenges() -> bool {
     true
 }
 
+fn default_enable_edge_cache() -> bool {
+    true
+}
+
+fn default_edge_cache_size() -> usize {
+    64 * 1024 * 1024 // 64MB
+}
+
+fn default_edge_cache_entries() -> usize {
+    10000
+}
+
+fn default_enable_ai_engine() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -119,6 +151,10 @@ impl Default for Config {
             max_bandwidth_per_ip: 10 * 1024 * 1024,
             auto_block_threshold: 10,
             enable_challenges: true,
+            enable_edge_cache: true,
+            edge_cache_size: 64 * 1024 * 1024,
+            edge_cache_entries: 10000,
+            enable_ai_engine: true,
         }
     }
 }

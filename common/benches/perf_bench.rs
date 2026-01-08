@@ -46,7 +46,6 @@ fn main() {
     bench_end_to_end();
     bench_throughput();
 
-    #[cfg(feature = "rohc")]
     bench_rohc();
 
     bench_network_simulation();
@@ -516,8 +515,7 @@ fn print_key_takeaways() {
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
 }
-/// ROHC Header Compression Benchmark (requires --features rohc)
-#[cfg(feature = "rohc")]
+/// ROHC Header Compression Benchmark
 fn bench_rohc() {
     use oxidize_common::rohc::RohcContext;
 

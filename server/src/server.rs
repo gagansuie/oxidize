@@ -1,4 +1,6 @@
 use anyhow::Result;
+use oxidize_common::ai_engine::HeuristicEngine;
+use oxidize_common::edge_cache::{CacheConfig, EdgeCache};
 use oxidize_common::security::{SecurityAction, SecurityConfig, SecurityManager};
 use oxidize_common::RelayMetrics;
 use quinn::{Connection, Endpoint, ServerConfig};
@@ -23,6 +25,10 @@ pub struct RelayServer {
     cache: Arc<DataCache>,
     security: Arc<Mutex<SecurityManager>>,
     forwarder: Arc<SharedTunForwarder>,
+    /// Edge cache for static content
+    edge_cache: Arc<RwLock<EdgeCache>>,
+    /// AI/Heuristic engine for smart decisions
+    ai_engine: Arc<Mutex<HeuristicEngine>>,
 }
 
 impl RelayServer {
@@ -100,6 +106,30 @@ impl RelayServer {
         // Initialize shared TUN forwarder at server startup
         let forwarder = SharedTunForwarder::new().await?;
 
+        // Initialize edge cache
+        let edge_cache_config = CacheConfig {
+            max_size: config.edge_cache_size,
+            max_entries: config.edge_cache_entries,
+            enabled: config.enable_edge_cache,
+            ..Default::default()
+        };
+        let edge_cache = Arc::new(RwLock::new(EdgeCache::new(edge_cache_config)));
+
+        // Initialize AI/Heuristic engine
+        let ai_engine = Arc::new(Mutex::new(HeuristicEngine::new()));
+
+        if config.enable_edge_cache {
+            info!(
+                "📦 Edge cache enabled ({}MB, {} entries)",
+                config.edge_cache_size / 1024 / 1024,
+                config.edge_cache_entries
+            );
+        }
+
+        if config.enable_ai_engine {
+            info!("🧠 AI heuristic engine enabled");
+        }
+
         Ok(Self {
             endpoint,
             config,
@@ -108,6 +138,8 @@ impl RelayServer {
             cache: Arc::new(DataCache::new()),
             security,
             forwarder,
+            edge_cache,
+            ai_engine,
         })
     }
 
@@ -122,13 +154,40 @@ impl RelayServer {
     pub async fn run(&self) -> Result<()> {
         info!("Server running and accepting connections...");
 
-        // Spawn cleanup task
+        // Spawn cleanup task for security and edge cache
         let security_cleanup = self.security.clone();
+        let cache_cleanup = self.edge_cache.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 security_cleanup.lock().await.cleanup();
+                // Cleanup expired cache entries
+                cache_cleanup.write().await.cleanup_expired();
+            }
+        });
+
+        // Log cache stats periodically
+        let cache_stats = self.edge_cache.clone();
+        let ai_stats = self.ai_engine.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let stats = cache_stats.read().await.get_stats();
+                if stats.hits > 0 || stats.misses > 0 {
+                    info!(
+                        "📦 Edge cache: {:.1}% hit rate, {} entries, {}MB used",
+                        stats.hit_rate,
+                        stats.entries,
+                        stats.size_bytes / 1024 / 1024
+                    );
+                }
+                let engine_stats = ai_stats.lock().await.stats.clone();
+                info!(
+                    "🧠 AI engine: {} compression skipped, {} FEC injected",
+                    engine_stats.compression_skipped, engine_stats.fec_injected
+                );
             }
         });
 

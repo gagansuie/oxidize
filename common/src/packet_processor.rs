@@ -7,14 +7,10 @@
 use anyhow::Result;
 use tracing::trace;
 
-#[cfg(feature = "rohc")]
 use tracing::{debug, warn};
 
-#[cfg(feature = "ai")]
 use crate::ai_engine::{CompressionDecision, HeuristicEngine, PacketFeatures};
 use crate::compression::{compress_data, decompress_data};
-
-#[cfg(feature = "rohc")]
 use crate::rohc::RohcContext;
 
 /// Compression method indicator for the wire protocol
@@ -77,17 +73,14 @@ pub struct CompressedPacket {
 /// Unified packet processor for compression/decompression
 pub struct PacketProcessor {
     config: PacketProcessorConfig,
-    #[cfg(feature = "rohc")]
     rohc: Option<RohcContext>,
     /// AI-powered heuristic engine for smart compression decisions
-    #[cfg(feature = "ai")]
     ai_engine: Option<HeuristicEngine>,
     /// Statistics
     packets_processed: u64,
     bytes_saved_rohc: i64,
     bytes_saved_lz4: i64,
     /// AI decision stats
-    #[cfg(feature = "ai")]
     ai_skipped: u64,
 }
 
@@ -99,7 +92,6 @@ impl PacketProcessor {
 
     /// Create a new packet processor with custom configuration
     pub fn with_config(config: PacketProcessorConfig) -> Result<Self> {
-        #[cfg(feature = "rohc")]
         let rohc = if config.enable_rohc {
             match RohcContext::new() {
                 Ok(ctx) => {
@@ -117,20 +109,16 @@ impl PacketProcessor {
 
         Ok(PacketProcessor {
             config,
-            #[cfg(feature = "rohc")]
             rohc,
-            #[cfg(feature = "ai")]
             ai_engine: Some(HeuristicEngine::new()),
             packets_processed: 0,
             bytes_saved_rohc: 0,
             bytes_saved_lz4: 0,
-            #[cfg(feature = "ai")]
             ai_skipped: 0,
         })
     }
 
     /// Check if this looks like an IP packet
-    #[cfg(feature = "rohc")]
     fn is_ip_packet(data: &[u8]) -> bool {
         if data.is_empty() {
             return false;
@@ -143,7 +131,6 @@ impl PacketProcessor {
 
     /// Compress a packet using AI-enhanced smart decisions
     /// Uses heuristics to skip compression for encrypted/already-compressed data
-    #[cfg(feature = "ai")]
     pub fn compress_smart(
         &mut self,
         data: &[u8],
@@ -209,7 +196,6 @@ impl PacketProcessor {
         self.packets_processed += 1;
 
         // Try ROHC first for IP packets within size limit
-        #[cfg(feature = "rohc")]
         if let Some(ref mut rohc) = self.rohc {
             if Self::is_ip_packet(data) && data.len() <= self.config.rohc_max_size {
                 match rohc.compress(data) {
@@ -295,7 +281,6 @@ impl PacketProcessor {
 
             CompressionMethod::Lz4 => decompress_data(data),
 
-            #[cfg(feature = "rohc")]
             CompressionMethod::Rohc => {
                 if let Some(ref mut rohc) = self.rohc {
                     rohc.decompress(data)
@@ -304,12 +289,6 @@ impl PacketProcessor {
                 }
             }
 
-            #[cfg(not(feature = "rohc"))]
-            CompressionMethod::Rohc => {
-                anyhow::bail!("ROHC support not compiled in")
-            }
-
-            #[cfg(feature = "rohc")]
             CompressionMethod::RohcLz4 => {
                 // First decompress LZ4
                 let lz4_decompressed = decompress_data(data)?;
@@ -321,11 +300,6 @@ impl PacketProcessor {
                     anyhow::bail!("ROHC not available for decompression")
                 }
             }
-
-            #[cfg(not(feature = "rohc"))]
-            CompressionMethod::RohcLz4 => {
-                anyhow::bail!("ROHC support not compiled in")
-            }
         }
     }
 
@@ -336,13 +310,11 @@ impl PacketProcessor {
             bytes_saved_rohc: self.bytes_saved_rohc,
             bytes_saved_lz4: self.bytes_saved_lz4,
             total_bytes_saved: self.bytes_saved_rohc + self.bytes_saved_lz4,
-            #[cfg(feature = "ai")]
             ai_skipped: self.ai_skipped,
         }
     }
 
     /// Get a reference to the AI engine for advanced operations
-    #[cfg(feature = "ai")]
     pub fn ai_engine(&mut self) -> Option<&mut HeuristicEngine> {
         self.ai_engine.as_mut()
     }
@@ -362,7 +334,6 @@ pub struct PacketProcessorStats {
     pub bytes_saved_lz4: i64,
     pub total_bytes_saved: i64,
     /// Packets skipped by AI (encrypted/compressed)
-    #[cfg(feature = "ai")]
     pub ai_skipped: u64,
 }
 
@@ -384,7 +355,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "rohc")]
     fn test_is_ip_packet() {
         // IPv4 packet (version 4)
         let ipv4 = [0x45, 0x00, 0x00, 0x14]; // Version 4, IHL 5
@@ -420,7 +390,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "ai")]
     fn test_smart_compression_skips_encrypted() {
         let mut processor = PacketProcessor::new().unwrap();
 
@@ -443,7 +412,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "ai")]
     fn test_smart_compression_compresses_json() {
         let mut processor = PacketProcessor::new().unwrap();
 

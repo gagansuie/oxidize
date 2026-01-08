@@ -1,6 +1,5 @@
 pub mod adaptive_fec;
 
-#[cfg(feature = "ai")]
 pub mod ai_engine;
 pub mod benchmark;
 pub mod compression;
@@ -24,7 +23,6 @@ pub mod traffic_classifier;
 pub mod udp_batch;
 pub mod zero_copy;
 
-#[cfg(feature = "rohc")]
 pub mod rohc;
 
 #[cfg(target_os = "linux")]
