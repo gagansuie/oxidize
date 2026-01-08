@@ -75,7 +75,9 @@ struct InferenceCache {
     /// Last path selection per traffic type
     path_cache: RwLock<[PathId; 5]>,
     /// Cache timestamps
+    #[allow(dead_code)]
     fec_updated: AtomicU64,
+    #[allow(dead_code)]
     congestion_updated: AtomicU64,
 }
 
@@ -180,7 +182,7 @@ impl MlIntegration {
     #[inline]
     pub fn get_fec_decision(&self) -> FecDecision {
         self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-        self.cache.fec_decision.read().unwrap().clone()
+        *self.cache.fec_decision.read().unwrap()
     }
 
     /// Get cached congestion action (non-blocking)

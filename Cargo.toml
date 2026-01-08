@@ -43,4 +43,4 @@ candle-core = "0.8"
 candle-nn = "0.8"
 safetensors = "0.4"
 rand = "0.8"
-hf-hub = "0.3"
+hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }

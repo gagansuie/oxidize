@@ -23,6 +23,9 @@ use tracing::{debug, trace, warn};
 #[cfg(feature = "ai")]
 use tract_onnx::prelude::*;
 
+#[cfg(feature = "ai")]
+type TractModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
 // ============================================================================
 // LSTM LOSS PREDICTOR
 // ============================================================================
@@ -77,7 +80,7 @@ pub struct LstmLossPredictor {
     history: VecDeque<LossSample>,
     /// Trained ONNX model (loaded at runtime)
     #[cfg(feature = "ai")]
-    model: Option<SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>>,
+    model: Option<TractModel>,
     #[cfg(not(feature = "ai"))]
     model: Option<()>,
     /// Fallback heuristic when model unavailable
@@ -506,8 +509,7 @@ pub struct DrlCongestionController {
     current_state: DrlState,
     /// ONNX policy model
     #[cfg(feature = "ai")]
-    policy_model:
-        Option<SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>>,
+    policy_model: Option<TractModel>,
     #[cfg(not(feature = "ai"))]
     policy_model: Option<()>,
     /// Experience replay buffer for training
@@ -704,9 +706,7 @@ impl DrlCongestionController {
 
         let action = if state.loss_rate > 0.1 {
             DrlAction::DecreaseLarge
-        } else if state.loss_rate > 0.01 {
-            DrlAction::DecreaseSmall
-        } else if state.buffer_occupancy > 0.8 {
+        } else if state.loss_rate > 0.01 || state.buffer_occupancy > 0.8 {
             DrlAction::DecreaseSmall
         } else if state.rtt_gradient > 0.1 {
             // RTT increasing - back off
@@ -764,9 +764,7 @@ impl CongestionController for DrlCongestionController {
 
         let action = if state.loss_rate > 0.1 {
             DrlAction::DecreaseLarge
-        } else if state.loss_rate > 0.01 {
-            DrlAction::DecreaseSmall
-        } else if state.buffer_occupancy > 0.8 {
+        } else if state.loss_rate > 0.01 || state.buffer_occupancy > 0.8 {
             DrlAction::DecreaseSmall
         } else if features.loss_rate < 0.005 {
             DrlAction::IncreaseSmall
@@ -804,7 +802,7 @@ pub struct DrlStats {
 fn rand_float() -> f32 {
     use std::cell::Cell;
     thread_local! {
-        static STATE: Cell<u64> = Cell::new(0x853c49e6748fea9b);
+        static STATE: Cell<u64> = const { Cell::new(0x853c49e6748fea9b) };
     }
 
     STATE.with(|state| {
@@ -1086,7 +1084,7 @@ impl MlCompressionDecision {
 pub struct MlCompressionOracle {
     /// ONNX model for inference
     #[cfg(feature = "ai")]
-    model: Option<SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>>,
+    model: Option<TractModel>,
 
     /// Training data collection
     training_data: Vec<CompressionSample>,
@@ -1213,7 +1211,7 @@ impl MlCompressionOracle {
         }
 
         // Sort and get top 4 frequencies
-        let mut sorted: Vec<_> = counts.iter().copied().collect();
+        let mut sorted: Vec<_> = counts.to_vec();
         sorted.sort_unstable_by(|a, b| b.cmp(a));
 
         let len = data.len() as f32;
@@ -1279,7 +1277,7 @@ impl MlCompressionOracle {
     #[cfg(feature = "ai")]
     fn infer_decision(
         &self,
-        model: &SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
+        model: &TractModel,
         sample: &CompressionSample,
     ) -> Option<MlCompressionDecision> {
         let features = sample.to_features();
@@ -1603,7 +1601,7 @@ pub struct MlPathSelector {
 
     /// ONNX model for contextual features (optional enhancement)
     #[cfg(feature = "ai")]
-    model: Option<SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>>,
+    model: Option<TractModel>,
 
     /// Statistics
     selections_by_path: [u64; MAX_PATHS],
@@ -1770,11 +1768,7 @@ impl MlPathSelector {
 
     /// ML-based path selection
     #[cfg(feature = "ai")]
-    fn ml_select(
-        &self,
-        model: &SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
-        traffic: TrafficContext,
-    ) -> Option<PathId> {
+    fn ml_select(&self, model: &TractModel, traffic: TrafficContext) -> Option<PathId> {
         // Build feature vector: [traffic_type_onehot(5), path_metrics(6) * 4]
         let mut features = Vec::with_capacity(5 + 6 * MAX_PATHS);
 
@@ -1870,22 +1864,20 @@ impl MlPathSelector {
                 // Heavily penalize latency and loss
                 let latency_score = (1.0 - (rtt_us as f32 / 100_000.0)).max(0.0);
                 let loss_penalty = loss_rate * 5.0;
-                (latency_score - loss_penalty).max(-1.0).min(1.0)
+                (latency_score - loss_penalty).clamp(-1.0, 1.0)
             }
             TrafficContext::Streaming | TrafficContext::Bulk => {
                 // Prioritize throughput
                 let throughput_score = (throughput_mbps / 100.0).min(1.0);
                 let loss_penalty = loss_rate * 2.0;
-                (throughput_score - loss_penalty).max(-1.0).min(1.0)
+                (throughput_score - loss_penalty).clamp(-1.0, 1.0)
             }
             TrafficContext::Web => {
                 // Balanced
                 let latency_score = (1.0 - (rtt_us as f32 / 200_000.0)).max(0.0);
                 let throughput_score = (throughput_mbps / 50.0).min(1.0);
                 let loss_penalty = loss_rate * 3.0;
-                ((latency_score + throughput_score) / 2.0 - loss_penalty)
-                    .max(-1.0)
-                    .min(1.0)
+                ((latency_score + throughput_score) / 2.0 - loss_penalty).clamp(-1.0, 1.0)
             }
         }
     }

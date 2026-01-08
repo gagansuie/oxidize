@@ -236,10 +236,7 @@ impl ModelHub {
         };
 
         // Download config
-        let config_path = match repo.get(CONFIG_FILE) {
-            Ok(path) => Some(path),
-            Err(_) => None,
-        };
+        let config_path = repo.get(CONFIG_FILE).ok();
 
         self.stats.downloads.fetch_add(1, Ordering::SeqCst);
         self.stats.last_sync_epoch.store(
