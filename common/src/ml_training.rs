@@ -739,6 +739,396 @@ impl Drop for BackgroundTrainer {
 }
 
 // ============================================================================
+// ONLINE LEARNING - ATOMIC MODEL SWAP
+// ============================================================================
+
+/// Thread-safe model weights for lock-free inference
+/// Training thread updates this, inference reads atomically
+#[cfg(feature = "ai")]
+pub struct AtomicModelWeights {
+    /// Serialized model weights (safetensors format)
+    weights: RwLock<Option<Vec<u8>>>,
+    /// Model version for cache invalidation
+    version: AtomicU64,
+    /// Last update timestamp
+    last_update: AtomicU64,
+}
+
+#[cfg(feature = "ai")]
+impl AtomicModelWeights {
+    pub fn new() -> Self {
+        AtomicModelWeights {
+            weights: RwLock::new(None),
+            version: AtomicU64::new(0),
+            last_update: AtomicU64::new(0),
+        }
+    }
+
+    /// Update weights from training thread (non-blocking for readers)
+    pub fn update(&self, new_weights: Vec<u8>) {
+        if let Ok(mut w) = self.weights.write() {
+            *w = Some(new_weights);
+            self.version.fetch_add(1, Ordering::SeqCst);
+            self.last_update.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// Get current version (for cache check)
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
+
+    /// Check if weights are available
+    pub fn has_weights(&self) -> bool {
+        self.weights.read().map(|w| w.is_some()).unwrap_or(false)
+    }
+
+    /// Get weights for loading (clone to avoid holding lock)
+    pub fn get_weights(&self) -> Option<Vec<u8>> {
+        self.weights.read().ok().and_then(|w| w.clone())
+    }
+}
+
+#[cfg(feature = "ai")]
+impl Default for AtomicModelWeights {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Online learning manager - updates inference models from training
+#[cfg(feature = "ai")]
+pub struct OnlineLearner {
+    /// Atomic weights for each model type
+    pub lstm_weights: Arc<AtomicModelWeights>,
+    pub dqn_weights: Arc<AtomicModelWeights>,
+    pub compression_weights: Arc<AtomicModelWeights>,
+    pub path_selector_weights: Arc<AtomicModelWeights>,
+
+    /// Cached version for each model (to detect updates)
+    cached_versions: RwLock<[u64; 4]>,
+}
+
+#[cfg(feature = "ai")]
+impl OnlineLearner {
+    pub fn new() -> Self {
+        OnlineLearner {
+            lstm_weights: Arc::new(AtomicModelWeights::new()),
+            dqn_weights: Arc::new(AtomicModelWeights::new()),
+            compression_weights: Arc::new(AtomicModelWeights::new()),
+            path_selector_weights: Arc::new(AtomicModelWeights::new()),
+            cached_versions: RwLock::new([0; 4]),
+        }
+    }
+
+    /// Check if any model has been updated since last check
+    pub fn has_updates(&self) -> bool {
+        let current = [
+            self.lstm_weights.version(),
+            self.dqn_weights.version(),
+            self.compression_weights.version(),
+            self.path_selector_weights.version(),
+        ];
+
+        if let Ok(cached) = self.cached_versions.read() {
+            current.iter().zip(cached.iter()).any(|(c, v)| c != v)
+        } else {
+            false
+        }
+    }
+
+    /// Mark current versions as seen
+    pub fn mark_seen(&self) {
+        let current = [
+            self.lstm_weights.version(),
+            self.dqn_weights.version(),
+            self.compression_weights.version(),
+            self.path_selector_weights.version(),
+        ];
+
+        if let Ok(mut cached) = self.cached_versions.write() {
+            *cached = current;
+        }
+    }
+
+    /// Get statistics
+    pub fn stats(&self) -> OnlineLearnerStats {
+        OnlineLearnerStats {
+            lstm_version: self.lstm_weights.version(),
+            dqn_version: self.dqn_weights.version(),
+            compression_version: self.compression_weights.version(),
+            path_selector_version: self.path_selector_weights.version(),
+            lstm_available: self.lstm_weights.has_weights(),
+            dqn_available: self.dqn_weights.has_weights(),
+        }
+    }
+}
+
+#[cfg(feature = "ai")]
+impl Default for OnlineLearner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineLearnerStats {
+    pub lstm_version: u64,
+    pub dqn_version: u64,
+    pub compression_version: u64,
+    pub path_selector_version: u64,
+    pub lstm_available: bool,
+    pub dqn_available: bool,
+}
+
+// ============================================================================
+// FEDERATED AGGREGATION - PRIVACY-PRESERVING TRAINING
+// ============================================================================
+
+/// Privacy-preserving training data aggregation
+/// Collects anonymized statistics without raw data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederatedStats {
+    /// Server identifier (anonymized hash)
+    pub server_hash: String,
+    /// Aggregation timestamp
+    pub timestamp_ms: u64,
+    /// Number of samples contributed
+    pub sample_count: u64,
+
+    // Aggregated LSTM statistics (no raw data)
+    pub lstm_stats: LstmAggregatedStats,
+    // Aggregated DRL statistics
+    pub drl_stats: DrlAggregatedStats,
+}
+
+/// Aggregated LSTM statistics (privacy-preserving)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LstmAggregatedStats {
+    /// Mean RTT observed (microseconds)
+    pub mean_rtt_us: f64,
+    /// RTT standard deviation
+    pub std_rtt_us: f64,
+    /// Mean loss rate
+    pub mean_loss_rate: f64,
+    /// Loss rate variance
+    pub var_loss_rate: f64,
+    /// Mean bandwidth (bps)
+    pub mean_bandwidth_bps: f64,
+    /// Sample count
+    pub count: u64,
+}
+
+/// Aggregated DRL statistics (privacy-preserving)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrlAggregatedStats {
+    /// Action distribution (how often each action was taken)
+    pub action_counts: [u64; 6],
+    /// Mean reward per action
+    pub mean_rewards: [f64; 6],
+    /// Mean throughput achieved
+    pub mean_throughput_mbps: f64,
+    /// Sample count
+    pub count: u64,
+}
+
+/// Federated data aggregator
+pub struct FederatedAggregator {
+    server_id: String,
+    lstm_samples: RwLock<Vec<(f64, f64, f64)>>, // (rtt, loss, bw)
+    drl_samples: RwLock<Vec<(usize, f64, f64)>>, // (action, reward, throughput)
+    max_local_samples: usize,
+}
+
+impl FederatedAggregator {
+    pub fn new(server_id: &str) -> Self {
+        // Hash server ID for privacy
+        let server_hash = format!("{:x}", md5_hash(server_id.as_bytes()));
+
+        FederatedAggregator {
+            server_id: server_hash,
+            lstm_samples: RwLock::new(Vec::with_capacity(10_000)),
+            drl_samples: RwLock::new(Vec::with_capacity(10_000)),
+            max_local_samples: 10_000,
+        }
+    }
+
+    /// Add LSTM sample (aggregated, not raw)
+    pub fn add_lstm_sample(&self, rtt_us: f64, loss_rate: f64, bandwidth_bps: f64) {
+        if let Ok(mut samples) = self.lstm_samples.write() {
+            samples.push((rtt_us, loss_rate, bandwidth_bps));
+            if samples.len() > self.max_local_samples {
+                samples.remove(0);
+            }
+        }
+    }
+
+    /// Add DRL sample (aggregated, not raw)
+    pub fn add_drl_sample(&self, action: usize, reward: f64, throughput_mbps: f64) {
+        if let Ok(mut samples) = self.drl_samples.write() {
+            samples.push((action, reward, throughput_mbps));
+            if samples.len() > self.max_local_samples {
+                samples.remove(0);
+            }
+        }
+    }
+
+    /// Generate aggregated statistics for federation
+    /// This contains NO raw data - only statistical summaries
+    pub fn aggregate(&self) -> FederatedStats {
+        let lstm_stats = self.aggregate_lstm();
+        let drl_stats = self.aggregate_drl();
+
+        FederatedStats {
+            server_hash: self.server_id.clone(),
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            sample_count: lstm_stats.count + drl_stats.count,
+            lstm_stats,
+            drl_stats,
+        }
+    }
+
+    fn aggregate_lstm(&self) -> LstmAggregatedStats {
+        let samples = match self.lstm_samples.read() {
+            Ok(s) => s.clone(),
+            Err(_) => return LstmAggregatedStats::default(),
+        };
+
+        if samples.is_empty() {
+            return LstmAggregatedStats::default();
+        }
+
+        let count = samples.len() as u64;
+        let (sum_rtt, sum_loss, sum_bw): (f64, f64, f64) =
+            samples.iter().fold((0.0, 0.0, 0.0), |acc, (r, l, b)| {
+                (acc.0 + r, acc.1 + l, acc.2 + b)
+            });
+
+        let mean_rtt = sum_rtt / count as f64;
+        let mean_loss = sum_loss / count as f64;
+        let mean_bw = sum_bw / count as f64;
+
+        // Calculate variance
+        let var_rtt: f64 = samples
+            .iter()
+            .map(|(r, _, _)| (r - mean_rtt).powi(2))
+            .sum::<f64>()
+            / count as f64;
+        let var_loss: f64 = samples
+            .iter()
+            .map(|(_, l, _)| (l - mean_loss).powi(2))
+            .sum::<f64>()
+            / count as f64;
+
+        LstmAggregatedStats {
+            mean_rtt_us: mean_rtt,
+            std_rtt_us: var_rtt.sqrt(),
+            mean_loss_rate: mean_loss,
+            var_loss_rate: var_loss,
+            mean_bandwidth_bps: mean_bw,
+            count,
+        }
+    }
+
+    fn aggregate_drl(&self) -> DrlAggregatedStats {
+        let samples = match self.drl_samples.read() {
+            Ok(s) => s.clone(),
+            Err(_) => return DrlAggregatedStats::default(),
+        };
+
+        if samples.is_empty() {
+            return DrlAggregatedStats::default();
+        }
+
+        let mut action_counts = [0u64; 6];
+        let mut reward_sums = [0.0f64; 6];
+        let mut throughput_sum = 0.0f64;
+
+        for (action, reward, throughput) in &samples {
+            if *action < 6 {
+                action_counts[*action] += 1;
+                reward_sums[*action] += reward;
+            }
+            throughput_sum += throughput;
+        }
+
+        let mean_rewards: [f64; 6] = std::array::from_fn(|i| {
+            if action_counts[i] > 0 {
+                reward_sums[i] / action_counts[i] as f64
+            } else {
+                0.0
+            }
+        });
+
+        DrlAggregatedStats {
+            action_counts,
+            mean_rewards,
+            mean_throughput_mbps: throughput_sum / samples.len() as f64,
+            count: samples.len() as u64,
+        }
+    }
+
+    /// Clear local samples after aggregation
+    pub fn clear(&self) {
+        if let Ok(mut samples) = self.lstm_samples.write() {
+            samples.clear();
+        }
+        if let Ok(mut samples) = self.drl_samples.write() {
+            samples.clear();
+        }
+    }
+
+    /// Export aggregated stats to JSON (for upload to HF Hub)
+    pub fn export_json(&self) -> anyhow::Result<String> {
+        let stats = self.aggregate();
+        Ok(serde_json::to_string_pretty(&stats)?)
+    }
+}
+
+impl Default for LstmAggregatedStats {
+    fn default() -> Self {
+        LstmAggregatedStats {
+            mean_rtt_us: 0.0,
+            std_rtt_us: 0.0,
+            mean_loss_rate: 0.0,
+            var_loss_rate: 0.0,
+            mean_bandwidth_bps: 0.0,
+            count: 0,
+        }
+    }
+}
+
+impl Default for DrlAggregatedStats {
+    fn default() -> Self {
+        DrlAggregatedStats {
+            action_counts: [0; 6],
+            mean_rewards: [0.0; 6],
+            mean_throughput_mbps: 0.0,
+            count: 0,
+        }
+    }
+}
+
+/// Simple MD5-like hash for server ID anonymization
+fn md5_hash(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in data {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+// ============================================================================
 // TESTS
 // ============================================================================
 

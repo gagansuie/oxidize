@@ -9,6 +9,7 @@ pub mod connection_pool;
 pub mod edge_cache;
 pub mod fec;
 pub mod metrics;
+pub mod ml_integration;
 pub mod ml_models;
 pub mod ml_training;
 pub mod model_hub;
