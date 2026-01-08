@@ -1063,6 +1063,6 @@ mod tests {
 
         let vec = net_features.to_feature_vec();
         assert_eq!(vec.len(), 12);
-        assert!(vec.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        assert!(vec.iter().all(|&x| (0.0..=1.0).contains(&x)));
     }
 }

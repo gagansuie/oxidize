@@ -140,7 +140,7 @@ impl SharedTunForwarder {
             .write_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if count.is_multiple_of(10000) {
+        if count % 10000 == 0 {
             let batches = self.stats.load(std::sync::atomic::Ordering::Relaxed);
             let syscalls_saved = count.saturating_sub(batches);
             info!(
@@ -212,7 +212,7 @@ fn run_tun_reader(
                     let _ = tx.blocking_send(packet);
                 }
             }
-        } else if count.is_multiple_of(1000) {
+        } else if count % 1000 == 0 {
             info!(
                 "📥 TUN read #{}: {}→{} (no mapping for dst)",
                 count,
