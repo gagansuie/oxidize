@@ -54,13 +54,13 @@ jobs:
       - name: Login to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python -m huggingface_hub.commands.huggingface_cli login --token $HF_TOKEN
+        run: python -m huggingface_hub.cli login --token $HF_TOKEN
 
       - name: Download training data from HF Hub
         run: |
           mkdir -p training_data
           # Download any uploaded training samples
-          python -m huggingface_hub.commands.huggingface_cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
+          python -m huggingface_hub.cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
           if [ -d "./hf_download/training_data" ]; then
             cp -r ./hf_download/training_data/* ./training_data/ || true
           fi
