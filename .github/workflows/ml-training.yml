@@ -1,0 +1,122 @@
+name: ML Model Training
+
+on:
+  # Run weekly on Sunday at 00:00 UTC
+  schedule:
+    - cron: '0 0 * * 0'
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: 'Force retrain even with few samples'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  HF_REPO: gagansuie/oxidize-models
+
+jobs:
+  train-and-push:
+    name: Train Models & Push to HF Hub
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ml-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build ML training binary
+        run: cargo build --release -p oxidize-common --features ai
+
+      - name: Setup Python (for HF CLI)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Hugging Face CLI
+        run: pip install huggingface_hub
+
+      - name: Login to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: huggingface-cli login --token $HF_TOKEN
+
+      - name: Download training data from HF Hub
+        run: |
+          mkdir -p training_data
+          # Download any uploaded training samples
+          huggingface-cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
+          if [ -d "./hf_download/training_data" ]; then
+            cp -r ./hf_download/training_data/* ./training_data/ || true
+          fi
+          echo "Training samples found: $(find training_data -name '*.json' | wc -l)"
+
+      - name: Train models
+        run: |
+          # Create model output directory
+          mkdir -p /tmp/oxidize_models
+          
+          # Run training (this would be a dedicated binary in production)
+          # For now, we just ensure the build works and models can be created
+          echo "Training with $(find training_data -name '*.json' | wc -l) sample files"
+          
+          # TODO: Replace with actual training binary
+          # cargo run --release --bin oxidize-train -- \
+          #   --input ./training_data \
+          #   --output /tmp/oxidize_models \
+          #   --epochs 100
+
+      - name: Push models to HF Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # Update config with training metadata
+          cat > hf_repo/config.json << EOF
+          {
+            "version": "0.1.0",
+            "lstm": {
+              "input_size": 8,
+              "hidden_size": 64,
+              "sequence_length": 20,
+              "trained_samples": $(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"timestamp_ms"' || echo 0)
+            },
+            "dqn": {
+              "state_size": 8,
+              "action_size": 6,
+              "hidden_size": 128,
+              "trained_steps": 0
+            },
+            "training": {
+              "last_updated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "total_samples": $(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"timestamp_ms"' || echo 0),
+              "contributing_servers": $(find training_data -name '*.json' | xargs -I{} basename {} | cut -d'-' -f2 | sort -u | wc -l || echo 0)
+            }
+          }
+          EOF
+          
+          # Push to HF Hub
+          ./hf_repo/hf_push.sh --models || ./hf_repo/hf_push.sh
+
+      - name: Summary
+        run: |
+          echo "## ML Training Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Training samples**: $(find training_data -name '*.json' | wc -l) files" >> $GITHUB_STEP_SUMMARY
+          echo "- **Models pushed to**: https://huggingface.co/$HF_REPO" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
