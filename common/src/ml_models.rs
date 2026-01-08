@@ -2053,7 +2053,7 @@ mod tests {
 
         let features = sample.to_features();
         assert_eq!(features.len(), LSTM_FEATURE_COUNT);
-        assert!(features.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        assert!(features.iter().all(|&x| (0.0..=1.0).contains(&x)));
     }
 
     #[test]
@@ -2091,7 +2091,7 @@ mod tests {
         let gzip = vec![0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         let gzip_padded: Vec<u8> = gzip
             .into_iter()
-            .chain(std::iter::repeat(0).take(100))
+            .chain(std::iter::repeat_n(0, 100))
             .collect();
         let decision = oracle.decide(&gzip_padded);
         assert_eq!(decision, MlCompressionDecision::Skip);
@@ -2111,7 +2111,7 @@ mod tests {
 
         let features = sample.to_features();
         assert_eq!(features.len(), 8);
-        assert!(features.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        assert!(features.iter().all(|&x| (0.0..=1.0).contains(&x)));
     }
 
     #[test]
@@ -2216,7 +2216,7 @@ mod tests {
 
         let features = metrics.to_features();
         assert_eq!(features.len(), 6);
-        assert!(features.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        assert!(features.iter().all(|&x| (0.0..=1.0).contains(&x)));
     }
 
     #[test]
