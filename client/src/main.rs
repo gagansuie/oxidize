@@ -89,12 +89,7 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    info!("╔════════════════════════════════════════╗");
-    info!(
-        "║   Oxidize Client v{}                ║",
-        env!("CARGO_PKG_VERSION")
-    );
-    info!("╚════════════════════════════════════════╝");
+    info!("Oxidize Client starting...");
 
     let config = ClientConfig::load(&args.config).unwrap_or_else(|_| {
         info!("Config file not found, using defaults");
