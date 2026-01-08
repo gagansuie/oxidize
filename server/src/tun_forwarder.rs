@@ -1,3 +1,5 @@
+#![allow(clippy::manual_is_multiple_of)]
+
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::Read;
