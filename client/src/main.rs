@@ -231,7 +231,7 @@ fn save_config(config: &ClientConfig, path: &str) -> Result<()> {
 
 /// Resolve a server address that can be either:
 /// - A direct SocketAddr like "1.2.3.4:4433"
-/// - A hostname:port like "oxd.sh:4433"
+/// - A hostname:port like "relay.oxd.sh:4433"
 async fn resolve_server_address(server: &str) -> Result<SocketAddr> {
     // First try parsing as a direct SocketAddr
     if let Ok(addr) = server.parse::<SocketAddr>() {

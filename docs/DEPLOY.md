@@ -37,16 +37,16 @@ fly deploy              # Deploy the server
 fly status
 ```
 
-Your server address will be: `oxd.sh:4433`
+Your server address will be: `relay.oxd.sh:4433`
 
 ## Connect Clients
 
 ```bash
 # Linux/macOS
-sudo oxidize-client --server oxd.sh:4433
+sudo oxidize-client --server relay.oxd.sh:4433
 
 # Or use the install script
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- oxd.sh:4433
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- relay.oxd.sh:4433
 ```
 
 ## Scaling
@@ -81,7 +81,7 @@ fly status
 
 ## Custom Domain
 
-Oxidize uses `oxd.sh` as the official relay server.
+Oxidize uses `relay.oxd.sh` as the official relay server.
 
 To use your own domain:
 ```bash
