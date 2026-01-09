@@ -85,32 +85,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Update config with training metadata
-          SAMPLES=$(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"timestamp_ms"' || echo 0)
-          SERVERS=$(find training_data -name '*.json' 2>/dev/null | xargs -I{} basename {} 2>/dev/null | cut -d'-' -f2 | sort -u | wc -l || echo 0)
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          printf '%s\n' '{' \
-            '  "version": "0.1.0",' \
-            '  "lstm": {' \
-            '    "input_size": 8,' \
-            '    "hidden_size": 64,' \
-            '    "sequence_length": 20,' \
-            "    \"trained_samples\": $SAMPLES" \
-            '  },' \
-            '  "dqn": {' \
-            '    "state_size": 8,' \
-            '    "action_size": 6,' \
-            '    "hidden_size": 128,' \
-            '    "trained_steps": 0' \
-            '  },' \
-            '  "training": {' \
-            "    \"last_updated\": \"$DATE\"," \
-            "    \"total_samples\": $SAMPLES," \
-            "    \"contributing_servers\": $SERVERS" \
-            '  }' \
-            '}' > hf_repo/config.json
-          
-          # Push to HF Hub
+          # Push to HF Hub (uses existing config.json from repo)
           ./hf_repo/hf_push.sh --models || ./hf_repo/hf_push.sh
 
       - name: Summary
