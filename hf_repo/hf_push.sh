@@ -6,8 +6,8 @@
 #   ./scripts/hf_push.sh --models     # Also push trained models
 #
 # Requirements:
-#   - huggingface-cli installed and logged in
-#   - HF_TOKEN environment variable (or logged in via `huggingface-cli login`)
+#   - hf CLI installed and logged in (pip install "huggingface_hub[cli]")
+#   - HF_TOKEN environment variable (or logged in via `hf auth login`)
 
 set -e
 
@@ -20,9 +20,9 @@ echo "Repository: https://huggingface.co/$REPO"
 echo ""
 
 # Check if logged in
-if ! huggingface-cli whoami &> /dev/null; then
+if ! hf auth whoami &> /dev/null; then
     echo "❌ Not logged in to Hugging Face"
-    echo "Run: huggingface-cli login"
+    echo "Run: hf auth login"
     exit 1
 fi
 
@@ -56,7 +56,7 @@ fi
 # Upload to HF Hub
 echo ""
 echo "Uploading to $REPO..."
-huggingface-cli upload "$REPO" "$UPLOAD_DIR" . --repo-type model
+hf upload "$REPO" "$UPLOAD_DIR" . --repo-type model
 
 echo ""
 echo "✅ Done! View at: https://huggingface.co/$REPO"
