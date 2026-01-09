@@ -263,12 +263,12 @@ impl LstmLossPredictor {
         let path_ref = path.as_ref();
 
         // Try safetensors first
-        if path_ref.extension().map_or(false, |e| e == "safetensors") {
+        if path_ref.extension().is_some_and(|e| e == "safetensors") {
             return self.load_safetensors(path_ref);
         }
 
         // Try ONNX
-        if path_ref.extension().map_or(false, |e| e == "onnx") {
+        if path_ref.extension().is_some_and(|e| e == "onnx") {
             return self.load_onnx_model(path_ref);
         }
 
