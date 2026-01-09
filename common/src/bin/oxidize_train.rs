@@ -195,39 +195,35 @@ fn load_training_data(input_dir: &Path) -> Result<TrainingData> {
     }
 
     // Also try to load from individual server uploads
-    for entry in fs::read_dir(input_dir).into_iter().flatten() {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().map_or(false, |e| e == "json") {
-                let name = path.file_stem().unwrap_or_default().to_string_lossy();
+    for entry in fs::read_dir(input_dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json") {
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
 
-                // Skip already processed files
-                if name == "loss_samples"
-                    || name == "drl_experiences"
-                    || name == "compression_samples"
-                    || name == "path_selection_samples"
-                {
-                    continue;
-                }
+            // Skip already processed files
+            if name == "loss_samples"
+                || name == "drl_experiences"
+                || name == "compression_samples"
+                || name == "path_selection_samples"
+            {
+                continue;
+            }
 
-                // Try to parse as loss samples
-                if name.contains("loss") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        if let Ok(samples) = serde_json::from_str::<Vec<LossSample>>(&content) {
-                            info!("Loaded {} loss samples from {}", samples.len(), name);
-                            data.loss_samples.extend(samples);
-                        }
+            // Try to parse as loss samples
+            if name.contains("loss") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(samples) = serde_json::from_str::<Vec<LossSample>>(&content) {
+                        info!("Loaded {} loss samples from {}", samples.len(), name);
+                        data.loss_samples.extend(samples);
                     }
                 }
-                // Try to parse as DRL experiences
-                else if name.contains("drl") || name.contains("experience") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        if let Ok(experiences) =
-                            serde_json::from_str::<Vec<DrlExperience>>(&content)
-                        {
-                            info!("Loaded {} DRL experiences from {}", experiences.len(), name);
-                            data.drl_experiences.extend(experiences);
-                        }
+            }
+            // Try to parse as DRL experiences
+            else if name.contains("drl") || name.contains("experience") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(experiences) = serde_json::from_str::<Vec<DrlExperience>>(&content) {
+                        info!("Loaded {} DRL experiences from {}", experiences.len(), name);
+                        data.drl_experiences.extend(experiences);
                     }
                 }
             }
@@ -255,7 +251,7 @@ fn generate_synthetic_data(data: &mut TrainingData, count: usize) {
 
         // Add noise
         let rtt = base_rtt + rng.gen_range(0..base_rtt / 4);
-        let loss = (base_loss + rng.gen_range(-0.005..0.02)).max(0.0).min(1.0);
+        let loss = (base_loss + rng.gen_range(-0.005..0.02)).clamp(0.0, 1.0);
         let bw = base_bw + rng.gen_range(0..base_bw / 4);
 
         // Future loss is correlated with current conditions
