@@ -9,6 +9,11 @@ license = { workspace = true }
 default = ["ai"]
 ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # AI-powered ML engine with training + HF Hub sync
 
+[[bin]]
+name = "oxidize-train"
+path = "src/bin/oxidize_train.rs"
+required-features = ["ai"]
+
 [[bench]]
 name = "perf_bench"
 harness = false
@@ -32,6 +37,8 @@ candle-nn = { workspace = true, optional = true }
 safetensors = { workspace = true, optional = true }
 rand = { workspace = true }
 hf-hub = { workspace = true, optional = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { workspace = true }

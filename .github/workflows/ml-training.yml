@@ -1,9 +1,9 @@
 name: ML Model Training
 
 on:
-  # Run weekly on Sunday at 00:00 UTC
+  # Daily schedule (3 AM UTC)
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: '0 3 * * *'
   # Manual trigger
   workflow_dispatch:
     inputs:
@@ -41,7 +41,7 @@ jobs:
           key: ${{ runner.os }}-cargo-ml-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build ML training binary
-        run: cargo build --release -p oxidize-common --features ai
+        run: cargo build --release -p oxidize-common --bin oxidize-train --features ai
 
       - name: Setup Python (for HF CLI)
         uses: actions/setup-python@v5
@@ -54,13 +54,13 @@ jobs:
       - name: Login to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: hf auth login --token $HF_TOKEN
+        run: huggingface-cli login --token $HF_TOKEN
 
       - name: Download training data from HF Hub
         run: |
           mkdir -p training_data
           # Download any uploaded training samples
-          hf download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
+          huggingface-cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
           if [ -d "./hf_download/training_data" ]; then
             cp -r ./hf_download/training_data/* ./training_data/ || true
           fi
@@ -69,24 +69,36 @@ jobs:
       - name: Train models
         run: |
           # Create model output directory
-          mkdir -p /tmp/oxidize_models
+          mkdir -p ./trained_models
           
-          # Run training (this would be a dedicated binary in production)
-          # For now, we just ensure the build works and models can be created
+          # Run training with synthetic data if no real data exists
           echo "Training with $(find training_data -name '*.json' | wc -l) sample files"
           
-          # TODO: Replace with actual training binary
-          # cargo run --release --bin oxidize-train -- \
-          #   --input ./training_data \
-          #   --output /tmp/oxidize_models \
-          #   --epochs 100
+          ./target/release/oxidize-train \
+            --input ./training_data \
+            --output ./trained_models \
+            --lstm-epochs 100 \
+            --dqn-steps 1000 \
+            --generate-synthetic \
+            --synthetic-samples 10000 \
+            --export-onnx=false \
+            --verbose
+
+      - name: Copy models to HF repo
+        run: |
+          # Copy trained models to hf_repo for upload
+          cp ./trained_models/*.safetensors ./hf_repo/ || true
+          cp ./trained_models/config.json ./hf_repo/config.json || true
+          
+          # Create training_data directory in hf_repo
+          mkdir -p ./hf_repo/training_data
 
       - name: Push models to HF Hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Push to HF Hub (uses existing config.json from repo)
-          ./hf_repo/hf_push.sh --models || ./hf_repo/hf_push.sh
+          cd hf_repo
+          huggingface-cli upload $HF_REPO . --repo-type model
 
       - name: Summary
         run: |

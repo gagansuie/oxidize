@@ -24,7 +24,95 @@ use tracing::{debug, trace, warn};
 use tract_onnx::prelude::*;
 
 #[cfg(feature = "ai")]
+use candle_core::{DType, Device, Tensor as CandleTensor};
+#[cfg(feature = "ai")]
+use candle_nn::{linear, Linear, Module, VarBuilder, VarMap};
+
+#[cfg(feature = "ai")]
 type TractModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
+/// Candle-based LSTM model for safetensors inference
+#[cfg(feature = "ai")]
+pub struct CandleLstmModel {
+    hidden_size: usize,
+    input_proj: Linear,
+    hidden_proj: Linear,
+    output_proj: Linear,
+    device: Device,
+}
+
+#[cfg(feature = "ai")]
+impl CandleLstmModel {
+    pub fn new(input_size: usize, hidden_size: usize, vb: VarBuilder) -> candle_core::Result<Self> {
+        let input_proj = linear(input_size, hidden_size * 4, vb.pp("input_proj"))?;
+        let hidden_proj = linear(hidden_size, hidden_size * 4, vb.pp("hidden_proj"))?;
+        let output_proj = linear(hidden_size, 1, vb.pp("output_proj"))?;
+
+        Ok(CandleLstmModel {
+            hidden_size,
+            input_proj,
+            hidden_proj,
+            output_proj,
+            device: vb.device().clone(),
+        })
+    }
+
+    pub fn forward(&self, input: &CandleTensor) -> candle_core::Result<CandleTensor> {
+        let (batch_size, seq_len, _features) = input.dims3()?;
+
+        let mut h = CandleTensor::zeros((batch_size, self.hidden_size), DType::F32, &self.device)?;
+        let mut c = CandleTensor::zeros((batch_size, self.hidden_size), DType::F32, &self.device)?;
+
+        for t in 0..seq_len {
+            let x_t = input.narrow(1, t, 1)?.squeeze(1)?;
+            let gates = self
+                .input_proj
+                .forward(&x_t)?
+                .add(&self.hidden_proj.forward(&h)?)?;
+
+            let chunks = gates.chunk(4, 1)?;
+            let i = candle_nn::ops::sigmoid(&chunks[0])?;
+            let f = candle_nn::ops::sigmoid(&chunks[1])?;
+            let g = chunks[2].tanh()?;
+            let o = candle_nn::ops::sigmoid(&chunks[3])?;
+
+            c = f.mul(&c)?.add(&i.mul(&g)?)?;
+            h = o.mul(&c.tanh()?)?;
+        }
+
+        let output = self.output_proj.forward(&h)?;
+        candle_nn::ops::sigmoid(&output)
+    }
+}
+
+/// Candle-based DQN model for safetensors inference
+#[cfg(feature = "ai")]
+pub struct CandleDqnModel {
+    l1: Linear,
+    l2: Linear,
+    l3: Linear,
+}
+
+#[cfg(feature = "ai")]
+impl CandleDqnModel {
+    pub fn new(
+        state_size: usize,
+        action_size: usize,
+        hidden_size: usize,
+        vb: VarBuilder,
+    ) -> candle_core::Result<Self> {
+        let l1 = linear(state_size, hidden_size, vb.pp("l1"))?;
+        let l2 = linear(hidden_size, hidden_size, vb.pp("l2"))?;
+        let l3 = linear(hidden_size, action_size, vb.pp("l3"))?;
+        Ok(CandleDqnModel { l1, l2, l3 })
+    }
+
+    pub fn forward(&self, state: &CandleTensor) -> candle_core::Result<CandleTensor> {
+        let x = self.l1.forward(state)?.relu()?;
+        let x = self.l2.forward(&x)?.relu()?;
+        self.l3.forward(&x)
+    }
+}
 
 // ============================================================================
 // LSTM LOSS PREDICTOR
@@ -74,15 +162,20 @@ impl LossSample {
     }
 }
 
-/// LSTM-based loss predictor with ONNX inference
+/// LSTM-based loss predictor with ONNX or Candle inference
 pub struct LstmLossPredictor {
     /// Historical samples for sequence input
     history: VecDeque<LossSample>,
     /// Trained ONNX model (loaded at runtime)
     #[cfg(feature = "ai")]
-    model: Option<TractModel>,
+    onnx_model: Option<TractModel>,
     #[cfg(not(feature = "ai"))]
-    model: Option<()>,
+    onnx_model: Option<()>,
+    /// Candle model for safetensors inference
+    #[cfg(feature = "ai")]
+    candle_model: Option<CandleLstmModel>,
+    #[cfg(feature = "ai")]
+    candle_device: Device,
     /// Fallback heuristic when model unavailable
     ewma_loss: f32,
     ewma_alpha: f32,
@@ -110,7 +203,14 @@ impl LstmLossPredictor {
     pub fn new() -> Self {
         LstmLossPredictor {
             history: VecDeque::with_capacity(LSTM_SEQUENCE_LENGTH + 10),
-            model: None,
+            #[cfg(feature = "ai")]
+            onnx_model: None,
+            #[cfg(not(feature = "ai"))]
+            onnx_model: None,
+            #[cfg(feature = "ai")]
+            candle_model: None,
+            #[cfg(feature = "ai")]
+            candle_device: Device::Cpu,
             ewma_loss: 0.0,
             ewma_alpha: 0.3,
             fec_threshold: 0.02,
@@ -124,7 +224,7 @@ impl LstmLossPredictor {
 
     /// Load a trained ONNX model
     #[cfg(feature = "ai")]
-    pub fn load_model<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+    pub fn load_onnx_model<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
         let model = tract_onnx::onnx()
             .model_for_path(path)?
             .with_input_fact(
@@ -137,14 +237,69 @@ impl LstmLossPredictor {
             .into_optimized()?
             .into_runnable()?;
 
-        self.model = Some(model);
-        debug!("LSTM loss predictor model loaded successfully");
+        self.onnx_model = Some(model);
+        debug!("LSTM loss predictor ONNX model loaded successfully");
         Ok(())
+    }
+
+    /// Load a trained safetensors model (from Candle training)
+    #[cfg(feature = "ai")]
+    pub fn load_safetensors<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        // Create model with VarMap that we'll load weights into
+        let mut var_map = VarMap::new();
+        let vb = VarBuilder::from_varmap(&var_map, DType::F32, &self.candle_device);
+        let model = CandleLstmModel::new(LSTM_FEATURE_COUNT, 64, vb)?;
+
+        // Load saved weights from safetensors into the model's var_map
+        var_map.load(path.as_ref())?;
+        self.candle_model = Some(model);
+        debug!("LSTM loss predictor safetensors model loaded successfully");
+        Ok(())
+    }
+
+    /// Load model - tries safetensors first, then ONNX
+    #[cfg(feature = "ai")]
+    pub fn load_model<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        let path_ref = path.as_ref();
+
+        // Try safetensors first
+        if path_ref.extension().map_or(false, |e| e == "safetensors") {
+            return self.load_safetensors(path_ref);
+        }
+
+        // Try ONNX
+        if path_ref.extension().map_or(false, |e| e == "onnx") {
+            return self.load_onnx_model(path_ref);
+        }
+
+        // Try both extensions
+        let safetensors_path = path_ref.with_extension("safetensors");
+        if safetensors_path.exists() {
+            return self.load_safetensors(&safetensors_path);
+        }
+
+        let onnx_path = path_ref.with_extension("onnx");
+        if onnx_path.exists() {
+            return self.load_onnx_model(&onnx_path);
+        }
+
+        anyhow::bail!("No model found at {:?}", path_ref)
     }
 
     #[cfg(not(feature = "ai"))]
     pub fn load_model<P: AsRef<Path>>(&mut self, _path: P) -> anyhow::Result<()> {
         anyhow::bail!("ML features not compiled in. Enable 'ai' feature.")
+    }
+
+    /// Check if any model is loaded
+    #[cfg(feature = "ai")]
+    pub fn has_model(&self) -> bool {
+        self.onnx_model.is_some() || self.candle_model.is_some()
+    }
+
+    #[cfg(not(feature = "ai"))]
+    pub fn has_model(&self) -> bool {
+        false
     }
 
     /// Enable training data collection
@@ -181,11 +336,11 @@ impl LstmLossPredictor {
         }
     }
 
-    /// Run LSTM inference to predict loss
+    /// Run LSTM inference to predict loss (ONNX)
     #[cfg(feature = "ai")]
     #[allow(dead_code)]
-    fn predict_with_model(&mut self) -> Option<f32> {
-        let model = self.model.as_ref()?;
+    fn predict_with_onnx(&mut self) -> Option<f32> {
+        let model = self.onnx_model.as_ref()?;
 
         if self.history.len() < LSTM_SEQUENCE_LENGTH {
             return None;
@@ -316,7 +471,7 @@ impl LstmLossPredictor {
             history_size: self.history.len(),
             training_samples: self.training_data.len(),
             last_prediction: self.last_prediction,
-            model_loaded: self.model.is_some(),
+            model_loaded: self.has_model(),
         }
     }
 }
