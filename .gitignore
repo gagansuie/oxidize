@@ -20,3 +20,6 @@ Thumbs.db
 *.pem
 *.crt
 production.toml
+
+# Enterprise (private)
+/enterprise/
