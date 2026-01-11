@@ -1,0 +1,19 @@
+[package]
+name = "oxidize-daemon"
+version = "0.1.13"
+edition = "2021"
+description = "Oxidize network relay daemon - handles TUN and privileged operations"
+
+[[bin]]
+name = "oxidize-daemon"
+path = "src/main.rs"
+
+[dependencies]
+relay-client = { path = "../client" }
+oxidize-common = { path = "../common" }
+tokio = { version = "1", features = ["full", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

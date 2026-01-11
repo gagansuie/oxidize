@@ -222,34 +222,54 @@ let reward = MlPathSelector::calculate_reward(
 engine.update_path_reward(path, TrafficContext::Gaming, reward);
 ```
 
-## Training
+## Training Pipeline (Fully Automated)
 
-### Local Training (Candle)
+The ML training pipeline is **fully automated** end-to-end:
 
-Models can be trained entirely in Rust using Candle:
-
-```rust
-use oxidize_common::ml_training::{BackgroundTrainer, TrainingConfig};
-
-let config = TrainingConfig::default();
-let trainer = BackgroundTrainer::new(config);
-trainer.start();
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    AUTOMATED ML TRAINING PIPELINE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────────┐│
+│  │   Servers    │───▶│   HF Hub     │───▶│  CI/CD       │───▶│  HF Hub    ││
+│  │  (collect)   │    │  (storage)   │    │  (train)     │    │  (models)  ││
+│  └──────────────┘    └──────────────┘    └──────────────┘    └────────────┘│
+│        │                    ▲                   │                    │      │
+│        │                    │                   │                    │      │
+│        └────────────────────┴───────────────────┴────────────────────┘      │
+│                         Continuous Loop                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Distributed Training (Hugging Face Hub)
+### How It Works
 
-Production servers collect telemetry and export training data:
+1. **Servers auto-collect training data** - `MlEngine` collects data by default
+2. **Servers auto-upload hourly** - Training data pushed to HF Hub every hour
+3. **CI trains daily (3 AM UTC)** - GitHub Actions aggregates and trains models
+4. **Servers auto-download on startup** - New models fetched from HF Hub
+
+### Data Collection (Automatic)
+
+Training data is collected automatically when running Oxidize:
 
 ```rust
-// Export all training data
-engine.export_training_data("/tmp/oxidize_training")?;
+// MlEngine auto-collects by default - no setup needed!
+let engine = MlEngine::new();  // Training collection enabled automatically
+
+// Data is uploaded to HF Hub hourly by the server
 ```
 
-Training runs weekly via GitHub Actions:
-1. Download aggregated training data from HF Hub
-2. Train models using Candle
-3. Push updated models to [gagansuie/oxidize-models](https://huggingface.co/gagansuie/oxidize-models)
-4. Servers auto-sync new models
+### CI/CD Training
+
+Training runs **daily** via GitHub Actions (`.github/workflows/ml-training.yml`):
+1. Downloads all training data uploaded by servers from HF Hub
+2. Aggregates samples from multiple servers
+3. Trains LSTM + DQN models using Candle (pure Rust)
+4. Pushes updated models to [gagansuie/oxidize-models](https://huggingface.co/gagansuie/oxidize-models)
+5. Archives processed training data
+
+Manual trigger available: `workflow_dispatch` with `force_retrain` option.
 
 ### Model Files
 
@@ -266,9 +286,10 @@ Training runs weekly via GitHub Actions:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HF_TOKEN` | Hugging Face API token | - |
+| `HF_TOKEN` | Hugging Face API token (required for upload) | - |
 | `OXIDIZE_MODEL_DIR` | Local model cache | `/tmp/oxidize_models` |
-| `OXIDIZE_COLLECT_TRAINING` | Enable training data collection | `false` |
+
+> **Note**: Training data collection is now **enabled by default**. No configuration needed.
 
 ### Loading Models
 
@@ -317,10 +338,18 @@ println!("Compression oracle: {:?}", stats.compression_oracle);
 println!("Path selector: {:?}", stats.path_selector);
 ```
 
+## Implemented Features
+
+- [x] **Automatic training data collection** - Servers collect data by default
+- [x] **Automatic upload to HF Hub** - Servers upload hourly  
+- [x] **Daily CI/CD training** - GitHub Actions trains models daily
+- [x] **Automatic model download** - Servers fetch latest models on startup
+- [x] **End-to-end automation** - No manual intervention required
+
 ## Future Improvements
 
-- [ ] Online learning (update models from live traffic)
-- [ ] Federated learning (privacy-preserving aggregation)
-- [ ] Transformer-based loss predictor
+- [ ] Online learning (update models in real-time from live traffic)
+- [ ] Federated learning (privacy-preserving aggregation across servers)
+- [ ] Transformer-based loss predictor (replace LSTM)
 - [ ] Multi-agent RL for congestion control
-- [ ] Neural network path selector (replacing UCB1)
+- [ ] A/B testing framework for model deployment

@@ -23,3 +23,10 @@ production.toml
 
 # Enterprise (private)
 /enterprise/
+
+# Tauri app
+/app/node_modules/
+/app/dist/
+/app/src-tauri/target/
+/app/package-lock.json
+/app/.svelte-kit/

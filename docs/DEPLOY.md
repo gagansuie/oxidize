@@ -1,153 +1,172 @@
 # Deploy Oxidize Relay Server
 
-Deploy your Oxidize relay server to **Fly.io** for global, low-latency performance.
+Deploy your Oxidize relay server for low-latency gaming and VoIP.
 
-## Cost
+## Fly.io (Recommended)
 
-| Plan | Specs | Price |
-|------|-------|-------|
-| **Starter** | 1 shared CPU, 1GB RAM | ~$5/mo |
-| **Performance** | 1 dedicated CPU, 2GB RAM | ~$15/mo |
+Low-latency edge deployment with anycast routing. Perfect for gaming and VoIP.
+
+| Feature | Value |
+|---------|-------|
+| **Latency** | 5-15ms (multi-region) |
+| **Throughput** | 1 Gbps per VM |
+| **Price** | $5-15/mo per region |
+| **Regions** | 30+ worldwide |
 
 ## Quick Deploy
 
-### 1. Install Fly CLI
-
 ```bash
+# 1. Install Fly CLI
 curl -L https://fly.io/install.sh | sh
-```
 
-### 2. Login
-
-```bash
+# 2. Login
 fly auth login
-```
 
-### 3. Deploy
-
-```bash
+# 3. Deploy
 cd oxidize
-fly launch --no-deploy  # First time: creates app
-fly deploy              # Deploy the server
+fly launch --no-deploy  # First time only
+fly deploy
+
+# 4. Scale to multiple regions for lowest latency
+fly scale count 3 --region iad,ord,lax
 ```
 
-### 4. Get Your Server Address
+### Recommended Regions
 
-```bash
-fly status
-```
+| Region | Location | Coverage |
+|--------|----------|----------|
+| `iad` | Ashburn, VA | East Coast |
+| `ord` | Chicago | Central |
+| `lax` | Los Angeles | West Coast |
+| `dfw` | Dallas | South |
+| `sea` | Seattle | Northwest |
 
-Your server address will be: `relay.oxd.sh:4433`
+### What Works on Fly.io
+
+| Optimization | Status |
+|--------------|--------|
+| BBRv3 congestion control | ✅ |
+| ROHC header compression | ✅ |
+| Native LZ4 compression | ✅ |
+| SIMD FEC | ✅ |
+| io_uring | ✅ |
+| Parallel compression | ✅ |
+| DPDK kernel bypass | ❌ (bare metal only) |
+| AF_XDP | ❌ (bare metal only) |
 
 ## Connect Clients
 
 ```bash
 # Linux/macOS
-sudo oxidize-client --server relay.oxd.sh:4433
+sudo oxidize-client --server YOUR_SERVER_IP:4433
 
 # Or use the install script
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- relay.oxd.sh:4433
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- YOUR_SERVER_IP:4433
 ```
+
+## Configuration
+
+Edit your server config:
+
+```toml
+# Server settings
+max_connections = 50000
+enable_compression = true
+enable_rohc = true
+rate_limit_per_ip = 1000
+
+# High-performance settings
+congestion_algorithm = "bbr_v3"
+enable_priority_scheduler = true
+```
+
+## Performance Tuning
+
+### Gaming / Low-Latency
+```toml
+congestion_algorithm = "bbr_v3"
+enable_compression = false      # Skip for lowest latency
+```
+
+### High-Throughput
+```toml
+enable_compression = true
+enable_rohc = true              # 60% header compression
+compression_threshold = 256
+```
+
+### Mobile Networks (High Loss)
+```toml
+enable_rohc = true
+# FEC auto-adjusts based on loss rate
+```
+
+## Achieving <5ms Latency
+
+For the lowest possible latency:
+
+### 1. Deploy Near Users
+```bash
+# More regions = lower latency for more users
+fly scale count 6 --region iad,ord,lax,dfw,sea,mia
+```
+
+### 2. Latency Budget
+| Component | Target |
+|-----------|--------|
+| Network (user → edge) | <2ms |
+| Server processing | <0.5ms |
+| Serialization | <0.1ms |
+| **Total** | **<5ms** |
+
+### 3. What Affects Latency
+| Factor | Impact | Solution |
+|--------|--------|----------|
+| Physical distance | +1ms per 100km | More edge regions |
+| Compression | +0.05ms | LZ4 is fine (fast) |
+| QUIC streams | +0.5ms ordering | Use datagrams for gaming |
+| Packet size | Minimal | Small packets are fast |
+
+### 4. Reality Check
+| User Location | Nearest Edge | Expected Latency |
+|---------------|--------------|------------------|
+| Same city | iad/ord/lax | **2-5ms** ✅ |
+| Same region | ~500km | 5-10ms |
+| Cross-country | ~3000km | 20-40ms |
+
+**<5ms is achievable** for users within ~200km of an edge node.
 
 ## Scaling
 
-### Add More Regions
+Scale to multiple regions for lowest latency:
 
 ```bash
-# Deploy to multiple regions for lower latency
-fly regions add lax sea iad  # LA, Seattle, Virginia
-fly scale count 3            # One instance per region
-```
+# Add more regions
+fly scale count 5 --region iad,ord,lax,dfw,sea
 
-### Scale Up
-
-```bash
-# More resources
-fly scale vm shared-cpu-2x --memory 2048
+# Check status
+fly status
 ```
 
 ## Monitoring
 
 ```bash
-# View logs
+# Check Fly.io logs
 fly logs
 
-# SSH into the server
-fly ssh console
-
 # Check metrics
-fly status
+fly ssh console -C "curl http://localhost:9090/metrics"
 ```
 
-## Custom Domain
-
-Oxidize uses `relay.oxd.sh` as the official relay server.
-
-To use your own domain:
-```bash
-fly certs add yourdomain.com
-```
-
-Then add DNS records (Cloudflare example):
-| Type | Name | Value | Proxy |
-|------|------|-------|-------|
-| A | @ | YOUR_FLY_IPV4 | DNS only |
-| AAAA | @ | YOUR_FLY_IPV6 | DNS only |
-
-**Important:** Disable Cloudflare proxy (gray cloud) - QUIC/UDP requires direct connection.
-
-## Environment Variables
+## Troubleshooting
 
 ```bash
-fly secrets set RUST_LOG=debug  # Enable debug logging
-```
-
-## Performance Tuning
-
-Performance optimizations are **always enabled** (zero-copy buffers, lock-free streams, ACK batching). Tune these settings for your use case:
-
-### Gaming / Low-Latency
-```toml
-enable_tcp_acceleration = true
-enable_compression = false      # Skip compression for lowest latency
-```
-
-### High-Throughput / API Traffic
-```toml
-enable_compression = true
-compression_threshold = 256     # Compress smaller payloads
-```
-
-### Mobile Networks (High Loss)
-```toml
-enable_rohc = true              # Header compression saves bandwidth
-# FEC auto-adjusts based on loss rate
-```
-
-### Latency Monitoring
-
-Check server latency metrics:
-```bash
+# SSH into instance
 fly ssh console
-curl http://localhost:9090/metrics | grep latency
+
+# Check service status
+fly status
+
+# Restart
+fly apps restart
 ```
-
-Target values:
-- Process Latency: < 1µs
-- Encode/Decode: < 0.5µs
-- Forward Latency: depends on destination
-
-## Regions
-
-| Code | Location |
-|------|----------|
-| `ord` | Chicago |
-| `iad` | Virginia |
-| `lax` | Los Angeles |
-| `sea` | Seattle |
-| `ams` | Amsterdam |
-| `lhr` | London |
-| `nrt` | Tokyo |
-| `syd` | Sydney |
-
-See all: `fly platform regions`

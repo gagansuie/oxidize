@@ -1,5 +1,8 @@
-# Oxidize Relay Server - Production Dockerfile
-FROM rust:1.83-slim-bookworm AS builder
+# Oxidize Relay Server - Fly.io Dockerfile
+# Multi-stage build for minimal image size
+
+# Build stage
+FROM rust:1.75-bookworm as builder
 
 WORKDIR /app
 
@@ -10,28 +13,30 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY common/Cargo.toml common/
 COPY server/Cargo.toml server/
 COPY client/Cargo.toml client/
+COPY daemon/Cargo.toml daemon/
+COPY app/Cargo.toml app/
 
-# Create dummy source files for dependency caching
-RUN mkdir -p common/src server/src client/src common/benches \
-    && echo "pub fn dummy() {}" > common/src/lib.rs \
-    && echo "fn main() {}" > server/src/main.rs \
-    && echo "fn main() {}" > client/src/main.rs \
-    && echo "fn main() {}" > common/benches/perf_bench.rs
+# Create dummy files for dependency caching
+RUN mkdir -p common/src server/src client/src daemon/src app/src && \
+    echo "pub fn main() {}" > common/src/lib.rs && \
+    echo "fn main() {}" > server/src/main.rs && \
+    echo "fn main() {}" > client/src/main.rs && \
+    echo "fn main() {}" > daemon/src/main.rs && \
+    echo "fn main() {}" > app/src/main.rs
 
-# Generate Cargo.lock and build dependencies (cached layer)
-RUN cargo generate-lockfile && cargo build --release --package relay-server || true
+# Build dependencies only (cached layer)
+RUN cargo build --release --package relay-server 2>/dev/null || true
 
-# Copy actual source code
+# Copy actual source
 COPY common/src common/src
 COPY server/src server/src
 
 # Build the server
-RUN touch common/src/lib.rs server/src/main.rs \
-    && cargo build --release --package relay-server
+RUN cargo build --release --package relay-server
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -39,32 +44,24 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    iproute2 \
-    iptables \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the built binary
-COPY --from=builder /app/target/release/oxidize-server /usr/local/bin/
+# Copy binary
+COPY --from=builder /app/target/release/oxidize-server /app/
 
-# Generate self-signed certs for QUIC (replace with real certs in production)
-RUN apt-get update && apt-get install -y openssl && \
-    openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes \
-    -subj "/CN=oxidize-relay" && \
-    apt-get remove -y openssl && apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+# Copy default config if exists
+COPY --from=builder /app/example-config-server.toml /app/config.toml
 
-# Copy entrypoint script
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Expose QUIC port
+# Health check endpoint
+EXPOSE 9090
+# QUIC/UDP port
 EXPOSE 4433/udp
-EXPOSE 4433/tcp
-EXPOSE 9090/tcp
 
+# Environment
 ENV RUST_LOG=info
+ENV RUST_BACKTRACE=1
 
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["oxidize-server", "--listen", "0.0.0.0:4433", "--metrics-addr", "0.0.0.0:9090"]
+# Run server
+CMD ["./oxidize-server", "--listen", "0.0.0.0:4433", "--metrics", "0.0.0.0:9090"]

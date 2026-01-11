@@ -1,0 +1,28 @@
+# Systemd Socket Activation for Oxidize Server
+# This enables INSTANT handoff during updates - the socket stays open
+# while the server process restarts, so no connections are ever dropped.
+#
+# Install: sudo cp oxidize-server.socket /etc/systemd/system/
+# Enable: sudo systemctl enable oxidize-server.socket
+
+[Unit]
+Description=Oxidize Server Socket (Zero-Downtime)
+Documentation=https://github.com/gagansuie/oxidize
+
+[Socket]
+# QUIC/UDP port for VPN traffic
+ListenDatagram=0.0.0.0:4433
+
+# Enable SO_REUSEPORT for load balancing across instances
+ReusePort=true
+
+# Large receive buffer for high throughput
+ReceiveBuffer=16M
+SendBuffer=16M
+
+# Socket stays active even when service restarts
+# This is the key to zero-downtime updates
+FreeBind=true
+
+[Install]
+WantedBy=sockets.target

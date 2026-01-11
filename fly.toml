@@ -1,41 +1,62 @@
-# fly.toml app configuration file generated for oxidize-relay on 2026-01-06T16:14:41-06:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+# Oxidize Relay Server - Fly.io Configuration
+# Deploy with: fly deploy
+# Scale regions: fly scale count 3 --region iad,ord,lax
 
-app = 'oxidize-relay'
-primary_region = 'ord'
+app = "oxidize-relay"
+primary_region = "iad"
 
 [build]
-  dockerfile = 'Dockerfile.server'
+  dockerfile = "Dockerfile.server"
 
 [env]
-  OXIDIZE_PORT = '4433'
-  RUST_LOG = 'info'
+  RUST_LOG = "info"
+  RUST_BACKTRACE = "1"
 
+[http_service]
+  internal_port = 9090
+  force_https = false
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+# QUIC/UDP service on port 4433
 [[services]]
-  protocol = 'udp'
+  protocol = "udp"
   internal_port = 4433
 
   [[services.ports]]
     port = 4433
 
+# Prometheus metrics (internal)
 [[services]]
-  protocol = 'tcp'
-  internal_port = 4433
-
-  [[services.ports]]
-    port = 4433
-
-[[services]]
-  protocol = 'tcp'
+  protocol = "tcp"
   internal_port = 9090
 
   [[services.ports]]
     port = 9090
+    handlers = ["http"]
+
+[checks]
+  [checks.health]
+    port = 9090
+    type = "http"
+    interval = "15s"
+    timeout = "5s"
+    path = "/health"
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 1024
+  size = "shared-cpu-2x"
+  memory = "1gb"
+  cpus = 2
+
+# Recommended regions for US coverage:
+# iad - Ashburn (East Coast)
+# ord - Chicago (Central)
+# lax - Los Angeles (West Coast)
+# dfw - Dallas (South)
+# sea - Seattle (Northwest)

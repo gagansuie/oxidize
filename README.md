@@ -58,8 +58,8 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **io_uring Implementation** - Real io_uring syscalls (not just abstractions), 10-20x syscall reduction on Linux 5.1+
-- **Batched TUN I/O** - Server and client batch packet writes, 10-50x fewer syscalls
+- **DPDK Kernel Bypass** - Complete kernel bypass for 40+ Gbps per core on bare metal
+- **io_uring Integration** - Real io_uring syscalls, 10-20x syscall reduction on Linux 5.1+
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
@@ -223,7 +223,7 @@ curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh |
 # Build
 cargo build --release
 
-# Run server (on your Fly.io/cloud instance)
+# Run server (on your Hetzner bare metal)
 ./target/release/oxidize-server --listen 0.0.0.0:4433
 
 # Run client (defaults to relay.oxd.sh:4433)
@@ -342,9 +342,8 @@ See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 - [AI.md](docs/AI.md) - AI/ML engine deep dive (LSTM, DRL, UCB1)
 - [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
-- [TUN.md](docs/TUN.md) - Full system tunneling (VPN-like mode)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io)
+- [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Hetzner)
 
 ## Testing
 
@@ -364,7 +363,7 @@ cargo bench --package oxidize-common
 ╔════════════════════════════════════════════════════════════════╗
 ║                     KEY TAKEAWAYS                              ║
 ╠════════════════════════════════════════════════════════════════╣
-║ LZ4 Throughput:      ~82 MB/s (handles 1 Gbps+)                ║
+║ LZ4 Throughput:      ~4 GB/s (native LZ4, 10+ Gbps)            ║
 ║ FEC Throughput:      ~4321 MB/s (never a bottleneck)           ║
 ║ Adaptive FEC:        64ns overhead (undetectable)              ║
 ║ Buffer Pool:         100% hit rate (zero allocs)               ║

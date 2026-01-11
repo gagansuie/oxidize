@@ -14,7 +14,7 @@ use tracing::{debug, error, info};
 
 use crate::cache::DataCache;
 use crate::config::Config;
-use crate::tun_forwarder::SharedTunForwarder;
+use crate::xdp_forwarder::SharedTunForwarder;
 
 static CONNECTION_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 

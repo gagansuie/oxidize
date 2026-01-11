@@ -8,11 +8,13 @@ mod compressor;
 mod decompressor;
 mod encoding;
 mod profiles;
+pub mod rtp; // RTP profile for VoIP/gaming (97% header reduction)
 
 pub use compressor::RohcCompressor;
 pub use decompressor::RohcDecompressor;
 pub use encoding::{RohcCrc, Sdvl, WlsbEncoder};
 pub use profiles::Profile;
+pub use rtp::{RtpCodec, RtpContext};
 
 use anyhow::Result;
 

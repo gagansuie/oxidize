@@ -2,20 +2,14 @@ use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 
-mod cache;
-mod config;
-mod connection;
-mod prometheus;
-mod server;
-mod tls;
-mod tun_forwarder;
-mod wireguard;
-
-use config::Config;
-use server::RelayServer;
-use wireguard::{generate_client_config, generate_server_config, WireGuardServer};
+use relay_server::config::Config;
+use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
+use relay_server::prometheus::PrometheusMetrics;
+use relay_server::server::RelayServer;
+use relay_server::wireguard::{generate_client_config, generate_server_config, WireGuardServer};
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-server")]
@@ -120,7 +114,7 @@ async fn main() -> Result<()> {
             args.metrics_addr
         );
 
-        let prom_metrics = prometheus::PrometheusMetrics::new()?;
+        let prom_metrics = PrometheusMetrics::new()?;
         let prom_clone = prom_metrics.clone();
 
         tokio::spawn(async move {
@@ -212,7 +206,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    server.run().await?;
+    // Setup graceful shutdown coordinator
+    let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(Duration::from_secs(30)));
+
+    // Setup signal handlers for graceful shutdown
+    setup_signal_handlers(shutdown_coordinator.clone()).await;
+
+    info!("🔄 Graceful shutdown enabled (30s drain timeout)");
+    info!("   Send SIGTERM/SIGINT to gracefully drain connections");
+
+    // Run server with graceful shutdown support
+    server.run_with_shutdown(shutdown_coordinator).await?;
 
     Ok(())
 }

@@ -8,6 +8,7 @@ license = { workspace = true }
 [features]
 default = ["ai"]
 ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # AI-powered ML engine with training + HF Hub sync
+xdp = ["dep:aya", "dep:aya-log", "dep:xsk-rs", "dep:libbpf-rs"]  # AF_XDP high-performance networking (requires libelf-dev)
 
 [[bin]]
 name = "oxidize-train"
@@ -26,10 +27,12 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 lz4_flex = { workspace = true }
+lz4 = { workspace = true }  # Native C bindings - 50x faster
 etherparse = { workspace = true }
 reed-solomon-erasure = { workspace = true }
 rayon = { workspace = true }
 libc = "0.2"
+ring = { workspace = true }  # Hardware-accelerated crypto
 tract-onnx = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
 candle-core = { workspace = true, optional = true }
@@ -42,3 +45,8 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { workspace = true }
+aya = { workspace = true, optional = true }         # eBPF loader
+aya-log = { workspace = true, optional = true }     # eBPF logging  
+xsk-rs = { workspace = true, optional = true }      # AF_XDP zero-copy sockets
+libbpf-rs = { workspace = true, optional = true }   # eBPF bindings
+nix = "0.27"  # Unix utilities

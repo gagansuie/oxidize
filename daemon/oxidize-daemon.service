@@ -1,0 +1,37 @@
+[Unit]
+Description=Oxidize Network Relay Daemon
+After=network-online.target
+Wants=network-online.target
+# Socket activation support (optional - for instant handoff)
+After=oxidize-server.socket
+Requires=oxidize-server.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/oxidize-server
+Restart=on-failure
+RestartSec=1
+Environment=RUST_LOG=info
+
+# === ZERO-DOWNTIME DEPLOYMENT ===
+# Use SIGTERM for graceful shutdown (30s drain timeout)
+KillSignal=SIGTERM
+# Allow time for connection draining before force kill
+TimeoutStopSec=35
+
+# Reload support - send SIGHUP to reload config without restart
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Resource limits for high performance
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/run/oxidize
+
+[Install]
+WantedBy=multi-user.target

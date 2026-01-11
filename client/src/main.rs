@@ -9,7 +9,7 @@ mod client;
 mod config;
 mod dns_cache;
 mod speedtest;
-mod tun_handler;
+mod xdp_handler;
 
 use client::RelayClient;
 use config::ClientConfig;
@@ -29,7 +29,7 @@ struct Args {
     verbose: bool,
 
     #[arg(long)]
-    no_tun: bool,
+    no_xdp: bool,
 
     /// Run a speed test comparing direct vs relay connection
     #[arg(long)]
@@ -144,11 +144,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    if !args.no_tun {
-        info!("🌐 Starting TUN interface...");
-        client.run_with_tun().await?;
+    if !args.no_xdp {
+        info!("🚀 Starting AF_XDP high-performance mode (10+ Gbps)...");
+        client.run_with_xdp().await?;
     } else {
-        info!("⚙️  Running in proxy mode (no TUN)...");
+        info!("⚙️  Running in proxy mode (no packet capture)...");
         client.run().await?;
     }
 

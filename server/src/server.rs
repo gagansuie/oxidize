@@ -1,6 +1,8 @@
 use anyhow::Result;
 use oxidize_common::ai_engine::HeuristicEngine;
 use oxidize_common::edge_cache::{CacheConfig, EdgeCache};
+use oxidize_common::ml_models::MlEngine;
+use oxidize_common::model_hub::{HubConfig, ModelHub};
 use oxidize_common::security::{SecurityAction, SecurityConfig, SecurityManager};
 use oxidize_common::RelayMetrics;
 use quinn::{Connection, Endpoint, ServerConfig};
@@ -14,8 +16,9 @@ use tracing::{debug, error, info, warn};
 use crate::cache::DataCache;
 use crate::config::Config;
 use crate::connection::ConnectionHandler;
+use crate::graceful::{create_reuseport_socket, ShutdownCoordinator};
 use crate::tls::{load_tls_config, TlsConfig};
-use crate::tun_forwarder::SharedTunForwarder;
+use crate::xdp_forwarder::SharedTunForwarder;
 
 pub struct RelayServer {
     endpoint: Endpoint,
@@ -29,6 +32,10 @@ pub struct RelayServer {
     edge_cache: Arc<RwLock<EdgeCache>>,
     /// AI/Heuristic engine for smart decisions
     ai_engine: Arc<Mutex<HeuristicEngine>>,
+    /// ML Engine for training data collection and inference
+    ml_engine: Arc<RwLock<MlEngine>>,
+    /// Model Hub for downloading models and uploading training data
+    model_hub: Arc<ModelHub>,
 }
 
 impl RelayServer {
@@ -89,7 +96,19 @@ impl RelayServer {
 
         server_config.transport_config(Arc::new(transport_config));
 
-        let endpoint = Endpoint::server(server_config, listen_addr)?;
+        // Create socket with SO_REUSEPORT for zero-downtime rolling restarts
+        // This allows multiple server processes to bind to the same port
+        let socket = create_reuseport_socket(listen_addr)?;
+        info!("🔄 SO_REUSEPORT enabled for zero-downtime deployments");
+
+        let runtime =
+            quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("No async runtime found"))?;
+        let endpoint = Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            runtime,
+        )?;
 
         let security_config = SecurityConfig {
             max_connections_per_ip: config.rate_limit_per_ip as u32,
@@ -118,6 +137,35 @@ impl RelayServer {
         // Initialize AI/Heuristic engine
         let ai_engine = Arc::new(Mutex::new(HeuristicEngine::new()));
 
+        // Initialize ML Engine (auto-collects training data)
+        let mut ml_engine = MlEngine::new();
+
+        // Initialize Model Hub for model sync and training data upload
+        let hub_config = HubConfig {
+            upload_training_data: true, // Enable auto-upload
+            ..Default::default()
+        };
+        let model_hub = Arc::new(ModelHub::new(hub_config));
+
+        // Try to download and load latest models from HF Hub
+        info!("🤖 Downloading latest ML models from HF Hub...");
+        match model_hub.download_models() {
+            Ok(paths) => {
+                if let Some(lstm_path) = &paths.lstm {
+                    if let Err(e) = ml_engine.load_models(lstm_path.parent().unwrap_or(lstm_path)) {
+                        warn!("Could not load ML models: {} (using heuristics)", e);
+                    } else {
+                        info!("✅ ML models loaded successfully");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Could not download ML models: {} (using heuristics)", e);
+            }
+        }
+
+        let ml_engine = Arc::new(RwLock::new(ml_engine));
+
         if config.enable_edge_cache {
             info!(
                 "📦 Edge cache enabled ({}MB, {} entries)",
@@ -140,6 +188,8 @@ impl RelayServer {
             forwarder,
             edge_cache,
             ai_engine,
+            ml_engine,
+            model_hub,
         })
     }
 
@@ -170,6 +220,7 @@ impl RelayServer {
         // Log cache stats periodically
         let cache_stats = self.edge_cache.clone();
         let ai_stats = self.ai_engine.clone();
+        let ml_stats = self.ml_engine.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
             loop {
@@ -188,6 +239,74 @@ impl RelayServer {
                     "🧠 AI engine: {} compression skipped, {} FEC injected",
                     engine_stats.compression_skipped, engine_stats.fec_injected
                 );
+                // Log ML engine stats
+                let ml_engine_stats = ml_stats.read().await.stats();
+                info!(
+                    "🤖 ML engine: models_loaded={}, loss_predictor={} samples, drl={} experiences",
+                    ml_engine_stats.loss_predictor.model_loaded,
+                    ml_engine_stats.loss_predictor.training_samples,
+                    ml_engine_stats.congestion_controller.experience_count
+                );
+            }
+        });
+
+        // Periodic ML training data upload to HF Hub (every hour)
+        let ml_upload = self.ml_engine.clone();
+        let hub_upload = self.model_hub.clone();
+        tokio::spawn(async move {
+            // Wait 10 minutes before first upload to collect some data
+            tokio::time::sleep(Duration::from_secs(600)).await;
+
+            let mut interval = tokio::time::interval(Duration::from_secs(3600)); // 1 hour
+            loop {
+                interval.tick().await;
+
+                // Export training data to temp directory
+                let export_dir = "/tmp/oxidize_training_export";
+                if let Err(e) = std::fs::create_dir_all(export_dir) {
+                    warn!("Failed to create export dir: {}", e);
+                    continue;
+                }
+
+                {
+                    let engine = ml_upload.read().await;
+                    if let Err(e) = engine.export_training_data(export_dir) {
+                        warn!("Failed to export training data: {}", e);
+                        continue;
+                    }
+                }
+
+                // Read exported files and upload
+                let loss_path = format!("{}/loss_samples.json", export_dir);
+                let drl_path = format!("{}/drl_experiences.json", export_dir);
+
+                let loss_samples: Vec<oxidize_common::ml_models::LossSample> =
+                    std::fs::read_to_string(&loss_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+
+                let drl_experiences: Vec<oxidize_common::ml_models::DrlExperience> =
+                    std::fs::read_to_string(&drl_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+
+                if loss_samples.is_empty() && drl_experiences.is_empty() {
+                    debug!("No training data to upload yet");
+                    continue;
+                }
+
+                info!(
+                    "📤 Uploading training data: {} loss samples, {} DRL experiences",
+                    loss_samples.len(),
+                    drl_experiences.len()
+                );
+
+                match hub_upload.upload_training_data(&loss_samples, &drl_experiences) {
+                    Ok(()) => info!("✅ Training data uploaded to HF Hub"),
+                    Err(e) => warn!("Failed to upload training data: {}", e),
+                }
             }
         });
 
@@ -251,6 +370,146 @@ impl RelayServer {
                 }
             });
         }
+
+        Ok(())
+    }
+
+    /// Run server with graceful shutdown support
+    /// This method supports zero-downtime deployments:
+    /// - Stops accepting new connections on shutdown signal
+    /// - Drains existing connections gracefully
+    /// - Works with SO_REUSEPORT for rolling restarts
+    pub async fn run_with_shutdown(
+        &self,
+        shutdown_coordinator: Arc<ShutdownCoordinator>,
+    ) -> Result<()> {
+        info!("Server running with graceful shutdown support...");
+
+        // Spawn cleanup task for security and edge cache
+        let security_cleanup = self.security.clone();
+        let cache_cleanup = self.edge_cache.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                security_cleanup.lock().await.cleanup();
+                cache_cleanup.write().await.cleanup_expired();
+            }
+        });
+
+        // Log cache stats periodically
+        let cache_stats = self.edge_cache.clone();
+        let ai_stats = self.ai_engine.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let stats = cache_stats.read().await.get_stats();
+                if stats.hits > 0 || stats.misses > 0 {
+                    info!(
+                        "📦 Edge cache: {:.1}% hit rate, {} entries, {}MB used",
+                        stats.hit_rate,
+                        stats.entries,
+                        stats.size_bytes / 1024 / 1024
+                    );
+                }
+                let engine_stats = ai_stats.lock().await.stats.clone();
+                info!(
+                    "🧠 AI engine: {} compression skipped, {} FEC injected",
+                    engine_stats.compression_skipped, engine_stats.fec_injected
+                );
+            }
+        });
+
+        // Get connection tracker for this server instance
+        let tracker = shutdown_coordinator.connection_tracker();
+
+        // Accept connections until shutdown signal
+        loop {
+            // Check if we should stop accepting new connections
+            if !shutdown_coordinator.should_accept() {
+                info!("🛑 Stopping new connection acceptance, draining existing...");
+                break;
+            }
+
+            // Use select to check for both new connections and shutdown
+            tokio::select! {
+                incoming = self.endpoint.accept() => {
+                    if let Some(incoming) = incoming {
+                        let connections = self.connections.clone();
+                        let metrics = self.metrics.clone();
+                        let config = self.config.clone();
+                        let cache = self.cache.clone();
+                        let security = self.security.clone();
+                        let forwarder = self.forwarder.clone();
+                        let conn_tracker = tracker.clone_tracker();
+
+                        tokio::spawn(async move {
+                            // Register this connection for tracking
+                            let _guard = conn_tracker.register();
+
+                            let remote_addr = incoming.remote_address();
+                            let client_ip = remote_addr.ip();
+
+                            // Security check
+                            let action = security.lock().await.check_connection(client_ip);
+                            match action {
+                                SecurityAction::Block => {
+                                    warn!("Blocked connection from: {}", client_ip);
+                                    return;
+                                }
+                                SecurityAction::RateLimit => {
+                                    debug!("Rate limited connection from: {}", client_ip);
+                                    return;
+                                }
+                                SecurityAction::Challenge => {
+                                    debug!("Challenging connection from: {}", client_ip);
+                                }
+                                _ => {}
+                            }
+
+                            match incoming.await {
+                                Ok(connection) => {
+                                    info!("New connection from: {}", connection.remote_address());
+                                    metrics.record_connection_opened();
+
+                                    security.lock().await.mark_verified(client_ip);
+
+                                    if let Err(e) = Self::handle_connection(
+                                        connection,
+                                        connections,
+                                        metrics.clone(),
+                                        config,
+                                        cache,
+                                        forwarder,
+                                    )
+                                    .await
+                                    {
+                                        error!("Connection error: {}", e);
+                                    }
+
+                                    metrics.record_connection_closed();
+                                }
+                                Err(e) => {
+                                    error!("Connection failed: {}", e);
+                                }
+                            }
+                            // _guard dropped here, decrementing active connection count
+                        });
+                    } else {
+                        // Endpoint closed
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Wait for graceful shutdown to complete (connections to drain)
+        // The signal handler will call shutdown_coordinator.shutdown()
+        info!(
+            "📊 {} active connections remaining",
+            shutdown_coordinator.active_count()
+        );
 
         Ok(())
     }

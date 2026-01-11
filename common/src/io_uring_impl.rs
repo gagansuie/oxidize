@@ -78,13 +78,20 @@ impl UringInstance {
     }
 
     /// Create with default high-performance settings
+    /// Optimized for 10+ Gbps throughput
     pub fn high_performance() -> io::Result<Self> {
-        Self::new(4096, 256, 65536)
+        Self::new(8192, 512, 65536) // Larger rings for high throughput
     }
 
-    /// Create for low-latency workloads
+    /// Create for low-latency workloads (gaming)
     pub fn low_latency() -> io::Result<Self> {
-        Self::new(256, 64, 4096)
+        Self::new(512, 128, 4096) // Smaller rings, faster submission
+    }
+
+    /// Create for maximum throughput (10-25 Gbps target)
+    /// Use with dedicated CPU cores for best results
+    pub fn max_throughput() -> io::Result<Self> {
+        Self::new(16384, 1024, 65536) // Maximum ring sizes
     }
 
     /// Check if io_uring is supported on this system
@@ -160,6 +167,7 @@ impl UringInstance {
     }
 
     /// Queue multiple TUN writes (batched)
+    /// This is the key optimization - multiple packets in one submit
     pub fn queue_tun_writes_batch(&mut self, fd: RawFd, packets: &[&[u8]]) -> Vec<u64> {
         let mut ids = Vec::with_capacity(packets.len());
 
@@ -168,6 +176,66 @@ impl UringInstance {
         }
 
         // Track syscalls saved (n packets in 1 submit vs n syscalls)
+        if packets.len() > 1 {
+            self.stats.syscalls_saved += (packets.len() - 1) as u64;
+        }
+
+        ids
+    }
+
+    /// Queue UDP sendmsg operations (for QUIC)
+    pub fn queue_udp_send(&mut self, fd: RawFd, data: &[u8], addr: &libc::sockaddr_in) -> u64 {
+        let user_data = self.next_id;
+        self.next_id += 1;
+
+        // Create msghdr for sendmsg
+        let iov = libc::iovec {
+            iov_base: data.as_ptr() as *mut _,
+            iov_len: data.len(),
+        };
+
+        let msg = libc::msghdr {
+            msg_name: addr as *const _ as *mut _,
+            msg_namelen: std::mem::size_of::<libc::sockaddr_in>() as u32,
+            msg_iov: &iov as *const _ as *mut _,
+            msg_iovlen: 1,
+            msg_control: std::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+
+        let sendmsg_e = opcode::SendMsg::new(types::Fd(fd), &msg as *const _)
+            .build()
+            .user_data(user_data);
+
+        unsafe {
+            self.ring.submission().push(&sendmsg_e).ok();
+        }
+
+        self.pending.insert(
+            user_data,
+            PendingOp {
+                op_type: OpType::UdpSend,
+                buffer_idx: None,
+            },
+        );
+
+        self.stats.submissions += 1;
+        user_data
+    }
+
+    /// Queue multiple UDP sends (GSO-style batching)
+    pub fn queue_udp_sends_batch(
+        &mut self,
+        fd: RawFd,
+        packets: &[(&[u8], &libc::sockaddr_in)],
+    ) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(packets.len());
+
+        for (data, addr) in packets {
+            ids.push(self.queue_udp_send(fd, data, addr));
+        }
+
         if packets.len() > 1 {
             self.stats.syscalls_saved += (packets.len() - 1) as u64;
         }

@@ -327,6 +327,82 @@ impl ModelHub {
     pub fn config(&self) -> &HubConfig {
         &self.config
     }
+
+    /// Upload training data to HF Hub
+    /// This uploads collected training samples for aggregation and model training
+    #[cfg(feature = "ai")]
+    pub fn upload_training_data(
+        &self,
+        loss_samples: &[LossSample],
+        drl_experiences: &[DrlExperience],
+    ) -> anyhow::Result<()> {
+        if loss_samples.is_empty() && drl_experiences.is_empty() {
+            debug!("No training data to upload");
+            return Ok(());
+        }
+
+        let token = self
+            .config
+            .token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("HF_TOKEN required for upload"))?;
+
+        // Export to local file first
+        let local_path = self.export_training_data(loss_samples, drl_experiences)?;
+
+        let filename = local_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("training_data.json");
+
+        // Upload to training_data/ directory in the repo
+        let remote_path = format!("training_data/{}", filename);
+
+        // Use the HF Hub upload API
+        use std::process::Command;
+        let output = Command::new("huggingface-cli")
+            .args([
+                "upload",
+                &self.config.repo_id,
+                local_path.to_str().unwrap_or(""),
+                &remote_path,
+                "--repo-type",
+                "model",
+                "--token",
+                token,
+            ])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.stats.uploads.fetch_add(1, Ordering::SeqCst);
+                info!(
+                    "Uploaded training data: {} loss samples, {} DRL experiences",
+                    loss_samples.len(),
+                    drl_experiences.len()
+                );
+                Ok(())
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                self.stats.sync_errors.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("Upload failed: {}", stderr)
+            }
+            Err(e) => {
+                self.stats.sync_errors.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("Upload command failed: {}", e)
+            }
+        }
+    }
+
+    #[cfg(not(feature = "ai"))]
+    pub fn upload_training_data(
+        &self,
+        _loss_samples: &[LossSample],
+        _drl_experiences: &[DrlExperience],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("AI features not compiled in")
+    }
 }
 
 /// Paths to downloaded models

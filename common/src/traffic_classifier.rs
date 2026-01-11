@@ -5,6 +5,7 @@
 //! - Streaming traffic → Direct/bypass (user's residential IP)
 //! - General traffic → Through tunnel (privacy)
 
+use crate::low_latency::{is_gaming_port, is_voip_port};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -197,9 +198,14 @@ impl TrafficClassifier {
             }
         }
 
-        // Check gaming ports
-        if self.config.gaming_ports.contains(&dest_port) {
+        // Check gaming ports (config + low_latency detection)
+        if self.config.gaming_ports.contains(&dest_port) || is_gaming_port(dest_port) {
             return TrafficClass::Gaming;
+        }
+
+        // Check VoIP ports
+        if is_voip_port(dest_port) {
+            return TrafficClass::RealTime;
         }
 
         // Check known gaming IPs

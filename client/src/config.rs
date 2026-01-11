@@ -70,6 +70,23 @@ pub struct ClientConfig {
     /// Enable AI-powered heuristic engine for smart compression decisions
     #[serde(default = "default_enable_ai_engine")]
     pub enable_ai_engine: bool,
+
+    // === Zero-Downtime Reconnection ===
+    /// Maximum reconnection attempts before giving up (0 = infinite)
+    #[serde(default = "default_max_reconnect_attempts")]
+    pub max_reconnect_attempts: u32,
+
+    /// Initial reconnection delay in milliseconds (will use exponential backoff)
+    #[serde(default = "default_reconnect_delay_ms")]
+    pub reconnect_delay_ms: u64,
+
+    /// Maximum reconnection delay in milliseconds
+    #[serde(default = "default_max_reconnect_delay_ms")]
+    pub max_reconnect_delay_ms: u64,
+
+    /// Number of packets to buffer during reconnection
+    #[serde(default = "default_reconnect_buffer_size")]
+    pub reconnect_buffer_size: usize,
 }
 
 fn default_enable_rohc() -> bool {
@@ -138,6 +155,22 @@ fn default_enable_ai_engine() -> bool {
     true
 }
 
+fn default_max_reconnect_attempts() -> u32 {
+    0 // 0 = infinite retries for maximum resilience
+}
+
+fn default_reconnect_delay_ms() -> u64 {
+    50 // Start with 50ms for instant reconnection feel
+}
+
+fn default_max_reconnect_delay_ms() -> u64 {
+    5000 // Cap at 5 seconds
+}
+
+fn default_reconnect_buffer_size() -> usize {
+    1000 // Buffer up to 1000 packets during reconnection
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
@@ -164,6 +197,10 @@ impl Default for ClientConfig {
             enable_multipath: default_enable_multipath(),
             enable_prefetch: default_enable_prefetch(),
             enable_ai_engine: default_enable_ai_engine(),
+            max_reconnect_attempts: default_max_reconnect_attempts(),
+            reconnect_delay_ms: default_reconnect_delay_ms(),
+            max_reconnect_delay_ms: default_max_reconnect_delay_ms(),
+            reconnect_buffer_size: default_reconnect_buffer_size(),
         }
     }
 }

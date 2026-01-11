@@ -12,6 +12,11 @@ on:
         required: false
         default: 'false'
         type: boolean
+      keep_training_data:
+        description: 'Keep training data after training (do not archive)'
+        required: false
+        default: 'false'
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -59,39 +64,122 @@ jobs:
       - name: Download training data from HF Hub
         run: |
           mkdir -p training_data
-          # Download any uploaded training samples
+          mkdir -p training_data_archive
+          
+          # Download all training data uploaded by servers
+          echo "Downloading training data from HF Hub..."
           huggingface-cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
+          
           if [ -d "./hf_download/training_data" ]; then
-            cp -r ./hf_download/training_data/* ./training_data/ || true
+            # Count files before aggregation
+            FILE_COUNT=$(find ./hf_download/training_data -name '*.json' 2>/dev/null | wc -l)
+            echo "Found $FILE_COUNT training data files from servers"
+            
+            # Copy all training data files
+            cp -r ./hf_download/training_data/* ./training_data/ 2>/dev/null || true
+            
+            # Aggregate all loss samples into single file
+            echo "Aggregating loss samples..."
+            python3 << 'EOF'
+import json
+import glob
+import os
+
+# Aggregate loss samples
+loss_samples = []
+for f in glob.glob('training_data/*loss*.json') + glob.glob('training_data/training-*.json'):
+    try:
+        with open(f) as fp:
+            data = json.load(fp)
+            if isinstance(data, list):
+                loss_samples.extend(data)
+            elif isinstance(data, dict) and 'loss_samples' in data:
+                loss_samples.extend(data['loss_samples'])
+    except Exception as e:
+        print(f"Warning: Could not parse {f}: {e}")
+
+# Aggregate DRL experiences
+drl_experiences = []
+for f in glob.glob('training_data/*drl*.json') + glob.glob('training_data/*experience*.json') + glob.glob('training_data/training-*.json'):
+    try:
+        with open(f) as fp:
+            data = json.load(fp)
+            if isinstance(data, list) and len(data) > 0 and 'state' in str(data[0]):
+                drl_experiences.extend(data)
+            elif isinstance(data, dict) and 'drl_experiences' in data:
+                drl_experiences.extend(data['drl_experiences'])
+    except Exception as e:
+        print(f"Warning: Could not parse {f}: {e}")
+
+print(f"Aggregated {len(loss_samples)} loss samples")
+print(f"Aggregated {len(drl_experiences)} DRL experiences")
+
+# Write aggregated files
+if loss_samples:
+    with open('training_data/loss_samples.json', 'w') as fp:
+        json.dump(loss_samples, fp)
+
+if drl_experiences:
+    with open('training_data/drl_experiences.json', 'w') as fp:
+        json.dump(drl_experiences, fp)
+EOF
           fi
-          echo "Training samples found: $(find training_data -name '*.json' | wc -l)"
+          
+          echo "Training samples ready: $(find training_data -name '*.json' | wc -l) files"
 
       - name: Train models
         run: |
-          # Create model output directory
           mkdir -p ./trained_models
           
-          # Run training with synthetic data if no real data exists
-          echo "Training with $(find training_data -name '*.json' | wc -l) sample files"
+          SAMPLE_COUNT=$(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"rtt_us"' || echo "0")
+          echo "Total training samples: $SAMPLE_COUNT"
+          
+          # Determine if we should use synthetic data
+          FORCE_RETRAIN="${{ inputs.force_retrain }}"
+          if [ "$SAMPLE_COUNT" -lt 100 ] && [ "$FORCE_RETRAIN" != "true" ]; then
+            echo "Using synthetic data (only $SAMPLE_COUNT real samples)"
+            SYNTHETIC_FLAG="--generate-synthetic --synthetic-samples 10000"
+          else
+            echo "Training with $SAMPLE_COUNT real samples"
+            SYNTHETIC_FLAG=""
+          fi
           
           ./target/release/oxidize-train \
             --input ./training_data \
             --output ./trained_models \
             --lstm-epochs 100 \
             --dqn-steps 1000 \
-            --generate-synthetic \
-            --synthetic-samples 10000 \
+            $SYNTHETIC_FLAG \
             --export-onnx=false \
             --verbose
 
-      - name: Copy models to HF repo
+      - name: Prepare HF repo upload
         run: |
-          # Copy trained models to hf_repo for upload
-          cp ./trained_models/*.safetensors ./hf_repo/ || true
-          cp ./trained_models/config.json ./hf_repo/config.json || true
+          # Copy trained models
+          cp ./trained_models/*.safetensors ./hf_repo/ 2>/dev/null || true
+          cp ./trained_models/config.json ./hf_repo/config.json 2>/dev/null || true
           
-          # Create training_data directory in hf_repo
-          mkdir -p ./hf_repo/training_data
+          # Archive old training data (move to archive folder)
+          KEEP_DATA="${{ inputs.keep_training_data }}"
+          if [ "$KEEP_DATA" != "true" ]; then
+            mkdir -p ./hf_repo/training_data_archive
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            
+            # Move processed training data to archive
+            if [ -d "./hf_download/training_data" ]; then
+              for f in ./hf_download/training_data/training-*.json; do
+                if [ -f "$f" ]; then
+                  BASENAME=$(basename "$f")
+                  mv "$f" "./hf_repo/training_data_archive/${TIMESTAMP}_${BASENAME}" 2>/dev/null || true
+                fi
+              done
+            fi
+            
+            # Clear the training_data folder (will be repopulated by servers)
+            rm -rf ./hf_repo/training_data/*.json 2>/dev/null || true
+            mkdir -p ./hf_repo/training_data
+            echo "Training data archived and cleared for next cycle"
+          fi
 
       - name: Push models to HF Hub
         env:
@@ -102,8 +190,15 @@ jobs:
 
       - name: Summary
         run: |
+          SAMPLE_COUNT=$(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"rtt_us"' || echo "0")
           echo "## ML Training Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Training samples**: $(find training_data -name '*.json' | wc -l) files" >> $GITHUB_STEP_SUMMARY
+          echo "- **Training samples aggregated**: $SAMPLE_COUNT" >> $GITHUB_STEP_SUMMARY
           echo "- **Models pushed to**: https://huggingface.co/$HF_REPO" >> $GITHUB_STEP_SUMMARY
           echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pipeline Status" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Servers auto-collect training data" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Servers auto-upload to HF Hub (hourly)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ CI aggregates and trains (daily)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Servers auto-download new models (on startup)" >> $GITHUB_STEP_SUMMARY

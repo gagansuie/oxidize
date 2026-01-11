@@ -1000,24 +1000,30 @@ impl Default for MlEngine {
 
 impl MlEngine {
     pub fn new() -> Self {
-        MlEngine {
+        let mut engine = MlEngine {
             loss_predictor: LstmLossPredictor::new(),
             congestion_controller: DrlCongestionController::new(),
             compression_oracle: MlCompressionOracle::new(),
             path_selector: MlPathSelector::new(2),
             models_loaded: false,
-        }
+        };
+        // Always collect training data by default for continuous improvement
+        engine.enable_training_collection();
+        engine
     }
 
     /// Create with specified number of paths
     pub fn with_paths(num_paths: usize) -> Self {
-        MlEngine {
+        let mut engine = MlEngine {
             loss_predictor: LstmLossPredictor::new(),
             congestion_controller: DrlCongestionController::new(),
             compression_oracle: MlCompressionOracle::new(),
             path_selector: MlPathSelector::new(num_paths),
             models_loaded: false,
-        }
+        };
+        // Always collect training data by default for continuous improvement
+        engine.enable_training_collection();
+        engine
     }
 
     /// Load all models from a directory

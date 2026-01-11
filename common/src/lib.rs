@@ -35,8 +35,24 @@ pub mod io_uring_support;
 #[cfg(target_os = "linux")]
 pub mod io_uring_impl;
 
-pub mod high_perf_tun;
+// High-performance networking (pick ONE - DPDK is preferred for bare metal)
+#[cfg(target_os = "linux")]
+pub mod dpdk; // DPDK: 40+ Gbps, requires hugepages + VFIO (Hetzner)
+
+#[cfg(target_os = "linux")]
+pub mod af_xdp; // AF_XDP: 20 Gbps, fallback for non-bare-metal
+
+#[cfg(target_os = "linux")]
+pub mod ebpf;
+
+pub mod bbr_v3;
+pub mod crypto_accel;
+pub mod low_latency; // <5ms gaming/VoIP optimizations
 pub mod parallel_compression;
+pub mod simd_fec; // Custom BBRv3 congestion control
+
+#[cfg(target_os = "linux")]
+pub mod ktls; // Kernel TLS offload for 30% CPU reduction
 
 pub use compression::*;
 pub use metrics::*;

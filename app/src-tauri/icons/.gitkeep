@@ -1,0 +1,3 @@
+# Placeholder for app icons
+# Generate icons using: npm run tauri icon /path/to/source-icon.png
+# Required sizes: 32x32, 128x128, 128x128@2x, icon.icns, icon.ico

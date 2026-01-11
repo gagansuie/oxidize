@@ -92,9 +92,115 @@ jobs:
             *.tar.gz
             *.zip
 
+  build-desktop:
+    name: Build Desktop App (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          # macOS Intel
+          - os: macos-latest
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+          # macOS Apple Silicon
+          - os: macos-latest
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+          # Windows
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Get version from tauri.conf.json
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '"version"' app/src-tauri/tauri.conf.json | head -1 | sed 's/.*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/')
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Desktop app version: v$VERSION"
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          args: --target ${{ matrix.target }}
+
+      - name: Prepare release artifacts (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p desktop-release
+          cp target/${{ matrix.target }}/release/bundle/deb/*.deb desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.deb || true
+          cp target/${{ matrix.target }}/release/bundle/appimage/*.AppImage desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.AppImage || true
+          cp target/${{ matrix.target }}/release/bundle/rpm/*.rpm desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.rpm || true
+
+      - name: Prepare release artifacts (macOS)
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p desktop-release
+          cp target/${{ matrix.target }}/release/bundle/dmg/*.dmg desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.dmg || true
+
+      - name: Prepare release artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p desktop-release
+          cp target/${{ matrix.target }}/release/bundle/msi/*.msi desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.msi || true
+          cp target/${{ matrix.target }}/release/bundle/nsis/*.exe desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}-setup.exe || true
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxidize-desktop-${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: desktop-release/*
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-desktop]
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.check_tag.outputs.should_release == 'true' }}

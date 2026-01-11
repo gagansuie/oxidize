@@ -210,24 +210,41 @@ impl PrometheusMetrics {
             .observe(latency_us);
     }
 
-    async fn serve_metrics(self, _req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        let encoder = TextEncoder::new();
-        let metric_families = self.registry.gather();
+    async fn handle_request(self, req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+        match req.uri().path() {
+            "/health" | "/healthz" | "/ready" => {
+                // Health check endpoint for zero-downtime deployments
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"status":"healthy","ready":true}"#))
+                    .unwrap())
+            }
+            "/metrics" | "/" => {
+                // Prometheus metrics endpoint
+                let encoder = TextEncoder::new();
+                let metric_families = self.registry.gather();
 
-        let mut buffer = Vec::new();
-        if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
-            error!("Failed to encode metrics: {}", e);
-            return Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("Failed to encode metrics"))
-                .unwrap());
+                let mut buffer = Vec::new();
+                if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+                    error!("Failed to encode metrics: {}", e);
+                    return Ok(Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Failed to encode metrics"))
+                        .unwrap());
+                }
+
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", encoder.format_type())
+                    .body(Body::from(buffer))
+                    .unwrap())
+            }
+            _ => Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("Not Found"))
+                .unwrap()),
         }
-
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", encoder.format_type())
-            .body(Body::from(buffer))
-            .unwrap())
     }
 
     pub async fn start_server(self, addr: SocketAddr) -> Result<()> {
@@ -238,7 +255,7 @@ impl PrometheusMetrics {
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
                     let metrics = metrics.clone();
-                    async move { metrics.serve_metrics(req).await }
+                    async move { metrics.handle_request(req).await }
                 }))
             }
         });
