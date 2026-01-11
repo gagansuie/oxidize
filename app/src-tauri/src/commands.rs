@@ -146,6 +146,28 @@ pub async fn connect(
         }
     }
 
+    // Check if daemon is available for TPROXY optimization
+    // If daemon is running, use it for transparent proxy (gaming/VoIP optimization)
+    if is_daemon_running().await {
+        tracing::info!("Daemon available - using daemon connection with TPROXY");
+        let sid = server_id.clone();
+        daemon_connect(server_id).await?;
+
+        // Update global connected state so UI stays updated
+        crate::set_connected(true);
+
+        return Ok(ConnectionStatus {
+            connected: true,
+            server: Some(sid),
+            ip: None,
+            uptime_secs: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+        });
+    }
+
+    tracing::info!("Daemon not running - using direct QUIC connection");
+
     // Resolve Fly.io relay endpoint
     let server_addr: SocketAddr = format!("{}:{}", RELAY_HOST, RELAY_PORT)
         .to_socket_addrs()
@@ -213,7 +235,30 @@ pub async fn connect(
 pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<ConnectionStatus, String> {
     tracing::info!("Disconnecting...");
 
-    // Get connection metrics and abort task
+    // Check if we're using daemon mode first
+    if is_daemon_running().await {
+        tracing::info!("Disconnecting via daemon...");
+        let response = send_daemon_command(r#"{"type":"Disconnect"}"#).await;
+        if let Ok(resp) = response {
+            let bytes_sent = resp["data"]["bytes_sent"].as_u64().unwrap_or(0);
+            let bytes_received = resp["data"]["bytes_received"].as_u64().unwrap_or(0);
+            let uptime_secs = resp["data"]["uptime_secs"].as_u64().unwrap_or(0);
+
+            crate::set_connected(false);
+            tracing::info!("Daemon disconnected");
+
+            return Ok(ConnectionStatus {
+                connected: false,
+                server: None,
+                ip: None,
+                uptime_secs,
+                bytes_sent,
+                bytes_received,
+            });
+        }
+    }
+
+    // Get connection metrics and abort task (direct mode)
     let (bytes_sent, bytes_received, uptime_secs) = {
         let mut conn = state.vpn_connection.lock().await;
         if let Some(ref mut vpn) = *conn {
@@ -266,8 +311,9 @@ pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<ConnectionS
 pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionStatus, String> {
     let conn = state.vpn_connection.lock().await;
 
+    // Check local VPN connection first
     if let Some(ref vpn) = *conn {
-        Ok(ConnectionStatus {
+        return Ok(ConnectionStatus {
             connected: true,
             server: Some(vpn.server_id.clone()),
             ip: Some(vpn.server_addr.ip().to_string()),
@@ -280,17 +326,49 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
                 .metrics
                 .bytes_received
                 .load(std::sync::atomic::Ordering::Relaxed),
-        })
-    } else {
-        Ok(ConnectionStatus {
-            connected: false,
-            server: None,
-            ip: None,
-            uptime_secs: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-        })
+        });
     }
+
+    // Drop the lock before async call
+    drop(conn);
+
+    // If no local connection, check daemon status
+    if is_daemon_running().await {
+        if let Ok(data) = daemon_get_status().await {
+            let connected = data
+                .get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if connected {
+                return Ok(ConnectionStatus {
+                    connected: true,
+                    server: data
+                        .get("server_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    ip: None,
+                    uptime_secs: data
+                        .get("uptime_secs")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    bytes_sent: data.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0),
+                    bytes_received: data
+                        .get("bytes_received")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                });
+            }
+        }
+    }
+
+    Ok(ConnectionStatus {
+        connected: false,
+        server: None,
+        ip: None,
+        uptime_secs: 0,
+        bytes_sent: 0,
+        bytes_received: 0,
+    })
 }
 
 #[tauri::command]
@@ -564,26 +642,14 @@ EOF
     }
 }
 
-/// Launch Full Tunnel Mode - connects via daemon
-#[tauri::command]
-pub async fn launch_tun_mode() -> Result<String, String> {
-    if !is_daemon_running().await {
-        return Err("Daemon not installed. Click Install to set up the daemon.".to_string());
-    }
-
-    daemon_connect("auto".to_string()).await
-}
-
-/// Uninstall daemon and restore network to normal state
+/// Uninstall daemon
 #[tauri::command]
 pub async fn uninstall_daemon() -> Result<String, String> {
     tracing::info!("Uninstalling daemon...");
 
     // First, try to disconnect and cleanup if daemon is running
     if is_daemon_running().await {
-        // Send disconnect command to cleanup TUN routes
         let _ = send_daemon_command(r#"{"type":"Disconnect"}"#).await;
-        // Give it a moment to cleanup
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
@@ -602,18 +668,12 @@ pub async fn uninstall_daemon() -> Result<String, String> {
         # Remove socket directory
         rm -rf /var/run/oxidize
         
-        # Cleanup any remaining TUN routes
-        ip route del 0.0.0.0/1 2>/dev/null || true
-        ip route del 128.0.0.0/1 2>/dev/null || true
-        
-        # Restore DNS if backup exists
-        if [ -f /etc/resolv.conf.oxidize.bak ]; then
-            cp /etc/resolv.conf.oxidize.bak /etc/resolv.conf
-            rm -f /etc/resolv.conf.oxidize.bak
-        fi
-        
-        # Remove resolvconf entry if used
-        resolvconf -d oxidize0.oxidize 2>/dev/null || true
+        # Cleanup TPROXY iptables rules
+        iptables -t mangle -F OXIDIZE_TPROXY 2>/dev/null || true
+        iptables -t mangle -D PREROUTING -j OXIDIZE_TPROXY 2>/dev/null || true
+        iptables -t mangle -X OXIDIZE_TPROXY 2>/dev/null || true
+        ip rule del fwmark 1 lookup 100 2>/dev/null || true
+        ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
         
         # Reload systemd
         systemctl daemon-reload 2>/dev/null || true
@@ -630,60 +690,10 @@ pub async fn uninstall_daemon() -> Result<String, String> {
 
     if output.status.success() {
         tracing::info!("Daemon uninstalled successfully");
-        Ok("Daemon uninstalled and network restored".to_string())
+        Ok("Daemon uninstalled".to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Uninstall failed: {}", stderr);
         Err(format!("Uninstallation failed: {}", stderr))
-    }
-}
-
-/// Disable TUN mode and restore network without uninstalling daemon
-#[tauri::command]
-pub async fn disable_tun_mode() -> Result<String, String> {
-    tracing::info!("Disabling TUN mode...");
-
-    // Disconnect via daemon if running
-    if is_daemon_running().await {
-        let _ = send_daemon_command(r#"{"type":"Disconnect"}"#).await;
-    }
-
-    // Force cleanup of any remaining TUN configuration
-    let cleanup_script = r#"
-        # Remove TUN routes
-        ip route del 0.0.0.0/1 2>/dev/null || true
-        ip route del 128.0.0.0/1 2>/dev/null || true
-        
-        # Restore DNS if backup exists
-        if [ -f /etc/resolv.conf.oxidize.bak ]; then
-            cp /etc/resolv.conf.oxidize.bak /etc/resolv.conf
-            rm -f /etc/resolv.conf.oxidize.bak
-        fi
-        
-        # Remove resolvconf entry
-        resolvconf -d oxidize0.oxidize 2>/dev/null || true
-        
-        # Bring down TUN interface if it exists
-        ip link set oxidize0 down 2>/dev/null || true
-        ip link delete oxidize0 2>/dev/null || true
-        
-        echo "TUN mode disabled"
-    "#;
-
-    let output = std::process::Command::new("pkexec")
-        .arg("bash")
-        .arg("-c")
-        .arg(cleanup_script)
-        .output()
-        .map_err(|e| format!("Failed to run cleanup: {}", e))?;
-
-    if output.status.success() {
-        tracing::info!("TUN mode disabled, network restored");
-        Ok("TUN mode disabled, network restored to normal".to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Don't fail if cleanup commands fail (routes may not exist)
-        tracing::warn!("Cleanup warnings: {}", stderr);
-        Ok("TUN mode disabled (some cleanup warnings occurred)".to_string())
     }
 }

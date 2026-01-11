@@ -47,9 +47,11 @@ pub mod ebpf;
 
 pub mod bbr_v3;
 pub mod crypto_accel;
-pub mod low_latency; // <5ms gaming/VoIP optimizations
+pub mod low_latency;
 pub mod parallel_compression;
-pub mod simd_fec; // Custom BBRv3 congestion control
+pub mod simd_fec;
+#[cfg(target_os = "linux")]
+pub mod tproxy; // <5ms gaming/VoIP optimizations // Custom BBRv3 congestion control
 
 #[cfg(target_os = "linux")]
 pub mod ktls; // Kernel TLS offload for 30% CPU reduction

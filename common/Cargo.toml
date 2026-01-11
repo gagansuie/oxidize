@@ -42,6 +42,7 @@ rand = { workspace = true }
 hf-hub = { workspace = true, optional = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
+socket2.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { workspace = true }

@@ -338,12 +338,29 @@ Use these metrics to identify bottlenecks and tune `ack_batch_size` for your wor
 
 See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
+## Daemon Management
+
+The daemon enables TPROXY for automatic gaming/VoIP optimization:
+
+```bash
+# Check status
+sudo systemctl status oxidize-daemon
+
+# Start/Stop/Restart
+sudo systemctl start oxidize-daemon
+sudo systemctl stop oxidize-daemon
+sudo systemctl restart oxidize-daemon
+
+# View logs
+sudo journalctl -u oxidize-daemon -f
+```
+
 ## Documentation
 
 - [AI.md](docs/AI.md) - AI/ML engine deep dive (LSTM, DRL, UCB1)
 - [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Hetzner)
+- [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io)
 
 ## Testing
 

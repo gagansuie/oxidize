@@ -130,8 +130,6 @@ pub fn run() {
             commands::daemon_get_status,
             commands::install_daemon,
             commands::uninstall_daemon,
-            commands::disable_tun_mode,
-            commands::launch_tun_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

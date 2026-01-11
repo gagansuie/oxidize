@@ -202,8 +202,51 @@ This will:
 
 ---
 
+## Daemon Management
+
+The Oxidize daemon enables transparent proxy (TPROXY) for gaming/VoIP optimization.
+
+### Daemon Commands
+
+```bash
+# Check daemon status
+sudo systemctl status oxidize-daemon
+
+# Start daemon
+sudo systemctl start oxidize-daemon
+
+# Stop daemon
+sudo systemctl stop oxidize-daemon
+
+# Restart daemon
+sudo systemctl restart oxidize-daemon
+
+# View daemon logs
+sudo journalctl -u oxidize-daemon -f
+
+# Enable auto-start on boot
+sudo systemctl enable oxidize-daemon
+
+# Disable auto-start
+sudo systemctl disable oxidize-daemon
+```
+
+### Manual Daemon Control
+
+```bash
+# Build daemon
+cargo build --release -p oxidize-daemon
+
+# Run daemon directly (for debugging)
+sudo ./target/release/oxidize-daemon
+
+# Check if daemon is running
+ls -la /var/run/oxidize/daemon.sock
+```
+
+---
+
 ## Next Steps
 
 - [Deploy Server](DEPLOY.md) - Set up your relay server on Fly.io
 - [Security Guide](SECURITY.md) - Harden your setup
-- [TUN Guide](TUN.md) - Full system tunneling

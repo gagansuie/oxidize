@@ -486,19 +486,33 @@ impl RelayClient {
         let connect_msg = RelayMessage::connect(self.connection_id);
         let encoded = connect_msg.encode()?;
         send.write_all(&encoded).await?;
+        self.metrics.record_sent(encoded.len() as u64);
 
         let mut buffer = vec![0u8; self.config.buffer_size];
         let mut framer = MessageFramer::with_capacity(self.config.buffer_size);
 
-        let keepalive_handle = {
-            let interval = self.config.keepalive_interval;
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
-                    debug!("Sending keepalive ping");
+        // Send periodic keepalive pings
+        let metrics = self.metrics.clone();
+        let connection_id = self.connection_id;
+        let keepalive_interval = self.config.keepalive_interval;
+        let conn_for_keepalive = connection.clone();
+
+        let keepalive_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(keepalive_interval)).await;
+
+                // Send a ping message
+                let ping_msg = RelayMessage::ping(connection_id);
+                if let Ok(encoded) = ping_msg.encode() {
+                    if let Ok(mut send) = conn_for_keepalive.open_uni().await {
+                        if send.write_all(&encoded).await.is_ok() {
+                            metrics.record_sent(encoded.len() as u64);
+                            debug!("Sent keepalive ping ({} bytes)", encoded.len());
+                        }
+                    }
                 }
-            })
-        };
+            }
+        });
 
         loop {
             tokio::select! {
