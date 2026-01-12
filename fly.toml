@@ -3,7 +3,7 @@
 # Scale regions: fly scale count 3 --region iad,ord,lax
 
 app = "oxidize-relay"
-primary_region = "iad"
+primary_region = "ord"
 
 [build]
   dockerfile = "Dockerfile.server"
