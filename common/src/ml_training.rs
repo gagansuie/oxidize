@@ -399,7 +399,7 @@ impl DqnTrainer {
         self.steps_trained += 1;
 
         // Soft update target network
-        if self.steps_trained.is_multiple_of(self.target_update_freq) {
+        if self.target_update_freq > 0 && self.steps_trained % self.target_update_freq == 0 {
             self.soft_update_target()?;
         }
 
