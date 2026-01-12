@@ -54,7 +54,7 @@
             "deb": {
                 "depends": [],
                 "files": {
-                    "/usr/bin/oxidize-daemon": "../../../target/release/oxidize-daemon"
+                    "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
                 },
                 "postInstallScript": "scripts/postinstall.sh"
             },
