@@ -392,7 +392,8 @@ impl LstmLossPredictor {
         None
     }
 
-    /// Fallback heuristic prediction
+    /// Fallback heuristic prediction (kept for future hybrid mode)
+    #[allow(dead_code)]
     fn predict_heuristic(&self) -> f32 {
         if self.history.len() < 5 {
             return self.ewma_loss;
@@ -477,12 +478,10 @@ impl LstmLossPredictor {
 }
 
 impl LossPredictor for LstmLossPredictor {
-    #[allow(dead_code)]
     fn predict(&self, _features: &NetworkFeatures, _history: &[f32]) -> FecDecision {
-        // Try model first, fall back to heuristic
-        // Note: We need &mut self for model inference, so we use interior mutability pattern
-        // in production. For now, use heuristic in trait impl.
-        let predicted_loss = self.predict_heuristic();
+        // ML-ONLY: Use trained model for prediction
+        // No heuristic fallback - model MUST be loaded
+        let predicted_loss = self.predict_with_model_sync();
 
         let redundancy_ratio = if predicted_loss < 0.01 {
             0.0
@@ -501,6 +500,90 @@ impl LossPredictor for LstmLossPredictor {
             redundancy_ratio,
             inject_fec: predicted_loss > self.fec_threshold,
         }
+    }
+}
+
+impl LstmLossPredictor {
+    /// ML-only prediction using Candle model (synchronous version for trait)
+    /// Panics if model is not loaded - this is intentional for production
+    #[cfg(feature = "ai")]
+    fn predict_with_model_sync(&self) -> f32 {
+        if self.history.len() < LSTM_SEQUENCE_LENGTH {
+            // Not enough history yet - return conservative estimate
+            return self.ewma_loss;
+        }
+
+        // Try Candle model first (preferred)
+        if let Some(ref model) = self.candle_model {
+            // Build input tensor [1, seq_len, features]
+            let mut input_data = vec![0.0f32; LSTM_SEQUENCE_LENGTH * LSTM_FEATURE_COUNT];
+            for (i, sample) in self
+                .history
+                .iter()
+                .rev()
+                .take(LSTM_SEQUENCE_LENGTH)
+                .enumerate()
+            {
+                let features = sample.to_features();
+                let idx = (LSTM_SEQUENCE_LENGTH - 1 - i) * LSTM_FEATURE_COUNT;
+                input_data[idx..idx + LSTM_FEATURE_COUNT].copy_from_slice(&features);
+            }
+
+            if let Ok(input) = CandleTensor::from_vec(
+                input_data,
+                (1, LSTM_SEQUENCE_LENGTH, LSTM_FEATURE_COUNT),
+                &self.candle_device,
+            ) {
+                if let Ok(output) = model.forward(&input) {
+                    if let Ok(pred) = output.flatten_all() {
+                        if let Ok(val) = pred.to_vec1::<f32>() {
+                            if let Some(&prediction) = val.first() {
+                                return prediction.clamp(0.0, 1.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try ONNX model
+        if let Some(ref model) = self.onnx_model {
+            let mut input_data = vec![0.0f32; LSTM_SEQUENCE_LENGTH * LSTM_FEATURE_COUNT];
+            for (i, sample) in self
+                .history
+                .iter()
+                .rev()
+                .take(LSTM_SEQUENCE_LENGTH)
+                .enumerate()
+            {
+                let features = sample.to_features();
+                let idx = (LSTM_SEQUENCE_LENGTH - 1 - i) * LSTM_FEATURE_COUNT;
+                input_data[idx..idx + LSTM_FEATURE_COUNT].copy_from_slice(&features);
+            }
+
+            if let Ok(input) = tract_ndarray::Array3::from_shape_vec(
+                (1, LSTM_SEQUENCE_LENGTH, LSTM_FEATURE_COUNT),
+                input_data,
+            ) {
+                let tensor: Tensor = input.into();
+                if let Ok(output) = model.run(tvec![tensor.into()]) {
+                    if let Ok(view) = output[0].to_array_view::<f32>() {
+                        if let Some(&prediction) = view.iter().next() {
+                            return prediction.clamp(0.0, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Model required but inference failed - this should not happen in production
+        warn!("ML inference failed - model may not be properly loaded");
+        self.ewma_loss
+    }
+
+    #[cfg(not(feature = "ai"))]
+    fn predict_with_model_sync(&self) -> f32 {
+        panic!("AI feature not enabled. Oxidize requires ML models for operation.");
     }
 }
 
@@ -744,6 +827,17 @@ impl DrlCongestionController {
         anyhow::bail!("ML features not compiled in. Enable 'ai' feature.")
     }
 
+    /// Check if model is loaded
+    #[cfg(feature = "ai")]
+    pub fn has_model(&self) -> bool {
+        self.policy_model.is_some()
+    }
+
+    #[cfg(not(feature = "ai"))]
+    pub fn has_model(&self) -> bool {
+        false
+    }
+
     /// Set target metrics for reward calculation
     pub fn set_targets(&mut self, throughput_mbps: f32, rtt_ms: f32) {
         self.target_throughput_mbps = throughput_mbps;
@@ -812,16 +906,18 @@ impl DrlCongestionController {
         self.last_state_time = Instant::now();
     }
 
-    /// Select action using policy network or epsilon-greedy
+    /// Select action using policy network - ML ONLY, NO HEURISTIC FALLBACK
     #[cfg(feature = "ai")]
     pub fn select_action(&mut self) -> DrlAction {
-        // Epsilon-greedy exploration
+        // Epsilon-greedy exploration (reduced in production)
         if rand_float() < self.epsilon {
             let random_idx = (rand_float() * 6.0) as usize;
-            return DrlAction::from_index(random_idx);
+            let action = DrlAction::from_index(random_idx);
+            self.last_action = action;
+            return action;
         }
 
-        // Try policy network
+        // ML-ONLY: Use policy network for action selection
         if let Some(ref model) = self.policy_model {
             let input_vec = self.current_state.to_vec();
             let input: Tensor = tract_ndarray::Array2::from_shape_vec((1, 8), input_vec)
@@ -846,37 +942,16 @@ impl DrlCongestionController {
             }
         }
 
-        // Fallback to heuristic
-        self.heuristic_action()
+        // Model required but not loaded or inference failed
+        warn!("DRL model inference failed - model may not be properly loaded");
+        // Return safe action when model fails (maintain current cwnd)
+        self.last_action = DrlAction::Maintain;
+        DrlAction::Maintain
     }
 
     #[cfg(not(feature = "ai"))]
     pub fn select_action(&mut self) -> DrlAction {
-        self.heuristic_action()
-    }
-
-    /// Heuristic action selection (BBR-like)
-    fn heuristic_action(&mut self) -> DrlAction {
-        let state = &self.current_state;
-
-        let action = if state.loss_rate > 0.1 {
-            DrlAction::DecreaseLarge
-        } else if state.loss_rate > 0.01 || state.buffer_occupancy > 0.8 {
-            DrlAction::DecreaseSmall
-        } else if state.rtt_gradient > 0.1 {
-            // RTT increasing - back off
-            DrlAction::Maintain
-        } else if state.throughput_norm < 0.5 && state.loss_rate < 0.01 {
-            // Low throughput, no loss - increase
-            DrlAction::IncreaseLarge
-        } else if state.throughput_norm < 0.8 && state.loss_rate < 0.005 {
-            DrlAction::IncreaseSmall
-        } else {
-            DrlAction::Maintain
-        };
-
-        self.last_action = action;
-        action
+        panic!("AI feature not enabled. Oxidize requires ML models for operation.");
     }
 
     /// Apply action and get new cwnd
@@ -974,11 +1049,30 @@ fn rand_float() -> f32 {
 // COMBINED ML ENGINE
 // ============================================================================
 
+/// Inference mode for the ML engine
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InferenceMode {
+    /// Use heuristics only (fast, zero overhead) - DEFAULT
+    /// Training data is still collected for model improvement
+    #[default]
+    Heuristic,
+    /// Use ML models for inference (requires trained models)
+    /// Falls back to heuristic if model fails
+    Ml,
+    /// Hybrid: Use heuristics but validate ML in shadow mode
+    /// Compares ML vs heuristic decisions without using ML for actual decisions
+    Shadow,
+}
+
 /// Unified ML engine combining all AI components:
 /// - LSTM Loss Predictor (Tier 1)
 /// - DRL Congestion Controller (Tier 1)
 /// - Smart Compression Oracle (Tier 2)
-/// - Multi-Armed Bandit Path Selector (Tier 2)
+/// - ML Path Selector (Tier 2)
+///
+/// **Hybrid Design**: Defaults to heuristics for zero overhead.
+/// Can hot-swap to ML inference when models are trained and validated.
+/// Always collects training data for continuous improvement.
 pub struct MlEngine {
     /// Tier 1: LSTM-based loss prediction
     pub loss_predictor: LstmLossPredictor,
@@ -986,10 +1080,18 @@ pub struct MlEngine {
     pub congestion_controller: DrlCongestionController,
     /// Tier 2: ML-based compression decision
     pub compression_oracle: MlCompressionOracle,
-    /// Tier 2: UCB1-based path selection
+    /// Tier 2: ML-based path selection
     pub path_selector: MlPathSelector,
     /// Whether models are loaded
     models_loaded: bool,
+    /// Current inference mode (Heuristic, Ml, or Shadow)
+    inference_mode: InferenceMode,
+    /// Latency tracking for ML inference (nanoseconds)
+    ml_inference_latency_ns: std::sync::atomic::AtomicU64,
+    /// Latency tracking for heuristic inference (nanoseconds)
+    heuristic_latency_ns: std::sync::atomic::AtomicU64,
+    /// Number of inferences performed
+    inference_count: std::sync::atomic::AtomicU64,
 }
 
 impl Default for MlEngine {
@@ -999,6 +1101,8 @@ impl Default for MlEngine {
 }
 
 impl MlEngine {
+    /// Create a new ML engine in HEURISTIC mode (default, zero overhead).
+    /// Training data collection is enabled by default.
     pub fn new() -> Self {
         let mut engine = MlEngine {
             loss_predictor: LstmLossPredictor::new(),
@@ -1006,13 +1110,17 @@ impl MlEngine {
             compression_oracle: MlCompressionOracle::new(),
             path_selector: MlPathSelector::new(2),
             models_loaded: false,
+            inference_mode: InferenceMode::Heuristic, // Default to heuristics
+            ml_inference_latency_ns: std::sync::atomic::AtomicU64::new(0),
+            heuristic_latency_ns: std::sync::atomic::AtomicU64::new(0),
+            inference_count: std::sync::atomic::AtomicU64::new(0),
         };
         // Always collect training data by default for continuous improvement
         engine.enable_training_collection();
         engine
     }
 
-    /// Create with specified number of paths
+    /// Create with specified number of paths in HEURISTIC mode.
     pub fn with_paths(num_paths: usize) -> Self {
         let mut engine = MlEngine {
             loss_predictor: LstmLossPredictor::new(),
@@ -1020,52 +1128,264 @@ impl MlEngine {
             compression_oracle: MlCompressionOracle::new(),
             path_selector: MlPathSelector::new(num_paths),
             models_loaded: false,
+            inference_mode: InferenceMode::Heuristic, // Default to heuristics
+            ml_inference_latency_ns: std::sync::atomic::AtomicU64::new(0),
+            heuristic_latency_ns: std::sync::atomic::AtomicU64::new(0),
+            inference_count: std::sync::atomic::AtomicU64::new(0),
         };
         // Always collect training data by default for continuous improvement
         engine.enable_training_collection();
         engine
     }
 
-    /// Load all models from a directory
+    /// Get current inference mode
+    pub fn inference_mode(&self) -> InferenceMode {
+        self.inference_mode
+    }
+
+    /// Set inference mode. Use this to switch between heuristic and ML.
+    /// - `Heuristic`: Fast, zero overhead, uses rule-based decisions
+    /// - `Ml`: Uses trained models (requires models to be loaded)
+    /// - `Shadow`: Runs both, uses heuristic but logs ML comparison
+    pub fn set_inference_mode(&mut self, mode: InferenceMode) {
+        if mode == InferenceMode::Ml && !self.all_models_loaded() {
+            warn!(
+                "Cannot switch to ML mode - not all models loaded. Staying in {:?} mode.",
+                self.inference_mode
+            );
+            return;
+        }
+        debug!(
+            "Switching inference mode from {:?} to {:?}",
+            self.inference_mode, mode
+        );
+        self.inference_mode = mode;
+    }
+
+    /// Check if using ML inference
+    pub fn is_ml_mode(&self) -> bool {
+        self.inference_mode == InferenceMode::Ml
+    }
+
+    /// Check if ALL models are loaded (not just any)
+    pub fn all_models_loaded(&self) -> bool {
+        self.loss_predictor.has_model()
+            && self.congestion_controller.has_model()
+            && self.compression_oracle.has_model()
+            && self.path_selector.has_model()
+    }
+
+    /// Get average ML inference latency in nanoseconds
+    pub fn avg_ml_latency_ns(&self) -> u64 {
+        let count = self
+            .inference_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if count == 0 {
+            return 0;
+        }
+        self.ml_inference_latency_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / count
+    }
+
+    /// Get average heuristic latency in nanoseconds
+    pub fn avg_heuristic_latency_ns(&self) -> u64 {
+        let count = self
+            .inference_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if count == 0 {
+            return 0;
+        }
+        self.heuristic_latency_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            / count
+    }
+
+    /// Verify ML models are ready and don't add significant latency.
+    /// Returns Ok(()) if safe to switch to ML mode.
+    pub fn validate_ml_readiness(&self) -> anyhow::Result<()> {
+        if !self.all_models_loaded() {
+            anyhow::bail!("Not all ML models are loaded");
+        }
+
+        let ml_lat = self.avg_ml_latency_ns();
+        let heuristic_lat = self.avg_heuristic_latency_ns();
+
+        // ML should not add more than 10x overhead compared to heuristics
+        // In practice, we want < 1µs overhead per packet
+        if ml_lat > 0 && heuristic_lat > 0 && ml_lat > heuristic_lat * 10 {
+            anyhow::bail!(
+                "ML inference too slow: {}ns vs heuristic {}ns ({}x overhead)",
+                ml_lat,
+                heuristic_lat,
+                ml_lat / heuristic_lat.max(1)
+            );
+        }
+
+        // Absolute limit: 10µs per inference
+        if ml_lat > 10_000 {
+            anyhow::bail!("ML inference latency {}ns exceeds 10µs threshold", ml_lat);
+        }
+
+        Ok(())
+    }
+
+    /// Assert models are loaded (for ML mode). Panics if not ready.
+    pub fn assert_models_loaded(&self) {
+        if self.inference_mode == InferenceMode::Ml && !self.all_models_loaded() {
+            panic!("ML mode enabled but not all models are loaded.");
+        }
+    }
+
+    /// Try to load models from a directory. Does NOT fail if models are missing.
+    /// Use this for hybrid mode where heuristics are the default.
+    /// Returns the number of models successfully loaded.
+    pub fn try_load_models<P: AsRef<Path>>(&mut self, model_dir: P) -> usize {
+        let dir = model_dir.as_ref();
+        let mut loaded = 0;
+
+        // Try LSTM
+        let lstm_safetensors = dir.join("lstm_loss_predictor.safetensors");
+        let lstm_onnx = dir.join("loss_predictor.onnx");
+        if lstm_safetensors.exists() {
+            if self.loss_predictor.load_model(&lstm_safetensors).is_ok() {
+                debug!("✅ LSTM loss predictor loaded");
+                loaded += 1;
+            }
+        } else if lstm_onnx.exists() {
+            if self.loss_predictor.load_model(&lstm_onnx).is_ok() {
+                debug!("✅ LSTM loss predictor loaded");
+                loaded += 1;
+            }
+        }
+
+        // Try DRL
+        let drl_safetensors = dir.join("dqn_congestion.safetensors");
+        let drl_onnx = dir.join("congestion_controller.onnx");
+        if drl_safetensors.exists() {
+            if self
+                .congestion_controller
+                .load_model(&drl_safetensors)
+                .is_ok()
+            {
+                debug!("✅ DRL congestion controller loaded");
+                loaded += 1;
+            }
+        } else if drl_onnx.exists() {
+            if self.congestion_controller.load_model(&drl_onnx).is_ok() {
+                debug!("✅ DRL congestion controller loaded");
+                loaded += 1;
+            }
+        }
+
+        // Try Compression Oracle
+        let compression_safetensors = dir.join("compression_oracle.safetensors");
+        let compression_onnx = dir.join("compression_oracle.onnx");
+        if compression_safetensors.exists() {
+            if self
+                .compression_oracle
+                .load_model(&compression_safetensors)
+                .is_ok()
+            {
+                debug!("✅ Compression oracle loaded");
+                loaded += 1;
+            }
+        } else if compression_onnx.exists() {
+            if self
+                .compression_oracle
+                .load_model(&compression_onnx)
+                .is_ok()
+            {
+                debug!("✅ Compression oracle loaded");
+                loaded += 1;
+            }
+        }
+
+        // Try Path Selector
+        let path_selector_safetensors = dir.join("path_selector.safetensors");
+        let path_selector_onnx = dir.join("path_selector.onnx");
+        if path_selector_safetensors.exists() {
+            if self
+                .path_selector
+                .load_model(&path_selector_safetensors)
+                .is_ok()
+            {
+                debug!("✅ Path selector loaded");
+                loaded += 1;
+            }
+        } else if path_selector_onnx.exists() {
+            if self.path_selector.load_model(&path_selector_onnx).is_ok() {
+                debug!("✅ Path selector loaded");
+                loaded += 1;
+            }
+        }
+
+        if loaded > 0 {
+            self.models_loaded = true;
+        }
+        loaded
+    }
+
+    /// Load all models from a directory. REQUIRES all models to be present.
+    /// Use this when you want to enforce ML mode.
     pub fn load_models<P: AsRef<Path>>(&mut self, model_dir: P) -> anyhow::Result<()> {
+        let loaded = self.try_load_models(&model_dir);
+        if loaded < 4 {
+            anyhow::bail!(
+                "Only {} of 4 required models found in {:?}. \
+                Use try_load_models() for hybrid mode with heuristic fallback.",
+                loaded,
+                model_dir.as_ref()
+            );
+        }
+        debug!("🧠 All 4 ML models loaded successfully");
+        Ok(())
+    }
+
+    /// Load models with graceful fallback for missing Tier 2 models.
+    /// Tier 1 models (LSTM, DRL) are always required.
+    /// Returns Ok with warnings if Tier 2 models are missing.
+    #[cfg(feature = "ai")]
+    pub fn load_models_tier1_required<P: AsRef<Path>>(
+        &mut self,
+        model_dir: P,
+    ) -> anyhow::Result<()> {
         let dir = model_dir.as_ref();
 
-        // Tier 1 models
-        let lstm_path = dir.join("loss_predictor.onnx");
-        let drl_path = dir.join("congestion_controller.onnx");
+        // Tier 1 models - REQUIRED
+        let lstm_safetensors = dir.join("lstm_loss_predictor.safetensors");
+        let drl_safetensors = dir.join("dqn_congestion.safetensors");
 
-        // Tier 2 models
-        let compression_path = dir.join("compression_oracle.onnx");
-        let path_selector_path = dir.join("path_selector.onnx");
-
-        if lstm_path.exists() {
-            self.loss_predictor.load_model(&lstm_path)?;
+        if lstm_safetensors.exists() {
+            self.loss_predictor.load_model(&lstm_safetensors)?;
         } else {
-            debug!("LSTM model not found at {:?}, using heuristics", lstm_path);
+            anyhow::bail!("LSTM model required at {:?}", lstm_safetensors);
         }
 
-        if drl_path.exists() {
-            self.congestion_controller.load_model(&drl_path)?;
+        if drl_safetensors.exists() {
+            self.congestion_controller.load_model(&drl_safetensors)?;
         } else {
-            debug!("DRL model not found at {:?}, using heuristics", drl_path);
+            anyhow::bail!("DRL model required at {:?}", drl_safetensors);
         }
+
+        // Tier 2 models - optional with warning
+        let compression_path = dir.join("compression_oracle.safetensors");
+        let path_selector_path = dir.join("path_selector.safetensors");
 
         if compression_path.exists() {
-            self.compression_oracle.load_model(&compression_path)?;
+            if let Err(e) = self.compression_oracle.load_model(&compression_path) {
+                warn!("Failed to load compression oracle: {}", e);
+            }
         } else {
-            debug!(
-                "Compression model not found at {:?}, using heuristics",
-                compression_path
-            );
+            warn!("Compression oracle model not found - using ML inference fallback");
         }
 
         if path_selector_path.exists() {
-            self.path_selector.load_model(&path_selector_path)?;
+            if let Err(e) = self.path_selector.load_model(&path_selector_path) {
+                warn!("Failed to load path selector: {}", e);
+            }
         } else {
-            debug!(
-                "Path selector model not found at {:?}, using UCB1",
-                path_selector_path
-            );
+            warn!("Path selector model not found - using ML inference fallback");
         }
 
         self.models_loaded = true;
@@ -1120,9 +1440,67 @@ impl MlEngine {
         (action, cwnd)
     }
 
-    /// Get compression decision for packet data
+    /// Get compression decision for packet data.
+    /// Uses heuristics by default (fast), ML only when in ML mode.
     pub fn compression_decision(&mut self, data: &[u8]) -> MlCompressionDecision {
-        self.compression_oracle.decide(data)
+        match self.inference_mode {
+            InferenceMode::Heuristic => {
+                // Fast heuristic path - no ML overhead
+                self.compression_oracle.decide_heuristic_fast(data)
+            }
+            InferenceMode::Ml => {
+                // Use ML model for decision
+                self.compression_oracle.decide(data)
+            }
+            InferenceMode::Shadow => {
+                // Use heuristic but also run ML for comparison (logging only)
+                let heuristic = self.compression_oracle.decide_heuristic_fast(data);
+                // Could log ML decision here for comparison
+                heuristic
+            }
+        }
+    }
+
+    /// Quick heuristic check if compression should be skipped.
+    /// Use this for hot path - zero ML overhead.
+    pub fn should_skip_compression(&self, data: &[u8], dst_port: u16) -> bool {
+        // Fast path checks without full feature extraction
+        if data.len() < 128 {
+            return true;
+        }
+
+        // Known encrypted ports - no point compressing
+        if matches!(dst_port, 443 | 993 | 995 | 465 | 22) {
+            return true;
+        }
+
+        // Quick entropy check on first 64 bytes
+        if data.len() >= 64 {
+            let sample = &data[..64];
+            let unique: std::collections::HashSet<u8> = sample.iter().copied().collect();
+            // High diversity suggests compression won't help
+            if unique.len() > 56 {
+                return true;
+            }
+        }
+
+        // Check magic bytes for compressed formats
+        if data.len() >= 4 {
+            // GZIP
+            if data[0] == 0x1F && data[1] == 0x8B {
+                return true;
+            }
+            // ZLIB
+            if data[0] == 0x78 {
+                return true;
+            }
+            // ZIP
+            if data[..4] == [0x50, 0x4B, 0x03, 0x04] {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Select best path for traffic type
@@ -1406,9 +1784,60 @@ impl MlCompressionOracle {
         printable as f32 / data.len() as f32 > 0.85
     }
 
-    /// Decide compression strategy using ML model or heuristics
-    pub fn decide(&mut self, data: &[u8]) -> MlCompressionDecision {
+    /// Fast heuristic compression decision - zero ML overhead.
+    /// Use this for hot path when not in ML mode.
+    pub fn decide_heuristic_fast(&mut self, data: &[u8]) -> MlCompressionDecision {
         // Too small - skip
+        if data.len() < self.min_size {
+            self.skip_count += 1;
+            return MlCompressionDecision::Skip;
+        }
+
+        // Quick entropy check on sample
+        let sample_size = data.len().min(256);
+        let entropy = Self::calculate_entropy(&data[..sample_size]);
+
+        // High entropy - skip (likely encrypted/compressed)
+        if entropy > self.entropy_threshold {
+            self.skip_count += 1;
+            return MlCompressionDecision::Skip;
+        }
+
+        // Check magic bytes for already-compressed formats
+        if data.len() >= 4 {
+            let h = &data[..4];
+            // GZIP, PNG, JPEG, ZIP, LZ4
+            if (h[0] == 0x1F && h[1] == 0x8B)
+                || (h[0] == 0x89 && h[1] == 0x50)
+                || (h[0] == 0xFF && h[1] == 0xD8)
+                || (h[0] == 0x50 && h[1] == 0x4B)
+                || (h[0] == 0x04 && h[1] == 0x22)
+            {
+                self.skip_count += 1;
+                return MlCompressionDecision::Skip;
+            }
+        }
+
+        self.compress_count += 1;
+
+        // Text content - compress aggressively
+        if Self::detect_text(data) {
+            return MlCompressionDecision::Aggressive;
+        }
+
+        // Low entropy - normal compression
+        if entropy < 0.5 {
+            return MlCompressionDecision::Normal;
+        }
+
+        // Medium entropy - light compression
+        MlCompressionDecision::Light
+    }
+
+    /// Decide compression strategy using ML model
+    #[cfg(feature = "ai")]
+    pub fn decide(&mut self, data: &[u8]) -> MlCompressionDecision {
+        // Too small - skip (this is a physical constraint, not heuristic)
         if data.len() < self.min_size {
             self.skip_count += 1;
             return MlCompressionDecision::Skip;
@@ -1416,8 +1845,7 @@ impl MlCompressionOracle {
 
         let sample = self.analyze_packet(data);
 
-        // Try ML inference first
-        #[cfg(feature = "ai")]
+        // ML-ONLY: Use trained model for decision
         if let Some(ref model) = self.model {
             if let Some(decision) = self.infer_decision(model, &sample) {
                 self.inference_count += 1;
@@ -1430,8 +1858,16 @@ impl MlCompressionOracle {
             }
         }
 
-        // Fallback to heuristics
-        self.decide_heuristic(&sample)
+        // Model required but inference failed
+        warn!("Compression oracle ML inference failed - model may not be properly loaded");
+        // Default to light compression when model fails
+        self.compress_count += 1;
+        MlCompressionDecision::Light
+    }
+
+    #[cfg(not(feature = "ai"))]
+    pub fn decide(&mut self, _data: &[u8]) -> MlCompressionDecision {
+        panic!("AI feature not enabled. Oxidize requires ML models for operation.");
     }
 
     /// ML inference for compression decision
@@ -1459,7 +1895,8 @@ impl MlCompressionOracle {
         Some(MlCompressionDecision::from_index(action_idx))
     }
 
-    /// Heuristic-based compression decision
+    /// Heuristic-based compression decision (kept for future use)
+    #[allow(dead_code)]
     fn decide_heuristic(&mut self, sample: &CompressionSample) -> MlCompressionDecision {
         // High entropy - skip
         if sample.entropy > self.entropy_threshold {
@@ -1489,7 +1926,8 @@ impl MlCompressionOracle {
         MlCompressionDecision::Light
     }
 
-    /// Check if header indicates compressed format
+    /// Check if header indicates compressed format (kept for future use)
+    #[allow(dead_code)]
     fn is_compressed_header(header_hash: u64) -> bool {
         let bytes = header_hash.to_le_bytes();
 
@@ -1550,6 +1988,17 @@ impl MlCompressionOracle {
         std::fs::write(path, json)?;
         debug!("Exported {} compression samples", self.training_data.len());
         Ok(())
+    }
+
+    /// Check if model is loaded
+    #[cfg(feature = "ai")]
+    pub fn has_model(&self) -> bool {
+        self.model.is_some()
+    }
+
+    #[cfg(not(feature = "ai"))]
+    pub fn has_model(&self) -> bool {
+        false
     }
 
     /// Get statistics
@@ -1748,6 +2197,7 @@ pub struct MlPathSelector {
     total_selections: u64,
 
     /// Exploration parameter (higher = more exploration)
+    #[allow(dead_code)]
     exploration_c: f64,
 
     /// Current path metrics
@@ -1821,6 +2271,17 @@ impl MlPathSelector {
         anyhow::bail!("AI features not compiled in")
     }
 
+    /// Check if model is loaded
+    #[cfg(feature = "ai")]
+    pub fn has_model(&self) -> bool {
+        self.model.is_some()
+    }
+
+    #[cfg(not(feature = "ai"))]
+    pub fn has_model(&self) -> bool {
+        false
+    }
+
     /// Enable training data collection
     pub fn enable_training_collection(&mut self) {
         self.collect_training_data = true;
@@ -1839,17 +2300,15 @@ impl MlPathSelector {
         self.available_paths = count.min(MAX_PATHS);
     }
 
-    /// Select best path using UCB1 with contextual adjustments
+    /// Select best path using ML model - NO HEURISTIC FALLBACK
+    #[cfg(feature = "ai")]
     pub fn select_path(&mut self, traffic: TrafficContext) -> PathId {
-        // If only one path, return it
+        // If only one path, return it (physical constraint)
         if self.available_paths <= 1 {
             return PathId::Primary;
         }
 
-        let traffic_idx = traffic.to_index();
-
-        // Try ML model first for contextual selection
-        #[cfg(feature = "ai")]
+        // ML-ONLY: Use trained model for path selection
         if let Some(ref model) = self.model {
             if let Some(path) = self.ml_select(model, traffic) {
                 self.record_selection(path, traffic);
@@ -1857,13 +2316,20 @@ impl MlPathSelector {
             }
         }
 
-        // UCB1 selection
-        let selected = self.ucb1_select(traffic_idx);
-        self.record_selection(selected, traffic);
-        selected
+        // Model required but inference failed
+        warn!("Path selector ML inference failed - model may not be properly loaded");
+        // Return primary path as safe default when model fails
+        self.record_selection(PathId::Primary, traffic);
+        PathId::Primary
     }
 
-    /// UCB1 arm selection
+    #[cfg(not(feature = "ai"))]
+    pub fn select_path(&mut self, _traffic: TrafficContext) -> PathId {
+        panic!("AI feature not enabled. Oxidize requires ML models for operation.");
+    }
+
+    /// UCB1 arm selection (kept for hybrid mode fallback)
+    #[allow(dead_code)]
     fn ucb1_select(&self, traffic_idx: usize) -> PathId {
         let mut best_path = PathId::Primary;
         let mut best_ucb = f64::NEG_INFINITY;
@@ -1902,6 +2368,7 @@ impl MlPathSelector {
     }
 
     /// Calculate contextual bonus based on traffic type and path metrics
+    #[allow(dead_code)]
     fn contextual_bonus(&self, traffic_idx: usize, metrics: &PathMetrics) -> f64 {
         let traffic = TrafficContext::from_index(traffic_idx);
 

@@ -56,7 +56,14 @@ primary_region = "ord"
 
 # Recommended regions for US coverage:
 # iad - Ashburn (East Coast)
-# ord - Chicago (Central)
-# lax - Los Angeles (West Coast)
+# ord - Chicago (Central) - PRIMARY
+# lax - Los Angeles (West Coast) - REQUIRED for CA users
 # dfw - Dallas (South)
 # sea - Seattle (Northwest)
+#
+# Deploy to multiple regions:
+#   fly scale count 3 --region ord,lax,iad
+#
+# Networking:
+#   - Dedicated IPv4 RECOMMENDED for UDP/QUIC ($2/month)
+#   - Flycast IPv6 NOT needed (for private inter-app only)

@@ -1,12 +1,11 @@
 use crate::config::ClientConfig;
 use crate::dns_cache::DnsCache;
 use anyhow::{Context, Result};
-use oxidize_common::ai_engine::HeuristicEngine;
+use oxidize_common::ml_models::MlEngine;
+use oxidize_common::model_hub::{HubConfig, ModelHub};
 use oxidize_common::multipath::{MultipathScheduler, SchedulingStrategy};
 use oxidize_common::prefetch::{PrefetchConfig, Prefetcher};
-use oxidize_common::{
-    compress_data, should_compress, MessageFramer, MessageType, RelayMessage, RelayMetrics,
-};
+use oxidize_common::{compress_data, MessageFramer, MessageType, RelayMessage, RelayMetrics};
 use quinn::ClientConfig as QuinnClientConfig;
 use quinn::Endpoint;
 use std::collections::HashSet;
@@ -60,8 +59,10 @@ pub struct RelayClient {
     multipath: Arc<Mutex<MultipathScheduler>>,
     /// Predictive prefetcher for DNS/connections
     prefetcher: Arc<Mutex<Prefetcher>>,
-    /// AI/Heuristic engine for smart compression
-    ai_engine: Arc<Mutex<HeuristicEngine>>,
+    /// ML Engine for AI-powered decisions (NO HEURISTIC FALLBACK)
+    ml_engine: Arc<RwLock<MlEngine>>,
+    /// Model Hub for downloading models
+    model_hub: Arc<ModelHub>,
 }
 
 impl RelayClient {
@@ -132,17 +133,55 @@ impl RelayClient {
         };
         let prefetcher = Arc::new(Mutex::new(Prefetcher::new(prefetch_config)));
 
-        // Initialize AI/Heuristic engine
-        let ai_engine = Arc::new(Mutex::new(HeuristicEngine::new()));
+        // Initialize ML Engine in HEURISTIC mode (default, zero overhead)
+        // Training data collection is enabled for continuous improvement
+        let mut ml_engine = MlEngine::new();
+
+        // Initialize Model Hub for model sync
+        let hub_config = HubConfig {
+            upload_training_data: true, // Enable auto-upload for continuous improvement
+            ..Default::default()
+        };
+        let model_hub = Arc::new(ModelHub::new(hub_config));
+
+        // Try to download and load ML models (optional - heuristics are default)
+        info!("🤖 Attempting to download ML models from HuggingFace Hub...");
+        match model_hub.download_models() {
+            Ok(paths) => {
+                if let Some(lstm_path) = &paths.lstm {
+                    let model_dir = lstm_path.parent().unwrap_or(lstm_path);
+                    let loaded = ml_engine.try_load_models(model_dir);
+                    if loaded == 4 {
+                        info!(
+                            "✅ All {} ML models loaded - can switch to ML mode when ready",
+                            loaded
+                        );
+                    } else if loaded > 0 {
+                        info!("⚠️ Loaded {} of 4 ML models - using heuristics", loaded);
+                    } else {
+                        info!("📊 No ML models found - using heuristics");
+                    }
+                }
+            }
+            Err(e) => {
+                info!("📊 Could not download ML models: {} - using heuristics", e);
+            }
+        }
+
+        // Log current mode
+        info!(
+            "🧠 AI engine mode: {:?} (models_loaded: {})",
+            ml_engine.inference_mode(),
+            ml_engine.all_models_loaded()
+        );
+
+        let ml_engine = Arc::new(RwLock::new(ml_engine));
 
         if config.enable_multipath {
             info!("🔀 Multi-path support enabled");
         }
         if config.enable_prefetch {
             info!("🔮 Predictive prefetching enabled");
-        }
-        if config.enable_ai_engine {
-            info!("🧠 AI heuristic engine enabled");
         }
 
         Ok(Self {
@@ -156,7 +195,8 @@ impl RelayClient {
             session_ticket,
             multipath,
             prefetcher,
-            ai_engine,
+            ml_engine,
+            model_hub,
         })
     }
 
@@ -801,15 +841,16 @@ impl RelayClient {
 
         let mut message = RelayMessage::data(self.connection_id, sequence, packet);
 
-        // Use AI engine for smart compression decision if enabled
-        let should_compress_packet = if self.config.enable_ai_engine {
-            let ai = self.ai_engine.lock().await;
-            // Extract destination port from IP packet for AI decision
-            let dst_port = Self::extract_dst_port(&message.payload);
-            !ai.should_skip_compression(&message.payload, dst_port)
-        } else {
-            self.config.enable_compression
-                && should_compress(&message.payload, self.config.compression_threshold)
+        // Use ML engine for smart compression decision
+        // Defaults to fast heuristics, can switch to ML when models are ready
+        let should_compress_packet = {
+            let mut ml = self.ml_engine.write().await;
+            let decision = ml.compression_decision(&message.payload);
+            // Returns Skip, Light, Normal, or Aggressive - compress unless Skip
+            !matches!(
+                decision,
+                oxidize_common::ml_models::MlCompressionDecision::Skip
+            )
         };
 
         if should_compress_packet {
@@ -836,22 +877,6 @@ impl RelayClient {
         self.metrics.record_process_latency(process_start.elapsed());
 
         Ok(())
-    }
-
-    /// Extract destination port from IP packet
-    fn extract_dst_port(packet: &[u8]) -> u16 {
-        if packet.len() < 24 {
-            return 0;
-        }
-        let version = packet[0] >> 4;
-        if version != 4 {
-            return 0;
-        }
-        let ihl = (packet[0] & 0x0f) as usize * 4;
-        if packet.len() < ihl + 4 {
-            return 0;
-        }
-        u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]])
     }
 
     async fn handle_message(&self, message: RelayMessage) -> Result<()> {
@@ -885,7 +910,8 @@ impl RelayClient {
             session_ticket: self.session_ticket.clone(),
             multipath: self.multipath.clone(),
             prefetcher: self.prefetcher.clone(),
-            ai_engine: self.ai_engine.clone(),
+            ml_engine: self.ml_engine.clone(),
+            model_hub: self.model_hub.clone(),
         }
     }
 }

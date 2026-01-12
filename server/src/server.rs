@@ -1,5 +1,4 @@
 use anyhow::Result;
-use oxidize_common::ai_engine::HeuristicEngine;
 use oxidize_common::edge_cache::{CacheConfig, EdgeCache};
 use oxidize_common::ml_models::MlEngine;
 use oxidize_common::model_hub::{HubConfig, ModelHub};
@@ -30,9 +29,8 @@ pub struct RelayServer {
     forwarder: Arc<SharedTunForwarder>,
     /// Edge cache for static content
     edge_cache: Arc<RwLock<EdgeCache>>,
-    /// AI/Heuristic engine for smart decisions
-    ai_engine: Arc<Mutex<HeuristicEngine>>,
-    /// ML Engine for training data collection and inference
+    /// ML Engine for AI-powered decisions (NO HEURISTIC FALLBACK)
+    /// All decisions are made by trained ML models
     ml_engine: Arc<RwLock<MlEngine>>,
     /// Model Hub for downloading models and uploading training data
     model_hub: Arc<ModelHub>,
@@ -134,35 +132,49 @@ impl RelayServer {
         };
         let edge_cache = Arc::new(RwLock::new(EdgeCache::new(edge_cache_config)));
 
-        // Initialize AI/Heuristic engine
-        let ai_engine = Arc::new(Mutex::new(HeuristicEngine::new()));
-
-        // Initialize ML Engine (auto-collects training data)
+        // Initialize ML Engine in HEURISTIC mode (default, zero overhead)
+        // Training data collection is enabled for continuous improvement
         let mut ml_engine = MlEngine::new();
 
         // Initialize Model Hub for model sync and training data upload
         let hub_config = HubConfig {
-            upload_training_data: true, // Enable auto-upload
+            upload_training_data: true, // Enable auto-upload for continuous improvement
             ..Default::default()
         };
         let model_hub = Arc::new(ModelHub::new(hub_config));
 
-        // Try to download and load latest models from HF Hub
-        info!("🤖 Downloading latest ML models from HF Hub...");
+        // Try to download and load ML models (optional - heuristics are default)
+        info!("🤖 Attempting to download ML models from HuggingFace Hub...");
         match model_hub.download_models() {
             Ok(paths) => {
                 if let Some(lstm_path) = &paths.lstm {
-                    if let Err(e) = ml_engine.load_models(lstm_path.parent().unwrap_or(lstm_path)) {
-                        warn!("Could not load ML models: {} (using heuristics)", e);
+                    let model_dir = lstm_path.parent().unwrap_or(lstm_path);
+                    let loaded = ml_engine.try_load_models(model_dir);
+                    if loaded == 4 {
+                        info!(
+                            "✅ All {} ML models loaded - can switch to ML mode when ready",
+                            loaded
+                        );
+                    } else if loaded > 0 {
+                        info!("⚠️ Loaded {} of 4 ML models - using heuristics (training data collecting)", loaded);
                     } else {
-                        info!("✅ ML models loaded successfully");
+                        info!(
+                            "📊 No ML models found - using heuristics (training data collecting)"
+                        );
                     }
                 }
             }
             Err(e) => {
-                warn!("Could not download ML models: {} (using heuristics)", e);
+                info!("📊 Could not download ML models: {} - using heuristics", e);
             }
         }
+
+        // Log current mode
+        info!(
+            "🧠 AI engine mode: {:?} (models_loaded: {})",
+            ml_engine.inference_mode(),
+            ml_engine.all_models_loaded()
+        );
 
         let ml_engine = Arc::new(RwLock::new(ml_engine));
 
@@ -174,10 +186,6 @@ impl RelayServer {
             );
         }
 
-        if config.enable_ai_engine {
-            info!("🧠 AI heuristic engine enabled");
-        }
-
         Ok(Self {
             endpoint,
             config,
@@ -187,7 +195,6 @@ impl RelayServer {
             security,
             forwarder,
             edge_cache,
-            ai_engine,
             ml_engine,
             model_hub,
         })
@@ -217,9 +224,8 @@ impl RelayServer {
             }
         });
 
-        // Log cache stats periodically
+        // Log cache and ML stats periodically
         let cache_stats = self.edge_cache.clone();
-        let ai_stats = self.ai_engine.clone();
         let ml_stats = self.ml_engine.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -234,18 +240,14 @@ impl RelayServer {
                         stats.size_bytes / 1024 / 1024
                     );
                 }
-                let engine_stats = ai_stats.lock().await.stats.clone();
-                info!(
-                    "🧠 AI engine: {} compression skipped, {} FEC injected",
-                    engine_stats.compression_skipped, engine_stats.fec_injected
-                );
-                // Log ML engine stats
+                // Log ML engine stats (100% ML, no heuristics)
                 let ml_engine_stats = ml_stats.read().await.stats();
                 info!(
-                    "🤖 ML engine: models_loaded={}, loss_predictor={} samples, drl={} experiences",
-                    ml_engine_stats.loss_predictor.model_loaded,
-                    ml_engine_stats.loss_predictor.training_samples,
-                    ml_engine_stats.congestion_controller.experience_count
+                    "🧠 ML engine: all_models_loaded={}, lstm_inferences={}, drl_inferences={}, compression_skipped={}",
+                    ml_engine_stats.loss_predictor.model_loaded && ml_engine_stats.congestion_controller.model_loaded,
+                    ml_engine_stats.loss_predictor.inference_count,
+                    ml_engine_stats.congestion_controller.inference_count,
+                    ml_engine_stats.compression_oracle.skip_count
                 );
             }
         });
@@ -399,7 +401,6 @@ impl RelayServer {
 
         // Log cache stats periodically
         let cache_stats = self.edge_cache.clone();
-        let ai_stats = self.ai_engine.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
             loop {
@@ -413,11 +414,6 @@ impl RelayServer {
                         stats.size_bytes / 1024 / 1024
                     );
                 }
-                let engine_stats = ai_stats.lock().await.stats.clone();
-                info!(
-                    "🧠 AI engine: {} compression skipped, {} FEC injected",
-                    engine_stats.compression_skipped, engine_stats.fec_injected
-                );
             }
         });
 

@@ -88,18 +88,10 @@ fn region_to_country_code(location: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Auto-connect on launch
     pub auto_connect: bool,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            auto_connect: false,
-        }
-    }
 }
 
 pub struct VpnConnection {
