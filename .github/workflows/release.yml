@@ -134,6 +134,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      - name: Install macOS dependencies
+        if: startsWith(matrix.os, 'macos')
+        run: brew install create-dmg
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
