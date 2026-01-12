@@ -193,7 +193,7 @@ impl RelayClient {
     }
 
     /// Run with a packet sender channel for external packet injection
-    /// This allows the daemon to send intercepted TPROXY packets through QUIC
+    /// This allows the daemon to send intercepted packets through QUIC
     #[allow(dead_code)]
     pub async fn run_with_sender(
         &self,
@@ -235,13 +235,13 @@ impl RelayClient {
         let mut failed_count: u64 = 0;
         loop {
             tokio::select! {
-                // Receive packets from TPROXY to forward through QUIC
+                // Receive packets to forward through QUIC
                 Some(packet) = packet_rx.recv() => {
                     let len = packet.len();
                     forwarded_count += 1;
 
                     if forwarded_count == 1 {
-                        info!("📥 First packet received from TPROXY: {} bytes", len);
+                        info!("📥 First packet received: {} bytes", len);
                     }
 
                     // Send via QUIC datagram for lowest latency

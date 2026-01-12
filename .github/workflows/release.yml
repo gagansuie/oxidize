@@ -147,6 +147,14 @@ jobs:
         working-directory: app
         run: bun install --frozen-lockfile
 
+      - name: Build oxidize-daemon (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
+          # Copy to expected path for Tauri bundling
+          mkdir -p target/release
+          cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
+
       - name: Get version from tauri.conf.json
         id: version
         shell: bash

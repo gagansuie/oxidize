@@ -67,62 +67,7 @@ sudo oxidize-client --server relay.oxd.sh:4433
 
 ## Mobile (iOS & Android)
 
-Mobile devices use the **WireGuard** app (no custom app needed).
-
-### Step 1: Install WireGuard App
-
-- **iOS**: [App Store](https://apps.apple.com/us/app/wireguard/id1441195209)
-- **Android**: [Play Store](https://play.google.com/store/apps/details?id=com.wireguard.android)
-
-### Step 2: Enable WireGuard on Server
-
-Add to your server's `config.toml`:
-
-```toml
-enable_wireguard = true
-wireguard_port = 51820
-wireguard_private_key = "YOUR_KEY"
-```
-
-Generate keys:
-```bash
-./oxidize-server --generate-wg-config --wg-endpoint relay.oxd.sh:51820
-```
-
-Open firewall:
-```bash
-sudo iptables -I INPUT -p udp --dport 51820 -j ACCEPT
-```
-
-### Step 3: Scan QR Code
-
-Generate QR on server:
-```bash
-sudo apt install qrencode
-./oxidize-server --generate-wg-config --wg-endpoint relay.oxd.sh:51820 | tail -n +10 | qrencode -t ansiutf8
-```
-
-On mobile:
-1. Open WireGuard app
-2. Tap **+** → **Create from QR code**
-3. Scan → Save → Connect
-
-### Manual Mobile Config
-
-If QR doesn't work, create config manually:
-
-```conf
-[Interface]
-PrivateKey = CLIENT_PRIVATE_KEY
-Address = 10.0.0.2/24
-DNS = 1.1.1.1
-
-[Peer]
-PublicKey = SERVER_PUBLIC_KEY
-Endpoint = relay.oxd.sh:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-```
+**Coming Soon** — Native mobile apps for iOS and Android are currently in development.
 
 ---
 
@@ -135,8 +80,8 @@ PersistentKeepalive = 25
 | macOS Intel | Native client | ✅ |
 | macOS Apple Silicon | Native client | ✅ |
 | Windows | Native client | ✅ |
-| iOS | WireGuard app | ✅ |
-| Android | WireGuard app | ✅ |
+| iOS | Native app | 🚧 Coming Soon |
+| Android | Native app | 🚧 Coming Soon |
 
 ---
 
@@ -165,11 +110,7 @@ cargo build --release
 
 ### Mobile
 
-| Problem | Solution |
-|---------|----------|
-| Connection timeout | Check firewall allows UDP 51820 |
-| No internet after connect | Enable IP forwarding: `sudo sysctl -w net.ipv4.ip_forward=1` |
-| Handshake fails | Regenerate WireGuard keys |
+Mobile apps are coming soon.
 
 ---
 
@@ -180,9 +121,7 @@ cargo build --release
 oxidize-client --version
 oxidize-client --server relay.oxd.sh:4433 --speedtest
 
-# Mobile
-# Check WireGuard app shows "Active" status
-# Visit https://ifconfig.me - should show server IP
+# Mobile apps coming soon
 ```
 
 ---

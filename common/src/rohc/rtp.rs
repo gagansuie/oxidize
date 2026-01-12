@@ -278,7 +278,7 @@ pub fn compress_rtp(
     } else if delta.seq_delta <= 15 && delta.ts_scaled.is_some() {
         // UO-1: 2 bytes
         // Format: 10 + TS(5) + M + SN(4) + CRC(3)
-        let ts_5 = (delta.ts_scaled.unwrap_or(0) & 0x1F) as u8;
+        let ts_5 = delta.ts_scaled.unwrap_or(0) & 0x1F;
         let m = if delta.marker { 1 } else { 0 };
         let sn_4 = (ctx.last_seq & 0x0F) as u8;
         output.push(0x80 | ts_5);

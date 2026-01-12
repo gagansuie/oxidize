@@ -146,10 +146,10 @@ pub async fn connect(
         }
     }
 
-    // Check if daemon is available for TPROXY optimization
-    // If daemon is running, use it for transparent proxy (gaming/VoIP optimization)
+    // Check if daemon is available
+    // If daemon is running, use it for optimized connection
     if is_daemon_running().await {
-        tracing::info!("Daemon available - using daemon connection with TPROXY");
+        tracing::info!("Daemon available - using daemon connection");
         let sid = server_id.clone();
         daemon_connect(server_id).await?;
 
@@ -464,8 +464,12 @@ pub async fn set_config(
     Ok(())
 }
 
+#[cfg(unix)]
 const DAEMON_SOCKET: &str = "/var/run/oxidize/daemon.sock";
+#[cfg(windows)]
+const DAEMON_PIPE: &str = r"\\.\pipe\oxidize-daemon";
 
+#[cfg(unix)]
 async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -479,9 +483,50 @@ async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
     writer
         .write_all(cmd.as_bytes())
         .await
+        .map_err(|e: std::io::Error| e.to_string())?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|e: std::io::Error| e.to_string())?;
+    writer
+        .flush()
+        .await
+        .map_err(|e: std::io::Error| e.to_string())?;
+
+    let mut reader = BufReader::new(reader);
+    let mut response = String::new();
+    reader
+        .read_line(&mut response)
+        .await
         .map_err(|e| e.to_string())?;
-    writer.write_all(b"\n").await.map_err(|e| e.to_string())?;
-    writer.flush().await.map_err(|e| e.to_string())?;
+
+    serde_json::from_str(&response).map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[cfg(windows)]
+async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    let client = ClientOptions::new()
+        .open(DAEMON_PIPE)
+        .map_err(|e| format!("Daemon not running: {}", e))?;
+
+    let (reader, writer) = tokio::io::split(client);
+    let mut writer = writer;
+
+    writer
+        .write_all(cmd.as_bytes())
+        .await
+        .map_err(|e: std::io::Error| e.to_string())?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|e: std::io::Error| e.to_string())?;
+    writer
+        .flush()
+        .await
+        .map_err(|e: std::io::Error| e.to_string())?;
 
     let mut reader = BufReader::new(reader);
     let mut response = String::new();
@@ -494,8 +539,15 @@ async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
 }
 
 async fn is_daemon_running() -> bool {
-    std::path::Path::new(DAEMON_SOCKET).exists()
-        && send_daemon_command(r#"{"type":"Ping"}"#).await.is_ok()
+    #[cfg(unix)]
+    {
+        std::path::Path::new(DAEMON_SOCKET).exists()
+            && send_daemon_command(r#"{"type":"Ping"}"#).await.is_ok()
+    }
+    #[cfg(windows)]
+    {
+        send_daemon_command(r#"{"type":"Ping"}"#).await.is_ok()
+    }
 }
 
 async fn daemon_connect(server_id: String) -> Result<String, String> {
@@ -668,12 +720,6 @@ pub async fn uninstall_daemon() -> Result<String, String> {
         # Remove socket directory
         rm -rf /var/run/oxidize
         
-        # Cleanup TPROXY iptables rules
-        iptables -t mangle -F OXIDIZE_TPROXY 2>/dev/null || true
-        iptables -t mangle -D PREROUTING -j OXIDIZE_TPROXY 2>/dev/null || true
-        iptables -t mangle -X OXIDIZE_TPROXY 2>/dev/null || true
-        ip rule del fwmark 1 lookup 100 2>/dev/null || true
-        ip route del local 0.0.0.0/0 dev lo table 100 2>/dev/null || true
         
         # Reload systemd
         systemctl daemon-reload 2>/dev/null || true
