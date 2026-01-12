@@ -334,10 +334,12 @@ mod tests {
 
     #[test]
     fn test_xdp_stats() {
-        let mut stats = XdpStats::default();
-        stats.rx_packets = 1000;
-        stats.redirected = 800;
-        stats.passed = 200;
+        let stats = XdpStats {
+            rx_packets: 1000,
+            redirected: 800,
+            passed: 200,
+            ..Default::default()
+        };
 
         assert!((stats.redirect_ratio() - 0.8).abs() < 0.001);
     }
