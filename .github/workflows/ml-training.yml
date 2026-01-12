@@ -80,7 +80,7 @@ jobs:
             
             # Aggregate all loss samples into single file
             echo "Aggregating loss samples..."
-            python3 -c "
+            python3 << 'PYEOF'
 import json
 import glob
 import os
@@ -122,7 +122,7 @@ if loss_samples:
 if drl_experiences:
     with open('training_data/drl_experiences.json', 'w') as fp:
         json.dump(drl_experiences, fp)
-"
+PYEOF
           fi
           
           echo "Training samples ready: $(find training_data -name '*.json' | wc -l) files"
