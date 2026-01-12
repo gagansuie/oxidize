@@ -51,4 +51,4 @@ ENV RUST_LOG=info
 ENV RUST_BACKTRACE=1
 
 # Run server
-CMD ["./oxidize-server", "--listen", "0.0.0.0:4433", "--metrics", "0.0.0.0:9090"]
+CMD ["./oxidize-server", "--listen", "0.0.0.0:4433", "--metrics-addr", "0.0.0.0:9090"]
