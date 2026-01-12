@@ -1858,11 +1858,8 @@ impl MlCompressionOracle {
             }
         }
 
-        // Model required but inference failed
-        warn!("Compression oracle ML inference failed - model may not be properly loaded");
-        // Default to light compression when model fails
-        self.compress_count += 1;
-        MlCompressionDecision::Light
+        // Model not loaded or inference failed - fall back to heuristics
+        self.decide_heuristic_fast(data)
     }
 
     #[cfg(not(feature = "ai"))]
