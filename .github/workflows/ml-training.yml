@@ -80,7 +80,7 @@ jobs:
             
             # Aggregate all loss samples into single file
             echo "Aggregating loss samples..."
-            python3 << 'EOF'
+            python3 -c "
 import json
 import glob
 import os
@@ -96,7 +96,7 @@ for f in glob.glob('training_data/*loss*.json') + glob.glob('training_data/train
             elif isinstance(data, dict) and 'loss_samples' in data:
                 loss_samples.extend(data['loss_samples'])
     except Exception as e:
-        print(f"Warning: Could not parse {f}: {e}")
+        print(f'Warning: Could not parse {f}: {e}')
 
 # Aggregate DRL experiences
 drl_experiences = []
@@ -109,10 +109,10 @@ for f in glob.glob('training_data/*drl*.json') + glob.glob('training_data/*exper
             elif isinstance(data, dict) and 'drl_experiences' in data:
                 drl_experiences.extend(data['drl_experiences'])
     except Exception as e:
-        print(f"Warning: Could not parse {f}: {e}")
+        print(f'Warning: Could not parse {f}: {e}')
 
-print(f"Aggregated {len(loss_samples)} loss samples")
-print(f"Aggregated {len(drl_experiences)} DRL experiences")
+print(f'Aggregated {len(loss_samples)} loss samples')
+print(f'Aggregated {len(drl_experiences)} DRL experiences')
 
 # Write aggregated files
 if loss_samples:
@@ -122,7 +122,7 @@ if loss_samples:
 if drl_experiences:
     with open('training_data/drl_experiences.json', 'w') as fp:
         json.dump(drl_experiences, fp)
-EOF
+"
           fi
           
           echo "Training samples ready: $(find training_data -name '*.json' | wc -l) files"
