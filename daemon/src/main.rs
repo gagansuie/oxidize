@@ -31,24 +31,13 @@ struct DaemonResponse {
     data: Option<serde_json::Value>,
 }
 
+#[derive(Default)]
 struct DaemonState {
     connected: bool,
     server_id: Option<String>,
     client_task: Option<tokio::task::JoinHandle<()>>,
     metrics: Option<oxidize_common::RelayMetrics>,
     connected_at: Option<std::time::Instant>,
-}
-
-impl Default for DaemonState {
-    fn default() -> Self {
-        Self {
-            connected: false,
-            server_id: None,
-            client_task: None,
-            metrics: None,
-            connected_at: None,
-        }
-    }
 }
 
 #[tokio::main]
@@ -487,7 +476,7 @@ fn run_nfqueue_capture(
                 metrics.record_received(len as u64);
 
                 // Log periodically
-                if packet_count % 100 == 0 {
+                if packet_count.is_multiple_of(100) {
                     info!(
                         "📦 Captured {} packets via NFQUEUE, last: {} bytes",
                         packet_count, len

@@ -164,6 +164,7 @@ impl XdpServerHandler {
     }
 
     /// Build a UDP response packet
+    #[allow(clippy::too_many_arguments)]
     fn build_udp_response(
         &self,
         src_mac: [u8; 6],
