@@ -1252,11 +1252,9 @@ impl MlEngine {
                 debug!("✅ LSTM loss predictor loaded");
                 loaded += 1;
             }
-        } else if lstm_onnx.exists() {
-            if self.loss_predictor.load_model(&lstm_onnx).is_ok() {
-                debug!("✅ LSTM loss predictor loaded");
-                loaded += 1;
-            }
+        } else if lstm_onnx.exists() && self.loss_predictor.load_model(&lstm_onnx).is_ok() {
+            debug!("✅ LSTM loss predictor loaded");
+            loaded += 1;
         }
 
         // Try DRL
@@ -1271,11 +1269,9 @@ impl MlEngine {
                 debug!("✅ DRL congestion controller loaded");
                 loaded += 1;
             }
-        } else if drl_onnx.exists() {
-            if self.congestion_controller.load_model(&drl_onnx).is_ok() {
-                debug!("✅ DRL congestion controller loaded");
-                loaded += 1;
-            }
+        } else if drl_onnx.exists() && self.congestion_controller.load_model(&drl_onnx).is_ok() {
+            debug!("✅ DRL congestion controller loaded");
+            loaded += 1;
         }
 
         // Try Compression Oracle
@@ -1290,15 +1286,14 @@ impl MlEngine {
                 debug!("✅ Compression oracle loaded");
                 loaded += 1;
             }
-        } else if compression_onnx.exists() {
-            if self
+        } else if compression_onnx.exists()
+            && self
                 .compression_oracle
                 .load_model(&compression_onnx)
                 .is_ok()
-            {
-                debug!("✅ Compression oracle loaded");
-                loaded += 1;
-            }
+        {
+            debug!("✅ Compression oracle loaded");
+            loaded += 1;
         }
 
         // Try Path Selector
@@ -1313,11 +1308,11 @@ impl MlEngine {
                 debug!("✅ Path selector loaded");
                 loaded += 1;
             }
-        } else if path_selector_onnx.exists() {
-            if self.path_selector.load_model(&path_selector_onnx).is_ok() {
-                debug!("✅ Path selector loaded");
-                loaded += 1;
-            }
+        } else if path_selector_onnx.exists()
+            && self.path_selector.load_model(&path_selector_onnx).is_ok()
+        {
+            debug!("✅ Path selector loaded");
+            loaded += 1;
         }
 
         if loaded > 0 {
@@ -1454,9 +1449,8 @@ impl MlEngine {
             }
             InferenceMode::Shadow => {
                 // Use heuristic but also run ML for comparison (logging only)
-                let heuristic = self.compression_oracle.decide_heuristic_fast(data);
                 // Could log ML decision here for comparison
-                heuristic
+                self.compression_oracle.decide_heuristic_fast(data)
             }
         }
     }
