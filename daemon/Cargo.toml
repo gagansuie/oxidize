@@ -1,6 +1,6 @@
 [package]
 name = "oxidize-daemon"
-version = "0.1.13"
+version = { workspace = true }
 edition = "2021"
 description = "Oxidize network relay daemon - handles TUN and privileged operations"
 

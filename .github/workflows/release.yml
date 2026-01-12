@@ -147,6 +147,14 @@ jobs:
         working-directory: app
         run: bun install --frozen-lockfile
 
+      - name: Sync version from Cargo.toml
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Syncing version $VERSION to tauri.conf.json"
+          sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" app/src-tauri/tauri.conf.json
+          rm -f app/src-tauri/tauri.conf.json.bak
+
       - name: Build oxidize-daemon (Linux)
         if: matrix.os == 'ubuntu-22.04'
         run: |
