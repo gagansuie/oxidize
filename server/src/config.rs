@@ -83,7 +83,7 @@ fn default_rohc_max_size() -> usize {
 }
 
 fn default_ack_batch_size() -> usize {
-    8 // Good balance between latency and throughput
+    1 // Immediate ACKs for lowest latency
 }
 
 fn default_rate_limit() -> usize {

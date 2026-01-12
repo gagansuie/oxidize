@@ -2,7 +2,7 @@
 # Multi-stage build for minimal image size
 
 # Build stage
-FROM rust:1.75-bookworm as builder
+FROM rust:1.83-bookworm as builder
 
 WORKDIR /app
 
@@ -12,28 +12,15 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy manifests
+# Copy all source code at once (simpler approach)
 COPY Cargo.toml Cargo.lock ./
-COPY common/Cargo.toml common/
-COPY server/Cargo.toml server/
-COPY client/Cargo.toml client/
-COPY daemon/Cargo.toml daemon/
-COPY app/Cargo.toml app/
+COPY common common/
+COPY server server/
+COPY client client/
+COPY daemon daemon/
 
-# Create dummy files for dependency caching
-RUN mkdir -p common/src server/src client/src daemon/src app/src && \
-    echo "pub fn main() {}" > common/src/lib.rs && \
-    echo "fn main() {}" > server/src/main.rs && \
-    echo "fn main() {}" > client/src/main.rs && \
-    echo "fn main() {}" > daemon/src/main.rs && \
-    echo "fn main() {}" > app/src/main.rs
-
-# Build dependencies only (cached layer)
-RUN cargo build --release --package relay-server 2>/dev/null || true
-
-# Copy actual source
-COPY common/src common/src
-COPY server/src server/src
+# Remove app from workspace for server-only build
+RUN sed -i '/"app\/src-tauri",/d' Cargo.toml
 
 # Build the server
 RUN cargo build --release --package relay-server

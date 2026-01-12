@@ -83,8 +83,8 @@ impl RelayServer {
         // Faster keepalive for low latency connection recovery (15s instead of default)
         transport_config.keep_alive_interval(Some(Duration::from_secs(15)));
 
-        // Allow more data in flight before ACKs (helps throughput on high-latency links)
-        transport_config.initial_rtt(Duration::from_millis(50));
+        // Lower initial RTT estimate for better initial performance
+        transport_config.initial_rtt(Duration::from_millis(10));
 
         // Enable QUIC datagrams for unreliable low-latency traffic (gaming/VoIP)
         transport_config.datagram_receive_buffer_size(Some(65536));

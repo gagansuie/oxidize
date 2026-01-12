@@ -91,8 +91,8 @@ impl RelayClient {
         // Faster keepalive for low latency connection recovery
         transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(15)));
 
-        // Initial RTT estimate for better initial performance
-        transport_config.initial_rtt(std::time::Duration::from_millis(50));
+        // Lower initial RTT estimate for faster handshake
+        transport_config.initial_rtt(std::time::Duration::from_millis(10));
 
         // Enable QUIC datagrams for unreliable low-latency traffic (gaming/VoIP)
         transport_config.datagram_receive_buffer_size(Some(65536));
