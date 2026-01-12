@@ -125,10 +125,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
@@ -147,7 +145,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: app
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Get version from tauri.conf.json
         id: version

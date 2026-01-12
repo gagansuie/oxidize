@@ -194,15 +194,14 @@ impl UringInstance {
             iov_len: data.len(),
         };
 
-        let msg = libc::msghdr {
-            msg_name: addr as *const _ as *mut _,
-            msg_namelen: std::mem::size_of::<libc::sockaddr_in>() as u32,
-            msg_iov: &iov as *const _ as *mut _,
-            msg_iovlen: 1,
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: 0,
-            msg_flags: 0,
-        };
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_name = addr as *const _ as *mut _;
+        msg.msg_namelen = std::mem::size_of::<libc::sockaddr_in>() as u32;
+        msg.msg_iov = &iov as *const _ as *mut _;
+        msg.msg_iovlen = 1;
+        msg.msg_control = std::ptr::null_mut();
+        msg.msg_controllen = 0;
+        msg.msg_flags = 0;
 
         let sendmsg_e = opcode::SendMsg::new(types::Fd(fd), &msg as *const _)
             .build()
