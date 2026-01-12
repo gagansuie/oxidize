@@ -4,7 +4,7 @@
 
 ### Open Source Network Acceleration, Supercharged by AI
 
-**Machine learning predicts packet loss before it happens, optimizes routing in real-time, and delivers enterprise-grade performance to everyone.**
+**Machine learning predicts packet loss before it happens, optimizes routing in real-time, and accelerates your network automatically.**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
@@ -53,7 +53,7 @@ Your ISP's routing is suboptimal:
 
 ### 🚀 Core Performance
 - **QUIC Protocol** - 0-RTT resumption, stream multiplexing, fast loss recovery
-- **Enterprise Routing** - Premium backbone peering vs congested ISP routes
+- **Smart Routing** - Bypass congested ISP routes with optimized paths
 - **Adaptive FEC** - Dynamic Reed-Solomon redundancy based on packet loss rate
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
@@ -340,12 +340,12 @@ See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 ## Daemon Management
 
-The daemon enables **TPROXY (Transparent Proxy)** for automatic traffic optimization:
+The daemon enables **NFQUEUE packet capture** for automatic traffic optimization:
 
 ### Features
 - **Auto-connect on start** - No manual intervention needed
-- **TPROXY full tunnel** - All UDP traffic routed through relay
-- **Zero-copy forwarding** - Kernel-to-kernel packet transfer
+- **NFQUEUE full tunnel** - All UDP traffic captured and forwarded through relay
+- **Pure userspace** - No kernel modules required
 - **UDP GSO/GRO batching** - 64 packets per syscall
 - **QUIC datagrams** - Zero head-of-line blocking for gaming/VoIP
 
@@ -366,11 +366,11 @@ sudo journalctl -u oxidize-daemon -f
 sudo ./target/release/oxidize-daemon
 ```
 
-### TPROXY iptables Rules
+### NFQUEUE iptables Rules
 When connected, the daemon automatically configures:
 ```bash
 # Check active rules
-sudo iptables -t mangle -L OXIDIZE_TPROXY -n
+sudo iptables -L OUTPUT -n | grep -E 'NFQUEUE|4433'
 ```
 
 ## Documentation

@@ -5,6 +5,13 @@
 #
 # Usage: ./zero-downtime-deploy.sh [--rollback]
 #
+# NOTE: This script is for SELF-HOSTED / BARE-METAL deployments using systemd.
+#       If you're deploying to Fly.io, you don't need this script!
+#       Fly.io has built-in zero-downtime deployments:
+#         fly deploy                        # Rolling (default)
+#         fly deploy --strategy bluegreen   # Blue-green
+#         fly deploy --strategy canary      # Canary
+#
 
 set -e
 

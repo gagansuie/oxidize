@@ -10,11 +10,11 @@ Oxidize is designed to be resilient against attacks. This guide covers security 
 |------------|-----------------|---------|
 | Encrypts traffic | ✅ TLS/IPsec | ✅ TLS 1.3 + QUIC |
 | Hides client IP | ✅ | ✅ (relay IP visible) |
-| Tunnels traffic | ✅ All system traffic | ⚠️ Application-level |
-| Kernel integration | ✅ tun/tap device | ❌ Userspace only |
+| Tunnels traffic | ✅ All system traffic | ✅ All UDP via NFQUEUE |
+| Kernel integration | ✅ tun/tap device | ✅ NFQUEUE (userspace processing) |
 | Protocol | OpenVPN/WireGuard/IPsec | QUIC |
 
-**Key difference:** Oxidize is an application-layer tunnel. To tunnel all system traffic, configure it as a SOCKS/HTTP proxy or use with a tun device.
+**Key difference:** Oxidize uses NFQUEUE to intercept all UDP traffic in userspace, then forwards it through an encrypted QUIC tunnel. No kernel modules required.
 
 ---
 

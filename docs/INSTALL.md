@@ -59,7 +59,7 @@ sudo mv oxidize-client /usr/local/bin/
 # Test your connection
 oxidize-client --server relay.oxd.sh:4433 --speedtest
 
-# Run with TUN (routes all traffic)
+# Run with daemon (routes all UDP traffic via NFQUEUE)
 sudo oxidize-client --server relay.oxd.sh:4433
 ```
 
@@ -161,7 +161,7 @@ cargo build --release
 |---------|----------|
 | Permission denied | Run with `sudo` |
 | Can't connect | Check firewall allows UDP 4433 |
-| TUN not working | Install `iproute2` (Linux) |
+| NFQUEUE not working | Run daemon as root, check iptables |
 
 ### Mobile
 
@@ -204,15 +204,15 @@ This will:
 
 ## Daemon Management
 
-The Oxidize daemon enables **TPROXY (Transparent Proxy)** for automatic traffic optimization.
+The Oxidize daemon enables **NFQUEUE packet capture** for automatic traffic optimization.
 
-### How TPROXY Works
+### How NFQUEUE Works
 
 1. **Auto-connect on start** - App automatically connects to fastest server
-2. **iptables rules** - All UDP traffic marked for interception
-3. **Zero-copy forwarding** - Kernel-to-kernel packet transfer via splice()
+2. **iptables rules** - All UDP traffic sent to NFQUEUE for userspace processing
+3. **Pure userspace** - No kernel modules required, packets processed in daemon
 4. **QUIC relay** - Packets forwarded through encrypted QUIC tunnel
-5. **Response routing** - Responses sent back to original clients
+5. **Response routing** - Responses injected back via raw sockets
 
 ### Daemon Commands
 
@@ -252,15 +252,15 @@ sudo ./target/release/oxidize-daemon
 ls -la /var/run/oxidize/daemon.sock
 ```
 
-### Verify TPROXY Rules
+### Verify NFQUEUE Rules
 
 ```bash
-# Check if TPROXY chain exists
-sudo iptables -t mangle -L OXIDIZE_TPROXY -n
+# Check if NFQUEUE rules are active
+sudo iptables -L OUTPUT -n | grep -E 'NFQUEUE|4433'
 
-# Check policy routing
-ip rule show | grep fwmark
-ip route show table 100
+# You should see:
+# ACCEPT udp -- 0.0.0.0/0 0.0.0.0/0 udp dpt:4433
+# NFQUEUE udp -- 0.0.0.0/0 0.0.0.0/0 ! owner UID match 0 NFQUEUE num 0 bypass
 ```
 
 ---
