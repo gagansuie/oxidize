@@ -30,11 +30,24 @@
         status.connected = event.payload as boolean;
       });
 
-      // Poll for status updates while connected
-      pollInterval = setInterval(async () => {
-        if (status.connected) {
-          status = await invoke("get_status");
+      // Auto-connect on start if not already connected
+      if (!status.connected) {
+        console.log("Auto-connecting to fastest server...");
+        connecting = true;
+        try {
+          // Use "auto" to let the backend select the fastest server
+          status = await invoke("connect", { serverId: "auto" });
+          console.log("Auto-connected successfully");
+        } catch (e) {
+          console.error("Auto-connect failed:", e);
+        } finally {
+          connecting = false;
         }
+      }
+
+      // Poll for status updates
+      pollInterval = setInterval(async () => {
+        status = await invoke("get_status");
       }, 1000);
     })();
 
@@ -51,8 +64,10 @@
     try {
       if (status.connected) {
         status = await invoke("disconnect");
-      } else if (selectedServer) {
-        status = await invoke("connect", { serverId: selectedServer });
+      } else {
+        // Use selected server or "auto" for fastest
+        const serverId = selectedServer || "auto";
+        status = await invoke("connect", { serverId });
       }
     } catch (e) {
       console.error("Connection error:", e);

@@ -229,12 +229,14 @@ pub mod splice {
     /// Splice flags
     const SPLICE_F_MOVE: libc::c_uint = 1;
     const SPLICE_F_NONBLOCK: libc::c_uint = 2;
+    #[allow(dead_code)]
     const SPLICE_F_MORE: libc::c_uint = 4;
 
     /// Pipe buffer for splice operations
     pub struct SplicePipe {
         read_fd: RawFd,
         write_fd: RawFd,
+        #[allow(dead_code)]
         buffer_size: usize,
     }
 
@@ -338,14 +340,24 @@ pub fn generate_iptables_rules(config: &TproxyConfig) -> Vec<String> {
     // Create TPROXY chain
     rules.push("iptables -t mangle -N OXIDIZE_TPROXY 2>/dev/null || true".to_string());
 
+    // Exclude loopback traffic
+    rules.push("iptables -t mangle -A OXIDIZE_TPROXY -d 127.0.0.0/8 -j RETURN".to_string());
+
+    // Exclude DNS (port 53) to prevent breaking name resolution
+    rules.push("iptables -t mangle -A OXIDIZE_TPROXY -p udp --dport 53 -j RETURN".to_string());
+
+    // Exclude DHCP
+    rules.push("iptables -t mangle -A OXIDIZE_TPROXY -p udp --dport 67:68 -j RETURN".to_string());
+
+    // Exclude QUIC relay port to prevent intercepting our own tunnel
+    rules.push("iptables -t mangle -A OXIDIZE_TPROXY -p udp --dport 4433 -j RETURN".to_string());
+
     // Mark packets for TPROXY
-    rules.push(format!(
-        "iptables -t mangle -A OXIDIZE_TPROXY -j MARK --set-mark 1"
-    ));
+    rules.push("iptables -t mangle -A OXIDIZE_TPROXY -j MARK --set-mark 1".to_string());
 
     // TPROXY rule
     rules.push(format!(
-        "iptables -t mangle -A OXIDIZE_TPROXY -j TPROXY --on-port {} --tproxy-mark 1",
+        "iptables -t mangle -A OXIDIZE_TPROXY -p udp -j TPROXY --on-port {} --tproxy-mark 1",
         port
     ));
 

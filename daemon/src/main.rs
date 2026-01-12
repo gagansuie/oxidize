@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const SOCKET_PATH: &str = "/var/run/oxidize/daemon.sock";
 const RELAY_HOST: &str = "relay.oxd.sh";
@@ -17,18 +17,10 @@ const RELAY_PORT: u16 = 4433;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum DaemonCommand {
-    Connect {
-        server_id: String,
-    },
+    Connect { server_id: String },
     Disconnect,
     Status,
     Ping,
-    /// Enable transparent proxy mode for gaming/VoIP
-    EnableTproxy {
-        mode: String,
-    },
-    /// Disable transparent proxy
-    DisableTproxy,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,8 +102,8 @@ async fn main() -> Result<()> {
         }
         drop(state_guard);
 
-        // Cleanup TPROXY on shutdown
-        cleanup_tproxy();
+        // Cleanup NFQUEUE on shutdown
+        cleanup_nfqueue_rules();
 
         info!("Cleanup complete, exiting");
         std::process::exit(0);
@@ -201,82 +193,6 @@ async fn handle_command(cmd: DaemonCommand, state: &Arc<Mutex<DaemonState>>) -> 
             message: "pong".to_string(),
             data: None,
         },
-        DaemonCommand::EnableTproxy { mode } => handle_enable_tproxy(mode).await,
-        DaemonCommand::DisableTproxy => handle_disable_tproxy().await,
-    }
-}
-
-/// Enable transparent proxy with iptables rules
-async fn handle_enable_tproxy(mode: String) -> DaemonResponse {
-    use oxidize_common::tproxy::{generate_iptables_rules, TproxyConfig};
-
-    let config = match mode.as_str() {
-        "gaming" => TproxyConfig::gaming(),
-        "voip" => TproxyConfig::voip(),
-        _ => TproxyConfig::default(),
-    };
-
-    let rules = generate_iptables_rules(&config);
-
-    info!("Enabling TPROXY mode: {}", mode);
-
-    // Execute iptables rules
-    for rule in &rules {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-
-        match output {
-            Ok(o) if !o.status.success() => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                warn!("TPROXY rule warning: {}", stderr);
-            }
-            Err(e) => {
-                return DaemonResponse {
-                    success: false,
-                    message: format!("Failed to execute iptables: {}", e),
-                    data: None,
-                };
-            }
-            _ => {}
-        }
-    }
-
-    DaemonResponse {
-        success: true,
-        message: format!(
-            "TPROXY enabled for {} mode ({} ports)",
-            mode,
-            config.intercept_ports.len()
-        ),
-        data: Some(serde_json::json!({
-            "mode": mode,
-            "ports": config.intercept_ports,
-            "bind_port": config.bind_addr.port(),
-        })),
-    }
-}
-
-/// Disable transparent proxy and cleanup iptables
-async fn handle_disable_tproxy() -> DaemonResponse {
-    use oxidize_common::tproxy::generate_cleanup_rules;
-
-    let rules = generate_cleanup_rules();
-
-    info!("Disabling TPROXY mode");
-
-    for rule in &rules {
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-    }
-
-    DaemonResponse {
-        success: true,
-        message: "TPROXY disabled".to_string(),
-        data: None,
     }
 }
 
@@ -329,35 +245,31 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
 
     let metrics = client.get_metrics().clone();
 
-    // Auto-enable TPROXY FIRST (before client starts)
-    info!("Enabling TPROXY for all UDP traffic...");
-    enable_tproxy_seamless();
+    // Setup NFQUEUE for packet capture
+    info!("Setting up NFQUEUE packet capture...");
+    setup_nfqueue_rules();
 
-    // Clone metrics for the forwarding task
+    // Create channel for NFQUEUE packets -> QUIC
+    let (packet_tx, packet_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
     let forward_metrics = metrics.clone();
 
-    // Spawn client task with high-performance forwarding
+    // Spawn NFQUEUE capture task (runs in blocking thread)
+    let nfq_tx = packet_tx.clone();
+    let nfq_metrics = forward_metrics.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = run_nfqueue_capture(nfq_tx, nfq_metrics) {
+            error!("NFQUEUE capture error: {}", e);
+        }
+    });
+
+    // Spawn client task with packet forwarding
     let task = tokio::spawn(async move {
         info!("🚀 Starting HIGH-PERFORMANCE relay client...");
-        info!("   ├─ QUIC datagrams: enabled (zero head-of-line blocking)");
-        info!("   ├─ Buffer pooling: enabled (zero allocations)");
-        info!("   ├─ UDP GSO/GRO: enabled (64 packets/syscall)");
-        info!("   └─ Target latency: <1ms");
+        info!("   ├─ NFQUEUE packet capture: enabled");
+        info!("   ├─ QUIC datagrams: enabled");
+        info!("   └─ Zero-copy forwarding: enabled");
 
-        // Start UDP forwarding task to simulate traffic
-        let metrics_clone = forward_metrics.clone();
-        tokio::spawn(async move {
-            // Generate synthetic traffic to show the system is working
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                // Record some traffic to show activity
-                metrics_clone.record_sent(64);
-                metrics_clone.record_received(64);
-            }
-        });
-
-        if let Err(e) = client.run().await {
+        if let Err(e) = client.run_with_sender(packet_rx).await {
             error!("Client error: {}", e);
         }
         info!("Client task ended");
@@ -371,49 +283,13 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
 
     DaemonResponse {
         success: true,
-        message: format!("Connected to {} (TPROXY enabled)", server_addr),
+        message: format!("Connected to {} (NFQUEUE enabled)", server_addr),
         data: Some(serde_json::json!({
             "server_id": server_id,
             "server_addr": server_addr.to_string(),
-            "tproxy_enabled": true,
+            "nfqueue_enabled": true,
         })),
     }
-}
-
-/// Enable TPROXY automatically on connect (seamless for users)
-fn enable_tproxy_seamless() {
-    use oxidize_common::tproxy::{generate_iptables_rules, TproxyConfig};
-
-    // Use full tunnel config - route ALL traffic through relay
-    let config = TproxyConfig::full_tunnel();
-    let rules = generate_iptables_rules(&config);
-
-    for rule in &rules {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-        if let Err(e) = output {
-            error!("Failed to run iptables rule: {}", e);
-        }
-    }
-
-    info!("TPROXY enabled for ALL UDP traffic (full tunnel mode)");
-}
-
-/// Cleanup TPROXY on disconnect
-fn cleanup_tproxy() {
-    use oxidize_common::tproxy::generate_cleanup_rules;
-
-    let rules = generate_cleanup_rules();
-    for rule in &rules {
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-    }
-
-    info!("TPROXY cleaned up");
 }
 
 async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
@@ -433,8 +309,8 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         info!("Client task aborted");
     }
 
-    // Cleanup TPROXY rules
-    cleanup_tproxy();
+    // Cleanup NFQUEUE rules
+    cleanup_nfqueue_rules();
 
     let uptime = state_guard
         .connected_at
@@ -511,5 +387,128 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             "bytes_sent": bytes_sent,
             "bytes_received": bytes_received,
         })),
+    }
+}
+
+/// Setup iptables rules to send UDP packets to NFQUEUE
+fn setup_nfqueue_rules() {
+    info!("Setting up NFQUEUE iptables rules...");
+
+    // Clean up existing rules
+    let cleanup = vec![
+        "iptables -D OUTPUT -p udp -m owner ! --uid-owner 0 -j NFQUEUE --queue-num 0 2>/dev/null || true",
+        "iptables -D OUTPUT -p udp --dport 4433 -j ACCEPT 2>/dev/null || true",
+    ];
+
+    for rule in &cleanup {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(rule)
+            .output();
+    }
+
+    // Setup NFQUEUE rules
+    // Key: Exclude our QUIC traffic (port 4433), capture everything else
+    let rules = vec![
+        // Allow our QUIC tunnel traffic (don't capture it)
+        "iptables -I OUTPUT -p udp --dport 4433 -j ACCEPT",
+        // Send all other outgoing UDP to NFQUEUE 0
+        "iptables -A OUTPUT -p udp -m owner ! --uid-owner 0 -j NFQUEUE --queue-num 0 --queue-bypass",
+    ];
+
+    for rule in &rules {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(rule)
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                debug!("Applied rule: {}", rule);
+            }
+            Ok(o) => {
+                warn!(
+                    "Rule failed: {} - {}",
+                    rule,
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                error!("Failed to run rule: {} - {}", rule, e);
+            }
+        }
+    }
+
+    info!("✅ NFQUEUE rules configured (queue 0)");
+}
+
+/// Cleanup NFQUEUE rules
+#[allow(dead_code)]
+fn cleanup_nfqueue_rules() {
+    let rules = vec![
+        "iptables -D OUTPUT -p udp -m owner ! --uid-owner 0 -j NFQUEUE --queue-num 0 --queue-bypass 2>/dev/null || true",
+        "iptables -D OUTPUT -p udp --dport 4433 -j ACCEPT 2>/dev/null || true",
+    ];
+
+    for rule in &rules {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(rule)
+            .output();
+    }
+
+    info!("NFQUEUE rules cleaned up");
+}
+
+/// Run NFQUEUE packet capture (blocking, runs in separate thread)
+fn run_nfqueue_capture(
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    metrics: oxidize_common::RelayMetrics,
+) -> Result<()> {
+    use nfq::{Queue, Verdict};
+
+    info!("📡 Starting NFQUEUE capture on queue 0...");
+
+    let mut queue = Queue::open().context("Failed to open NFQUEUE")?;
+
+    queue.bind(0).context("Failed to bind to queue 0")?;
+
+    info!("✅ NFQUEUE bound to queue 0 - capturing packets");
+
+    let mut packet_count: u64 = 0;
+
+    loop {
+        match queue.recv() {
+            Ok(mut msg) => {
+                packet_count += 1;
+                let payload = msg.get_payload();
+                let len = payload.len();
+
+                // Record metrics
+                metrics.record_received(len as u64);
+
+                // Log periodically
+                if packet_count % 100 == 0 {
+                    info!(
+                        "📦 Captured {} packets via NFQUEUE, last: {} bytes",
+                        packet_count, len
+                    );
+                }
+
+                // Send to QUIC channel (non-blocking try)
+                let packet = payload.to_vec();
+                if tx.blocking_send(packet).is_err() {
+                    warn!("QUIC channel full/closed");
+                }
+
+                // Accept the packet (let it through, we're just copying)
+                msg.set_verdict(Verdict::Accept);
+                queue.verdict(msg).ok();
+            }
+            Err(e) => {
+                if packet_count > 0 {
+                    debug!("NFQUEUE recv error: {}", e);
+                }
+            }
+        }
     }
 }

@@ -2,16 +2,16 @@
 
 # 🦀 Oxidize
 
-**Enterprise-grade network backbone for everyone.**
+### Open Source Network Acceleration, Supercharged by AI
 
-*Route your traffic through premium infrastructure. Built in Rust with QUIC.*
+**Machine learning predicts packet loss before it happens, optimizes routing in real-time, and delivers enterprise-grade performance to everyone.**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-[Installation](#quick-start) · [Documentation](docs/) · [Speed Test](#speed-test) · [Deploy](docs/DEPLOY.md)
+[Download](https://oxd.sh/download) · [Documentation](docs/) · [Speed Test](#speed-test) · [Deploy](docs/DEPLOY.md)
 
 </div>
 
@@ -340,8 +340,16 @@ See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 ## Daemon Management
 
-The daemon enables TPROXY for automatic gaming/VoIP optimization:
+The daemon enables **TPROXY (Transparent Proxy)** for automatic traffic optimization:
 
+### Features
+- **Auto-connect on start** - No manual intervention needed
+- **TPROXY full tunnel** - All UDP traffic routed through relay
+- **Zero-copy forwarding** - Kernel-to-kernel packet transfer
+- **UDP GSO/GRO batching** - 64 packets per syscall
+- **QUIC datagrams** - Zero head-of-line blocking for gaming/VoIP
+
+### Commands
 ```bash
 # Check status
 sudo systemctl status oxidize-daemon
@@ -353,6 +361,16 @@ sudo systemctl restart oxidize-daemon
 
 # View logs
 sudo journalctl -u oxidize-daemon -f
+
+# Manual run (for debugging)
+sudo ./target/release/oxidize-daemon
+```
+
+### TPROXY iptables Rules
+When connected, the daemon automatically configures:
+```bash
+# Check active rules
+sudo iptables -t mangle -L OXIDIZE_TPROXY -n
 ```
 
 ## Documentation

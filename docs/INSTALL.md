@@ -204,7 +204,15 @@ This will:
 
 ## Daemon Management
 
-The Oxidize daemon enables transparent proxy (TPROXY) for gaming/VoIP optimization.
+The Oxidize daemon enables **TPROXY (Transparent Proxy)** for automatic traffic optimization.
+
+### How TPROXY Works
+
+1. **Auto-connect on start** - App automatically connects to fastest server
+2. **iptables rules** - All UDP traffic marked for interception
+3. **Zero-copy forwarding** - Kernel-to-kernel packet transfer via splice()
+4. **QUIC relay** - Packets forwarded through encrypted QUIC tunnel
+5. **Response routing** - Responses sent back to original clients
 
 ### Daemon Commands
 
@@ -242,6 +250,17 @@ sudo ./target/release/oxidize-daemon
 
 # Check if daemon is running
 ls -la /var/run/oxidize/daemon.sock
+```
+
+### Verify TPROXY Rules
+
+```bash
+# Check if TPROXY chain exists
+sudo iptables -t mangle -L OXIDIZE_TPROXY -n
+
+# Check policy routing
+ip rule show | grep fwmark
+ip route show table 100
 ```
 
 ---

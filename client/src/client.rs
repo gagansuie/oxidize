@@ -186,6 +186,99 @@ impl RelayClient {
         &self.metrics
     }
 
+    /// Get the server address for this client
+    #[allow(dead_code)]
+    pub fn get_server_addr(&self) -> SocketAddr {
+        self.server_addr
+    }
+
+    /// Run with a packet sender channel for external packet injection
+    /// This allows the daemon to send intercepted TPROXY packets through QUIC
+    #[allow(dead_code)]
+    pub async fn run_with_sender(
+        &self,
+        mut packet_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Result<()> {
+        info!(
+            "🔌 run_with_sender started - connecting to {}...",
+            self.server_addr
+        );
+
+        let connecting = self.endpoint.connect(self.server_addr, "relay")?;
+        let connection =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), connecting).await {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(e)) => {
+                    error!("❌ QUIC connection failed: {}", e);
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    error!("❌ QUIC connection timed out after 10s");
+                    return Err(anyhow::anyhow!("Connection timeout"));
+                }
+            };
+        info!("✅ QUIC handshake complete!");
+
+        // Open bidirectional stream for control messages
+        let (mut send, _recv) = connection.open_bi().await?;
+
+        // Send connect message
+        let connect_msg = RelayMessage::connect(self.connection_id);
+        let encoded = connect_msg.encode()?;
+        send.write_all(&encoded).await?;
+        self.metrics.record_sent(encoded.len() as u64);
+
+        info!("📡 QUIC relay ready for packet forwarding");
+        info!("📡 Datagram max size: {:?}", connection.max_datagram_size());
+
+        let mut forwarded_count: u64 = 0;
+        let mut failed_count: u64 = 0;
+        loop {
+            tokio::select! {
+                // Receive packets from TPROXY to forward through QUIC
+                Some(packet) = packet_rx.recv() => {
+                    let len = packet.len();
+                    forwarded_count += 1;
+
+                    if forwarded_count == 1 {
+                        info!("📥 First packet received from TPROXY: {} bytes", len);
+                    }
+
+                    // Send via QUIC datagram for lowest latency
+                    match connection.send_datagram(packet.into()) {
+                        Ok(_) => {
+                            self.metrics.record_sent(len as u64);
+                            if forwarded_count % 100 == 0 {
+                                info!("📤 Forwarded {} packets through QUIC ({} failed)", forwarded_count, failed_count);
+                            }
+                        }
+                        Err(e) => {
+                            failed_count += 1;
+                            if failed_count <= 3 {
+                                error!("❌ Datagram send failed: {} (packet {}, size {})", e, forwarded_count, len);
+                            }
+                        }
+                    }
+                }
+
+                // Receive datagrams from relay
+                Ok(datagram) = connection.read_datagram() => {
+                    self.metrics.record_received(datagram.len() as u64);
+                    // In full implementation, route back to original client
+                    debug!("Received {} bytes from relay", datagram.len());
+                }
+
+                // Connection closed
+                else => {
+                    info!("Connection closed");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn run(&self) -> Result<()> {
         loop {
             match self.connect_and_run().await {

@@ -395,7 +395,7 @@ pub async fn get_servers() -> Result<Vec<Server>, String> {
     let servers: Vec<Server> = api_response
         .servers
         .into_iter()
-        .filter(|s| s.status == "online")
+        .filter(|s| s.status == "online" || s.status == "maintenance")
         .map(|s| {
             let latency_ms = s.latency.trim_end_matches("ms").parse::<u32>().ok();
 
