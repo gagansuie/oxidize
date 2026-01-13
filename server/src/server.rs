@@ -65,7 +65,7 @@ impl RelayServer {
             // max_early_data_size controls 0-RTT data limit
             server_crypto.max_early_data_size = config.max_early_data_size;
             server_crypto.send_half_rtt_data = true; // Send data before handshake completes
-            
+
             // Anti-replay protection: rustls uses a built-in anti-replay mechanism
             // that tracks recently used tickets with a time-based window.
             // This is enabled by default when max_early_data_size > 0.
@@ -73,8 +73,11 @@ impl RelayServer {
             // 1. Single-use session tickets (default in rustls)
             // 2. Time-bounded ticket validity
             // 3. Connection ID binding in QUIC
-            
-            info!("🚀 0-RTT session resumption enabled (max_early_data: {} bytes)", config.max_early_data_size);
+
+            info!(
+                "🚀 0-RTT session resumption enabled (max_early_data: {} bytes)",
+                config.max_early_data_size
+            );
             info!("🛡️  Anti-replay protection: rustls built-in + QUIC connection ID binding");
         } else {
             server_crypto.max_early_data_size = 0; // Disable 0-RTT

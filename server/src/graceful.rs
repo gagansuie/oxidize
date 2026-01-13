@@ -244,7 +244,9 @@ pub async fn setup_signal_handlers(coordinator: Arc<ShutdownCoordinator>) {
 pub async fn setup_signal_handlers(coordinator: Arc<ShutdownCoordinator>) {
     // On Windows, only handle Ctrl+C
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Failed to register Ctrl+C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to register Ctrl+C handler");
         info!("📥 Received Ctrl+C");
         coordinator.shutdown().await;
         std::process::exit(0);

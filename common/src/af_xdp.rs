@@ -350,15 +350,15 @@ impl XdpSocket {
     }
 
     /// Poll for incoming packets (non-blocking)
-    /// 
+    ///
     /// Note: Full AF_XDP support requires the `xdp` feature flag and Linux kernel 5.4+.
     /// Without the feature, this returns an empty vec (graceful degradation).
     #[cfg(feature = "xdp")]
     pub fn poll_rx(&mut self, max_packets: usize) -> io::Result<Vec<XdpPacket>> {
         use xsk_rs::Umem;
-        
+
         let mut packets = Vec::with_capacity(max_packets);
-        
+
         // Poll the RX ring for incoming packets
         // Real implementation uses xsk-rs socket polling
         if let Some(ref mut socket) = self.socket {
@@ -372,7 +372,9 @@ impl XdpSocket {
                             queue_id: self.config.queue_id,
                         });
                         self.stats.rx_packets.fetch_add(1, Ordering::Relaxed);
-                        self.stats.rx_bytes.fetch_add(frame.len() as u64, Ordering::Relaxed);
+                        self.stats
+                            .rx_bytes
+                            .fetch_add(frame.len() as u64, Ordering::Relaxed);
                     }
                     Err(_) => break, // No more packets available
                 }

@@ -296,7 +296,8 @@ impl RelayClient {
         if self.config.enable_multipath {
             let mut mp = self.multipath.lock().await;
             // Create path ID from local and remote addresses
-            let local_addr = connection.local_ip()
+            let local_addr = connection
+                .local_ip()
                 .map(|ip| SocketAddr::new(ip, 0))
                 .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
             let path_id = PathId::new(local_addr, self.server_addr);
@@ -926,7 +927,8 @@ impl RelayClient {
             )
         } else {
             // AI engine disabled - use simple threshold-based compression
-            self.config.enable_compression && message.payload.len() >= self.config.compression_threshold
+            self.config.enable_compression
+                && message.payload.len() >= self.config.compression_threshold
         };
 
         if should_compress_packet {

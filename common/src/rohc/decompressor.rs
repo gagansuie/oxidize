@@ -225,12 +225,20 @@ impl RohcDecompressor {
 
         // Extract context data to avoid borrow issues
         let ctx_data = {
-            let ctx = self.contexts.get_mut(&cid)
+            let ctx = self
+                .contexts
+                .get_mut(&cid)
                 .ok_or_else(|| anyhow!("IR-DYN requires existing context for CID {}", cid))?;
             ctx.packet_count += 1;
-            (ctx.src_addr, ctx.dst_addr, ctx.src_port, ctx.dst_port, ctx.protocol)
+            (
+                ctx.src_addr,
+                ctx.dst_addr,
+                ctx.src_port,
+                ctx.dst_port,
+                ctx.protocol,
+            )
         };
-        
+
         match profile {
             Profile::Udp | Profile::Ipv6Udp => {
                 // Dynamic chain for UDP: [ip_id:2][ttl:1][checksum:2]
@@ -248,8 +256,7 @@ impl RohcDecompressor {
                 }
                 self.packets_decompressed += 1;
                 self.build_udp_packet(
-                    ctx_data.0, ctx_data.1, ctx_data.2, ctx_data.3,
-                    ctx_data.4, ttl, ip_id, payload,
+                    ctx_data.0, ctx_data.1, ctx_data.2, ctx_data.3, ctx_data.4, ttl, ip_id, payload,
                 )
             }
             Profile::Ip => {
@@ -285,8 +292,7 @@ impl RohcDecompressor {
                 }
                 self.packets_decompressed += 1;
                 self.build_tcp_packet(
-                    ctx_data.0, ctx_data.1, ctx_data.2, ctx_data.3,
-                    ctx_data.4, ttl, ip_id, payload,
+                    ctx_data.0, ctx_data.1, ctx_data.2, ctx_data.3, ctx_data.4, ttl, ip_id, payload,
                 )
             }
             _ => Err(anyhow!("IR-DYN not supported for profile {:?}", profile)),

@@ -252,13 +252,15 @@ impl XdpServerHandler {
                 if let Ok(packets) = self.xdp_socket.poll_rx(64) {
                     for packet in packets {
                         self.stats.rx_packets.fetch_add(1, Ordering::Relaxed);
-                        self.stats.rx_bytes.fetch_add(packet.data.len() as u64, Ordering::Relaxed);
+                        self.stats
+                            .rx_bytes
+                            .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
                         // Forward to QUIC processing
                         let _ = _quic_tx.send((self.local_addr, packet.data)).await;
                     }
                 }
             }
-            
+
             #[cfg(not(feature = "xdp"))]
             {
                 // Fallback: brief yield to allow other tasks

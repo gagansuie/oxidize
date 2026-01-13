@@ -8,7 +8,9 @@ pub enum TlsConfig {
     FromFiles { cert_path: String, key_path: String },
 }
 
-pub fn load_tls_config(config: TlsConfig) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+pub fn load_tls_config(
+    config: TlsConfig,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     match config {
         TlsConfig::SelfSigned => generate_self_signed_cert(),
         TlsConfig::FromFiles {
@@ -28,7 +30,10 @@ fn generate_self_signed_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateK
     Ok((vec![cert_der], key))
 }
 
-fn load_from_files(cert_path: &str, key_path: &str) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+fn load_from_files(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let cert_file = fs::File::open(cert_path)
         .context(format!("Failed to open certificate file: {}", cert_path))?;
     let mut cert_reader = std::io::BufReader::new(cert_file);

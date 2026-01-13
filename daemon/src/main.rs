@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Oxidize Daemon starting...");
-    
+
     // Detect platform and packet queue method
     match create_queue() {
         Ok(queue) => {
@@ -331,12 +331,12 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     let queue_task = tokio::task::spawn_blocking(move || {
         info!("📡 NFQUEUE capture started");
         let mut packet_count: u64 = 0;
-        
+
         loop {
             match queue.recv() {
                 Ok(packet) => {
                     packet_count += 1;
-                    
+
                     // Log periodically
                     if packet_count.is_multiple_of(100) {
                         info!("📦 Captured {} packets via NFQUEUE", packet_count);
@@ -359,7 +359,7 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
                 }
             }
         }
-        
+
         info!("NFQUEUE capture ended ({} packets)", packet_count);
     });
 
@@ -499,8 +499,8 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
 /// Windows named pipe listener for IPC
 #[cfg(windows)]
 async fn run_windows_listener(state: Arc<Mutex<DaemonState>>) -> Result<()> {
-    use tokio::net::windows::named_pipe::{ServerOptions, PipeMode};
-    
+    use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+
     info!("Daemon listening on {}", PIPE_NAME);
 
     loop {
@@ -511,7 +511,10 @@ async fn run_windows_listener(state: Arc<Mutex<DaemonState>>) -> Result<()> {
             .context("Failed to create named pipe")?;
 
         // Wait for a client to connect
-        server.connect().await.context("Failed to accept pipe connection")?;
+        server
+            .connect()
+            .await
+            .context("Failed to accept pipe connection")?;
 
         let state = state.clone();
         tokio::spawn(async move {
@@ -529,7 +532,7 @@ async fn handle_windows_client(
     state: Arc<Mutex<DaemonState>>,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    
+
     let (reader, mut writer) = tokio::io::split(pipe);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();

@@ -117,40 +117,45 @@ impl EbpfLoader {
         {
             use aya::programs::{Xdp, XdpFlags};
             use aya::Bpf;
-            
+
             // Load compiled eBPF bytecode
-            let mut bpf = Bpf::load(include_bytes_aligned!(
-                concat!(env!("OUT_DIR"), "/oxidize-xdp")
-            )).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            
-            let program: &mut Xdp = bpf.program_mut("oxidize_xdp")
+            let mut bpf = Bpf::load(include_bytes_aligned!(concat!(
+                env!("OUT_DIR"),
+                "/oxidize-xdp"
+            )))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            let program: &mut Xdp = bpf
+                .program_mut("oxidize_xdp")
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDP program not found"))?
                 .try_into()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
-            
-            program.load()
+
+            program
+                .load()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            
+
             let flags = match self.mode {
                 XdpAttachMode::Generic => XdpFlags::SKB_MODE,
                 XdpAttachMode::Native => XdpFlags::DRV_MODE,
                 XdpAttachMode::Offload => XdpFlags::HW_MODE,
             };
-            
-            program.attach(&self.interface, flags)
+
+            program
+                .attach(&self.interface, flags)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            
+
             info!("XDP program loaded and attached to {}", self.interface);
             Ok(program.fd().unwrap().as_raw_fd())
         }
-        
+
         #[cfg(not(feature = "xdp"))]
         {
             // XDP requires the `xdp` feature flag and Linux kernel 4.18+
             warn!("XDP support requires the `xdp` feature flag - enable with: cargo build --features xdp");
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "XDP requires the `xdp` feature flag"
+                "XDP requires the `xdp` feature flag",
             ))
         }
     }
