@@ -37,9 +37,33 @@ QUIC provides inherent DDoS resistance:
 All traffic is encrypted with TLS 1.3:
 - Perfect forward secrecy
 - No downgrade attacks
-- Fast handshakes (0-RTT resumption)
+- Fast handshakes (0-RTT resumption when enabled)
 
-### 3. Rate Limiting
+### 3. 0-RTT Security Considerations
+
+0-RTT session resumption is **disabled by default** for security:
+
+```toml
+# Client config
+enable_0rtt = false  # Default: disabled for security
+
+# Server config  
+enable_0rtt = false  # Default: disabled
+max_early_data_size = 16384  # 16KB when enabled
+```
+
+**Why 0-RTT is disabled by default:**
+- 0-RTT data is vulnerable to **replay attacks**
+- An attacker can capture and re-send 0-RTT data
+- For VPN tunnels, this is usually safe (inner protocols have replay protection)
+- Enable only if you understand the risks and need lowest latency
+
+**When to enable 0-RTT:**
+- Gaming/VoIP where latency is critical
+- When inner protocols (TCP, game protocols) handle replay protection
+- When you trust your network path
+
+### 4. Rate Limiting
 
 Per-IP connection and packet limits:
 
@@ -53,7 +77,7 @@ rate_limit_window_secs = 60
 auto_block_threshold = 10  # Violations before auto-block
 ```
 
-### 4. Security Manager
+### 5. Security Manager
 
 ```rust
 use oxidize_common::security::{SecurityManager, SecurityConfig};

@@ -106,11 +106,16 @@ impl IpPool {
 
 /// Packet forwarder for sending decrypted packets to destinations
 struct PacketForwarder {
+    #[cfg(unix)]
     raw_socket_v4: Option<std::os::unix::io::RawFd>,
+    #[cfg(unix)]
     raw_socket_v6: Option<std::os::unix::io::RawFd>,
+    #[cfg(not(unix))]
+    _phantom: std::marker::PhantomData<()>,
 }
 
 impl PacketForwarder {
+    #[cfg(unix)]
     fn new() -> Self {
         let raw_socket_v4 = Self::create_raw_socket_v4();
         let raw_socket_v6 = Self::create_raw_socket_v6();
@@ -128,6 +133,15 @@ impl PacketForwarder {
         }
     }
 
+    #[cfg(not(unix))]
+    fn new() -> Self {
+        warn!("Raw socket forwarding not available on this platform");
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    #[cfg(unix)]
     fn create_raw_socket_v4() -> Option<std::os::unix::io::RawFd> {
         use std::os::unix::io::IntoRawFd;
         match socket2::Socket::new(
@@ -152,6 +166,7 @@ impl PacketForwarder {
         }
     }
 
+    #[cfg(unix)]
     fn create_raw_socket_v6() -> Option<std::os::unix::io::RawFd> {
         use std::os::unix::io::IntoRawFd;
         match socket2::Socket::new(
@@ -171,6 +186,7 @@ impl PacketForwarder {
     }
 
     /// Forward an IPv4 packet to its destination
+    #[cfg(unix)]
     async fn forward_ipv4(&self, packet: &[u8], dest: Ipv4Addr) -> Result<()> {
         if packet.len() < 20 {
             return Err(anyhow::anyhow!("IPv4 packet too short"));
@@ -186,8 +202,8 @@ impl PacketForwarder {
                     packet.as_ptr() as *const libc::c_void,
                     packet.len(),
                     0,
-                    dest_addr.as_ptr(),
-                    dest_addr.len(),
+                    dest_addr.as_ptr() as *const libc::sockaddr,
+                    dest_addr.len() as libc::socklen_t,
                 )
             };
 
@@ -208,7 +224,16 @@ impl PacketForwarder {
         }
     }
 
+    #[cfg(not(unix))]
+    async fn forward_ipv4(&self, packet: &[u8], dest: Ipv4Addr) -> Result<()> {
+        if packet.len() < 20 {
+            return Err(anyhow::anyhow!("IPv4 packet too short"));
+        }
+        self.forward_via_udp_relay(packet, IpAddr::V4(dest)).await
+    }
+
     /// Forward an IPv6 packet to its destination  
+    #[cfg(unix)]
     async fn forward_ipv6(&self, packet: &[u8], dest: Ipv6Addr) -> Result<()> {
         if packet.len() < 40 {
             return Err(anyhow::anyhow!("IPv6 packet too short"));
@@ -223,8 +248,8 @@ impl PacketForwarder {
                     packet.as_ptr() as *const libc::c_void,
                     packet.len(),
                     0,
-                    dest_addr.as_ptr(),
-                    dest_addr.len(),
+                    dest_addr.as_ptr() as *const libc::sockaddr,
+                    dest_addr.len() as libc::socklen_t,
                 )
             };
 
@@ -243,6 +268,14 @@ impl PacketForwarder {
         } else {
             self.forward_via_udp_relay(packet, IpAddr::V6(dest)).await
         }
+    }
+
+    #[cfg(not(unix))]
+    async fn forward_ipv6(&self, packet: &[u8], dest: Ipv6Addr) -> Result<()> {
+        if packet.len() < 40 {
+            return Err(anyhow::anyhow!("IPv6 packet too short"));
+        }
+        self.forward_via_udp_relay(packet, IpAddr::V6(dest)).await
     }
 
     /// Fallback: extract transport layer info and relay via UDP/TCP
@@ -323,6 +356,7 @@ impl PacketForwarder {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PacketForwarder {
     fn drop(&mut self) {
         if let Some(fd) = self.raw_socket_v4 {

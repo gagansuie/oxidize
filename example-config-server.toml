@@ -65,6 +65,21 @@ enable_rohc = true
 # Maximum packet size for ROHC compression (bytes)
 rohc_max_size = 1500
 
+# === 0-RTT Session Resumption ===
+# Enable 0-RTT for faster client reconnects (saves ~1 RTT)
+# WARNING: 0-RTT is vulnerable to replay attacks. Only enable if you understand the risks.
+# For VPN tunnels, this is generally safe as inner protocols handle replay protection.
+enable_0rtt = false
+
+# Maximum early data size in bytes for 0-RTT (default 16KB)
+# Only used if enable_0rtt = true
+max_early_data_size = 16384
+
+# === AI/Heuristic Engine ===
+# Enable AI-powered compression decisions using ML models
+# When disabled, uses simple threshold-based compression
+enable_ai_engine = true
+
 # ============================================
 # Performance Optimizations (Always Enabled)
 # ============================================

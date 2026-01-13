@@ -56,7 +56,10 @@ rohc_max_size = 1500
 
 # Enable 0-RTT session resumption for instant reconnects
 # Saves ~1 RTT on reconnection by caching session tickets
-enable_0rtt = true
+# WARNING: 0-RTT is vulnerable to replay attacks. Only enable if you understand the risks.
+# For VPN tunnels, this is generally safe as inner protocols handle replay protection.
+# Set to true for lowest latency, false (default) for maximum security.
+enable_0rtt = false
 
 # Path to session ticket cache file
 session_cache_path = "/tmp/oxidize-session-cache"

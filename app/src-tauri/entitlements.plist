@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow network client connections -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    
+    <!-- Allow network server (listening) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+    
+    <!-- Allow reading user-selected files -->
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+    
+    <!-- Allow outgoing connections (for QUIC relay) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    
+    <!-- System extension for packet capture (requires notarization) -->
+    <key>com.apple.developer.system-extension.install</key>
+    <true/>
+    
+    <!-- Network extension for packet filtering -->
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+        <string>content-filter-provider</string>
+    </array>
+</dict>
+</plist>

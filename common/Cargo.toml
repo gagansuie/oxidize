@@ -51,3 +51,9 @@ aya-log = { workspace = true, optional = true }     # eBPF logging
 xsk-rs = { workspace = true, optional = true }      # AF_XDP zero-copy sockets
 libbpf-rs = { workspace = true, optional = true }   # eBPF bindings
 nix = "0.27"  # Unix utilities
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windivert = { version = "0.6", features = ["vendored"] }  # WinDivert packet capture
+
+[dev-dependencies]
+criterion = "0.5"

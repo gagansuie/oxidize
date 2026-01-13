@@ -27,6 +27,7 @@ pub mod traffic_classifier;
 pub mod udp_batch;
 pub mod zero_copy;
 
+pub mod packet_capture;
 pub mod rohc;
 
 #[cfg(target_os = "linux")]

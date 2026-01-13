@@ -102,7 +102,7 @@ fn default_enable_header_compression() -> bool {
 }
 
 fn default_enable_0rtt() -> bool {
-    true
+    false // Disabled by default for security - user must opt-in
 }
 
 fn default_session_cache_path() -> String {
@@ -187,7 +187,7 @@ impl Default for ClientConfig {
             enable_rohc: true,
             rohc_max_size: 1500,
             bypass_domains: vec![],
-            enable_0rtt: default_enable_0rtt(),
+            enable_0rtt: false,
             session_cache_path: default_session_cache_path(),
             enable_datagrams: default_enable_datagrams(),
             datagram_latency_threshold_ms: default_datagram_latency_threshold_ms(),

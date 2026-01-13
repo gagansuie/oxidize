@@ -203,6 +203,7 @@ pub fn create_reuseport_socket(addr: SocketAddr) -> std::io::Result<std::net::Ud
 }
 
 /// Setup signal handlers for graceful shutdown
+#[cfg(unix)]
 pub async fn setup_signal_handlers(coordinator: Arc<ShutdownCoordinator>) {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -234,6 +235,18 @@ pub async fn setup_signal_handlers(coordinator: Arc<ShutdownCoordinator>) {
         sigquit.recv().await;
         info!("📥 Received SIGQUIT (graceful)");
         coordinator_quit.shutdown().await;
+        std::process::exit(0);
+    });
+}
+
+/// Setup signal handlers for graceful shutdown (Windows version)
+#[cfg(not(unix))]
+pub async fn setup_signal_handlers(coordinator: Arc<ShutdownCoordinator>) {
+    // On Windows, only handle Ctrl+C
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to register Ctrl+C handler");
+        info!("📥 Received Ctrl+C");
+        coordinator.shutdown().await;
         std::process::exit(0);
     });
 }

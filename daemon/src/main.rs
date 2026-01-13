@@ -1,18 +1,26 @@
 use anyhow::{Context, Result};
+use oxidize_common::packet_capture::{create_queue, QueueConfig, Verdict};
 use relay_client::{ClientConfig, RelayClient};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+
+#[cfg(unix)]
 const SOCKET_PATH: &str = "/var/run/oxidize/daemon.sock";
 const RELAY_HOST: &str = "relay.oxd.sh";
 const RELAY_PORT: u16 = 4433;
+
+/// Cross-platform IPC path
+#[cfg(windows)]
+const PIPE_NAME: &str = r"\\.\pipe\oxidize-daemon";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -36,13 +44,14 @@ struct DaemonState {
     connected: bool,
     server_id: Option<String>,
     client_task: Option<tokio::task::JoinHandle<()>>,
+    queue_task: Option<tokio::task::JoinHandle<()>>,
     metrics: Option<oxidize_common::RelayMetrics>,
     connected_at: Option<std::time::Instant>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging - include relay_client crate for XDP mode logs
+    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -52,7 +61,56 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Oxidize Daemon starting...");
+    
+    // Detect platform and packet queue method
+    match create_queue() {
+        Ok(queue) => {
+            info!("📦 Packet queue: {}", queue.platform_name());
+        }
+        Err(e) => {
+            warn!("⚠️  Packet queue not available: {}", e);
+            warn!("   The daemon will still run but cannot intercept traffic");
+        }
+    }
 
+    let state = Arc::new(Mutex::new(DaemonState::default()));
+
+    // Spawn signal handler for graceful shutdown
+    let shutdown_state = state.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        warn!("Shutdown signal received, cleaning up...");
+
+        // Abort client and queue tasks
+        let mut state_guard = shutdown_state.lock().await;
+        if let Some(task) = state_guard.client_task.take() {
+            task.abort();
+        }
+        if let Some(task) = state_guard.queue_task.take() {
+            task.abort();
+        }
+        drop(state_guard);
+
+        info!("Cleanup complete, exiting");
+        std::process::exit(0);
+    });
+
+    // Platform-specific IPC listener
+    #[cfg(unix)]
+    {
+        run_unix_listener(state).await?;
+    }
+
+    #[cfg(windows)]
+    {
+        run_windows_listener(state).await?;
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_unix_listener(state: Arc<Mutex<DaemonState>>) -> Result<()> {
     // Create socket directory
     let socket_dir = Path::new(SOCKET_PATH).parent().unwrap();
     if !socket_dir.exists() {
@@ -75,28 +133,6 @@ async fn main() -> Result<()> {
     .context("Failed to set socket permissions")?;
 
     info!("Daemon listening on {}", SOCKET_PATH);
-
-    let state = Arc::new(Mutex::new(DaemonState::default()));
-
-    // Spawn signal handler for graceful shutdown
-    let shutdown_state = state.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        warn!("Shutdown signal received, cleaning up...");
-
-        // Abort client task if running
-        let mut state_guard = shutdown_state.lock().await;
-        if let Some(task) = state_guard.client_task.take() {
-            task.abort();
-        }
-        drop(state_guard);
-
-        // Cleanup NFQUEUE on shutdown
-        cleanup_nfqueue_rules();
-
-        info!("Cleanup complete, exiting");
-        std::process::exit(0);
-    });
 
     loop {
         match listener.accept().await {
@@ -140,6 +176,7 @@ async fn shutdown_signal() {
     }
 }
 
+#[cfg(unix)]
 async fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -234,31 +271,106 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
 
     let metrics = client.get_metrics().clone();
 
-    // Setup NFQUEUE for packet capture
-    info!("Setting up NFQUEUE packet capture...");
-    setup_nfqueue_rules();
+    // Setup cross-platform NFQUEUE-style packet queue
+    let mut queue = match create_queue() {
+        Ok(q) => q,
+        Err(e) => {
+            warn!("Packet queue not available: {}", e);
+            warn!("Running without packet interception");
+            let task = tokio::spawn(async move {
+                info!("🚀 Starting relay client (no packet queue)...");
+                if let Err(e) = client.run().await {
+                    error!("Client error: {}", e);
+                }
+            });
 
-    // Create channel for NFQUEUE packets -> QUIC
-    let (packet_tx, packet_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
-    let forward_metrics = metrics.clone();
+            state_guard.connected = true;
+            state_guard.server_id = Some(server_id.clone());
+            state_guard.client_task = Some(task);
+            state_guard.metrics = Some(metrics);
+            state_guard.connected_at = Some(std::time::Instant::now());
 
-    // Spawn NFQUEUE capture task (runs in blocking thread)
-    let nfq_tx = packet_tx.clone();
-    let nfq_metrics = forward_metrics.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = run_nfqueue_capture(nfq_tx, nfq_metrics) {
-            error!("NFQUEUE capture error: {}", e);
+            return DaemonResponse {
+                success: true,
+                message: format!("Connected to {} (no packet queue)", server_addr),
+                data: Some(serde_json::json!({
+                    "server_id": server_id,
+                    "server_addr": server_addr.to_string(),
+                    "packet_queue": false,
+                })),
+            };
         }
+    };
+
+    let platform = queue.platform_name().to_string();
+    let platform_clone = platform.clone();
+    info!("📦 Setting up NFQUEUE: {}", platform);
+
+    // Configure queue
+    let queue_config = QueueConfig {
+        queue_num: 0,
+        exclude_ports: vec![RELAY_PORT],
+        exclude_ips: vec![server_addr.ip()],
+        ..Default::default()
+    };
+
+    // Bind to queue
+    if let Err(e) = queue.bind(queue_config) {
+        error!("Failed to bind packet queue: {}", e);
+        return DaemonResponse {
+            success: false,
+            message: format!("Failed to bind packet queue: {}", e),
+            data: None,
+        };
+    }
+
+    // Create channel for packets -> QUIC
+    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
+
+    // Spawn queue reading task (blocking, runs in separate thread)
+    let queue_task = tokio::task::spawn_blocking(move || {
+        info!("📡 NFQUEUE capture started");
+        let mut packet_count: u64 = 0;
+        
+        loop {
+            match queue.recv() {
+                Ok(packet) => {
+                    packet_count += 1;
+                    
+                    // Log periodically
+                    if packet_count.is_multiple_of(100) {
+                        info!("📦 Captured {} packets via NFQUEUE", packet_count);
+                    }
+
+                    // Send packet data to QUIC channel
+                    let data = packet.data.clone();
+                    let _ = raw_tx.blocking_send(data);
+
+                    // Accept the packet (forward it normally)
+                    if let Err(e) = queue.set_verdict(packet.id, Verdict::Accept) {
+                        error!("Failed to set verdict: {}", e);
+                    }
+                }
+                Err(e) => {
+                    if !queue.is_bound() {
+                        break;
+                    }
+                    error!("Queue recv error: {}", e);
+                }
+            }
+        }
+        
+        info!("NFQUEUE capture ended ({} packets)", packet_count);
     });
 
     // Spawn client task with packet forwarding
     let task = tokio::spawn(async move {
         info!("🚀 Starting HIGH-PERFORMANCE relay client...");
-        info!("   ├─ NFQUEUE packet capture: enabled");
+        info!("   ├─ Packet queue: {}", platform_clone);
         info!("   ├─ QUIC datagrams: enabled");
         info!("   └─ Zero-copy forwarding: enabled");
 
-        if let Err(e) = client.run_with_sender(packet_rx).await {
+        if let Err(e) = client.run_with_sender(raw_rx).await {
             error!("Client error: {}", e);
         }
         info!("Client task ended");
@@ -267,16 +379,18 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     state_guard.connected = true;
     state_guard.server_id = Some(server_id.clone());
     state_guard.client_task = Some(task);
+    state_guard.queue_task = Some(queue_task);
     state_guard.metrics = Some(metrics);
     state_guard.connected_at = Some(std::time::Instant::now());
 
     DaemonResponse {
         success: true,
-        message: format!("Connected to {} (NFQUEUE enabled)", server_addr),
+        message: format!("Connected to {} ({})", server_addr, platform),
         data: Some(serde_json::json!({
             "server_id": server_id,
             "server_addr": server_addr.to_string(),
-            "nfqueue_enabled": true,
+            "packet_queue": true,
+            "platform": platform,
         })),
     }
 }
@@ -298,8 +412,11 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         info!("Client task aborted");
     }
 
-    // Cleanup NFQUEUE rules
-    cleanup_nfqueue_rules();
+    // Abort the queue task
+    if let Some(task) = state_guard.queue_task.take() {
+        task.abort();
+        info!("Queue task aborted");
+    }
 
     let uptime = state_guard
         .connected_at
@@ -379,126 +496,67 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     }
 }
 
-/// Setup iptables rules to send UDP packets to NFQUEUE
-fn setup_nfqueue_rules() {
-    info!("Setting up NFQUEUE iptables rules...");
-
-    // Clean up existing rules
-    let cleanup = vec![
-        "iptables -D OUTPUT -p udp -m owner ! --uid-owner 0 -j NFQUEUE --queue-num 0 2>/dev/null || true",
-        "iptables -D OUTPUT -p udp --dport 4433 -j ACCEPT 2>/dev/null || true",
-    ];
-
-    for rule in &cleanup {
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-    }
-
-    // Setup NFQUEUE rules
-    // Key: Exclude our QUIC traffic (port 4433), capture everything else
-    let rules = vec![
-        // Allow our QUIC tunnel traffic (don't capture it)
-        "iptables -I OUTPUT -p udp --dport 4433 -j ACCEPT",
-        // Send all other outgoing UDP to NFQUEUE 0
-        "iptables -A OUTPUT -p udp -m owner ! --uid-owner 0 -j NFQUEUE --queue-num 0 --queue-bypass",
-    ];
-
-    for rule in &rules {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
-                debug!("Applied rule: {}", rule);
-            }
-            Ok(o) => {
-                warn!(
-                    "Rule failed: {} - {}",
-                    rule,
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => {
-                error!("Failed to run rule: {} - {}", rule, e);
-            }
-        }
-    }
-
-    info!("✅ NFQUEUE rules configured (queue 0)");
-}
-
-/// Cleanup NFQUEUE rules
-#[allow(dead_code)]
-fn cleanup_nfqueue_rules() {
-    let rules = vec![
-        "iptables -D OUTPUT -p udp -m owner ! --uid-owner 0 -j NFQUEUE --queue-num 0 --queue-bypass 2>/dev/null || true",
-        "iptables -D OUTPUT -p udp --dport 4433 -j ACCEPT 2>/dev/null || true",
-    ];
-
-    for rule in &rules {
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(rule)
-            .output();
-    }
-
-    info!("NFQUEUE rules cleaned up");
-}
-
-/// Run NFQUEUE packet capture (blocking, runs in separate thread)
-fn run_nfqueue_capture(
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-    metrics: oxidize_common::RelayMetrics,
-) -> Result<()> {
-    use nfq::{Queue, Verdict};
-
-    info!("📡 Starting NFQUEUE capture on queue 0...");
-
-    let mut queue = Queue::open().context("Failed to open NFQUEUE")?;
-
-    queue.bind(0).context("Failed to bind to queue 0")?;
-
-    info!("✅ NFQUEUE bound to queue 0 - capturing packets");
-
-    let mut packet_count: u64 = 0;
+/// Windows named pipe listener for IPC
+#[cfg(windows)]
+async fn run_windows_listener(state: Arc<Mutex<DaemonState>>) -> Result<()> {
+    use tokio::net::windows::named_pipe::{ServerOptions, PipeMode};
+    
+    info!("Daemon listening on {}", PIPE_NAME);
 
     loop {
-        match queue.recv() {
-            Ok(mut msg) => {
-                packet_count += 1;
-                let payload = msg.get_payload();
-                let len = payload.len();
+        // Create a new pipe instance
+        let server = ServerOptions::new()
+            .pipe_mode(PipeMode::Message)
+            .create(PIPE_NAME)
+            .context("Failed to create named pipe")?;
 
-                // Record metrics
-                metrics.record_received(len as u64);
+        // Wait for a client to connect
+        server.connect().await.context("Failed to accept pipe connection")?;
 
-                // Log periodically
-                #[allow(clippy::manual_is_multiple_of)]
-                if packet_count % 100 == 0 {
-                    info!(
-                        "📦 Captured {} packets via NFQUEUE, last: {} bytes",
-                        packet_count, len
-                    );
-                }
-
-                // Send to QUIC channel (non-blocking try)
-                let packet = payload.to_vec();
-                if tx.blocking_send(packet).is_err() {
-                    warn!("QUIC channel full/closed");
-                }
-
-                // Accept the packet (let it through, we're just copying)
-                msg.set_verdict(Verdict::Accept);
-                queue.verdict(msg).ok();
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_windows_client(server, state).await {
+                error!("Client handler error: {}", e);
             }
-            Err(e) => {
-                if packet_count > 0 {
-                    debug!("NFQUEUE recv error: {}", e);
-                }
-            }
-        }
+        });
     }
+}
+
+/// Handle Windows named pipe client
+#[cfg(windows)]
+async fn handle_windows_client(
+    pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+    state: Arc<Mutex<DaemonState>>,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    
+    let (reader, mut writer) = tokio::io::split(pipe);
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    while reader.read_line(&mut line).await? > 0 {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            line.clear();
+            continue;
+        }
+
+        let response = match serde_json::from_str::<DaemonCommand>(trimmed) {
+            Ok(cmd) => handle_command(cmd, &state).await,
+            Err(e) => DaemonResponse {
+                success: false,
+                message: format!("Invalid command: {}", e),
+                data: None,
+            },
+        };
+
+        let response_json = serde_json::to_string(&response)?;
+        writer.write_all(response_json.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+
+        line.clear();
+    }
+
+    Ok(())
 }

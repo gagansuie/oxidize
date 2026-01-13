@@ -47,23 +47,35 @@
         "category": "Utility",
         "shortDescription": "AI-powered network acceleration",
         "longDescription": "Oxidize is an AI-powered network relay that learns your network patterns for optimal routing and performance.",
+        "resources": [
+            "../../target/release/oxidize-daemon*"
+        ],
         "linux": {
             "appimage": {
-                "bundleMediaFramework": false
+                "bundleMediaFramework": false,
+                "files": {
+                    "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
+                }
             },
             "deb": {
-                "depends": [],
+                "depends": ["libcap2-bin", "iptables"],
                 "files": {
                     "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
                 },
-                "postInstallScript": "scripts/postinstall.sh"
+                "postInstallScript": "scripts/postinstall.sh",
+                "preRemoveScript": "scripts/preremove.sh"
             },
             "rpm": {
-                "postInstallScript": "scripts/postinstall.sh"
+                "depends": ["libcap", "iptables"],
+                "files": {
+                    "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
+                },
+                "postInstallScript": "scripts/postinstall.sh",
+                "preRemoveScript": "scripts/preremove.sh"
             }
         },
         "macOS": {
-            "entitlements": null,
+            "entitlements": "entitlements.plist",
             "exceptionDomain": "",
             "frameworks": [],
             "minimumSystemVersion": "10.13",
@@ -72,7 +84,14 @@
         "windows": {
             "certificateThumbprint": null,
             "digestAlgorithm": "sha256",
-            "timestampUrl": ""
+            "timestampUrl": "",
+            "nsis": {
+                "installerIcon": "icons/icon.ico",
+                "headerImage": null,
+                "sidebarImage": null,
+                "installMode": "perMachine",
+                "installerHooks": "scripts/nsis-hooks.nsi"
+            }
         }
     },
     "plugins": {

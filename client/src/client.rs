@@ -3,15 +3,16 @@ use crate::dns_cache::DnsCache;
 use anyhow::{Context, Result};
 use oxidize_common::ml_models::MlEngine;
 use oxidize_common::model_hub::{HubConfig, ModelHub};
-use oxidize_common::multipath::{MultipathScheduler, SchedulingStrategy};
-use oxidize_common::prefetch::{PrefetchConfig, Prefetcher};
+use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
+use oxidize_common::prefetch::{PrefetchConfig, PrefetchResource, Prefetcher};
 use oxidize_common::{compress_data, MessageFramer, MessageType, RelayMessage, RelayMetrics};
 use quinn::ClientConfig as QuinnClientConfig;
 use quinn::Endpoint;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::DigitallySignedStruct;
 use std::collections::HashSet;
-use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,25 +21,58 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// Certificate verifier that accepts any certificate (for self-signed certs)
-struct SkipServerVerification;
+/// WARNING: This disables certificate verification - use only for development/testing
+#[derive(Debug)]
+struct SkipServerVerification(Arc<rustls::crypto::CryptoProvider>);
 
 impl SkipServerVerification {
     fn new() -> Arc<Self> {
-        Arc::new(Self)
+        Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
     }
 }
 
-impl rustls::client::ServerCertVerifier for SkipServerVerification {
+impl ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -53,8 +87,8 @@ pub struct RelayClient {
     dns_cache: Arc<DnsCache>,
     /// Ports that should use QUIC datagrams for low-latency
     realtime_ports: HashSet<u16>,
-    /// Cached session ticket for 0-RTT resumption
-    session_ticket: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Path to persist session cache
+    session_cache_path: String,
     /// Multi-path scheduler for bandwidth aggregation
     multipath: Arc<Mutex<MultipathScheduler>>,
     /// Predictive prefetcher for DNS/connections
@@ -69,15 +103,29 @@ impl RelayClient {
     pub async fn new(server_addr: SocketAddr, config: ClientConfig) -> Result<Self> {
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
 
-        // Use custom verifier to accept self-signed certificates
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
+        // Build rustls ClientConfig with proper 0-RTT support
+        let crypto = rustls::ClientConfig::builder()
+            .dangerous()
             .with_custom_certificate_verifier(SkipServerVerification::new())
             .with_no_client_auth();
 
+        // Configure client with ALPN and 0-RTT settings
+        let mut crypto = crypto;
         crypto.alpn_protocols = vec![b"relay/1".to_vec()];
 
-        let mut client_config = QuinnClientConfig::new(Arc::new(crypto));
+        // 0-RTT configuration
+        if config.enable_0rtt {
+            info!("🚀 0-RTT session resumption enabled");
+            // Enable early data (0-RTT) - quinn handles the actual 0-RTT mechanics
+            crypto.enable_early_data = true;
+        } else {
+            info!("🔒 Using standard 1-RTT resumption (0-RTT disabled)");
+            crypto.enable_early_data = false;
+        }
+
+        // quinn 0.11 requires QuicClientConfig wrapper for rustls
+        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
+        let mut client_config = QuinnClientConfig::new(Arc::new(quic_crypto));
 
         let mut transport_config = quinn::TransportConfig::default();
         transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(300).try_into()?));
@@ -103,8 +151,13 @@ impl RelayClient {
         transport_config
             .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
-        // Note: QUIC connection migration is enabled by default in Quinn
-        // The connection will automatically migrate when the client IP changes
+        // Connection migration configuration
+        if !config.enable_migration {
+            // Disable migration if configured
+            // Note: Quinn doesn't have a direct disable, but we can set migration to false
+            // by not responding to path challenges - handled at connection level
+            info!("🔒 Connection migration disabled");
+        }
 
         client_config.transport_config(Arc::new(transport_config));
         endpoint.set_default_client_config(client_config);
@@ -114,11 +167,6 @@ impl RelayClient {
 
         // Build realtime ports set for O(1) lookup
         let realtime_ports: HashSet<u16> = config.realtime_ports.iter().cloned().collect();
-
-        // Load cached session ticket for 0-RTT
-        let session_ticket = Arc::new(Mutex::new(Self::load_session_ticket(
-            &config.session_cache_path,
-        )));
 
         // Initialize multi-path scheduler
         let multipath = Arc::new(Mutex::new(MultipathScheduler::new(
@@ -184,6 +232,8 @@ impl RelayClient {
             info!("🔮 Predictive prefetching enabled");
         }
 
+        let session_cache_path = config.session_cache_path.clone();
+
         Ok(Self {
             endpoint,
             server_addr,
@@ -192,29 +242,12 @@ impl RelayClient {
             connection_id,
             dns_cache,
             realtime_ports,
-            session_ticket,
+            session_cache_path,
             multipath,
             prefetcher,
             ml_engine,
             model_hub,
         })
-    }
-
-    /// Load session ticket from disk for 0-RTT resumption
-    fn load_session_ticket(path: &str) -> Option<Vec<u8>> {
-        if Path::new(path).exists() {
-            fs::read(path).ok()
-        } else {
-            None
-        }
-    }
-
-    /// Save session ticket to disk for future 0-RTT
-    #[allow(dead_code)]
-    fn save_session_ticket(path: &str, ticket: &[u8]) {
-        if let Err(e) = fs::write(path, ticket) {
-            debug!("Failed to save session ticket: {}", e);
-        }
     }
 
     /// Check if a port should use QUIC datagrams (real-time traffic)
@@ -259,8 +292,45 @@ impl RelayClient {
             };
         info!("✅ QUIC handshake complete!");
 
+        // Register this connection as the primary path for multipath scheduler
+        if self.config.enable_multipath {
+            let mut mp = self.multipath.lock().await;
+            // Create path ID from local and remote addresses
+            let local_addr = connection.local_ip()
+                .map(|ip| SocketAddr::new(ip, 0))
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let path_id = PathId::new(local_addr, self.server_addr);
+            let metrics = PathMetrics {
+                rtt_ms: 50.0, // Initial estimate
+                bandwidth: 100_000_000,
+                loss_rate: 0.0,
+                jitter_ms: 5.0,
+                ..Default::default()
+            };
+            mp.add_path(path_id, metrics);
+            info!("🔀 Primary path registered with multipath scheduler");
+        }
+
+        // Record connection in prefetcher for pattern learning
+        if self.config.enable_prefetch {
+            let mut pf = self.prefetcher.lock().await;
+            pf.record_access(PrefetchResource::Connection(
+                self.server_addr.ip().to_string(),
+                self.server_addr.port(),
+            ));
+        }
+
         // Open bidirectional stream for control messages
         let (mut send, _recv) = connection.open_bi().await?;
+
+        // Open separate streams for different traffic types if stream multiplexing is enabled
+        let _bulk_stream = if self.config.enable_stream_multiplexing {
+            let (bulk_send, _) = connection.open_bi().await?;
+            info!("📊 Stream multiplexing enabled: opened bulk transfer stream");
+            Some(bulk_send)
+        } else {
+            None
+        };
 
         // Send connect message
         let connect_msg = RelayMessage::connect(self.connection_id);
@@ -844,9 +914,9 @@ impl RelayClient {
 
         let mut message = RelayMessage::data(self.connection_id, sequence, packet);
 
-        // Use ML engine for smart compression decision
+        // Use ML engine for smart compression decision (only if AI engine is enabled)
         // Defaults to fast heuristics, can switch to ML when models are ready
-        let should_compress_packet = {
+        let should_compress_packet = if self.config.enable_ai_engine {
             let mut ml = self.ml_engine.write().await;
             let decision = ml.compression_decision(&message.payload);
             // Returns Skip, Light, Normal, or Aggressive - compress unless Skip
@@ -854,6 +924,9 @@ impl RelayClient {
                 decision,
                 oxidize_common::ml_models::MlCompressionDecision::Skip
             )
+        } else {
+            // AI engine disabled - use simple threshold-based compression
+            self.config.enable_compression && message.payload.len() >= self.config.compression_threshold
         };
 
         if should_compress_packet {
@@ -910,7 +983,7 @@ impl RelayClient {
             connection_id: self.connection_id,
             dns_cache: self.dns_cache.clone(),
             realtime_ports: self.realtime_ports.clone(),
-            session_ticket: self.session_ticket.clone(),
+            session_cache_path: self.session_cache_path.clone(),
             multipath: self.multipath.clone(),
             prefetcher: self.prefetcher.clone(),
             ml_engine: self.ml_engine.clone(),

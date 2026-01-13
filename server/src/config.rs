@@ -68,6 +68,17 @@ pub struct Config {
     /// Enable AI-powered heuristic engine for smart compression/FEC
     #[serde(default = "default_enable_ai_engine")]
     pub enable_ai_engine: bool,
+
+    // === 0-RTT Session Resumption ===
+    /// Enable 0-RTT session resumption for faster reconnects
+    /// WARNING: 0-RTT is vulnerable to replay attacks. Only enable if you understand the risks.
+    /// For VPN tunnels, this is generally safe as inner protocols handle replay protection.
+    #[serde(default = "default_enable_0rtt")]
+    pub enable_0rtt: bool,
+
+    /// Maximum early data size in bytes for 0-RTT (default 16KB)
+    #[serde(default = "default_max_early_data_size")]
+    pub max_early_data_size: u32,
 }
 
 fn default_enable_wireguard() -> bool {
@@ -126,6 +137,14 @@ fn default_enable_ai_engine() -> bool {
     true
 }
 
+fn default_enable_0rtt() -> bool {
+    false // Disabled by default for security - user must opt-in
+}
+
+fn default_max_early_data_size() -> u32 {
+    16384 // 16KB - typical for QUIC
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -155,6 +174,8 @@ impl Default for Config {
             edge_cache_size: 64 * 1024 * 1024,
             edge_cache_entries: 10000,
             enable_ai_engine: true,
+            enable_0rtt: false,
+            max_early_data_size: 16384,
         }
     }
 }
