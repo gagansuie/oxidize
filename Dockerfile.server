@@ -39,7 +39,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/oxidize-server /app/
 
 # Copy default config if exists
-COPY --from=builder /app/example-config-server.toml /app/config.toml
+COPY example-config-server.toml /app/config.toml
 
 # Health check endpoint
 EXPOSE 9090
