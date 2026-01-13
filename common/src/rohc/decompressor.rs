@@ -212,9 +212,85 @@ impl RohcDecompressor {
     }
 
     /// Decompress IR-DYN packet
-    fn decompress_ir_dyn(&mut self, _compressed: &[u8]) -> Result<Vec<u8>> {
-        // For now, treat as error - context should exist
-        Err(anyhow!("IR-DYN not implemented - context missing"))
+    /// IR-DYN updates dynamic fields for an existing context
+    fn decompress_ir_dyn(&mut self, compressed: &[u8]) -> Result<Vec<u8>> {
+        // IR-DYN format: [0xF8][Profile][CID][dynamic_chain][payload]
+        if compressed.len() < 4 {
+            return Err(anyhow!("IR-DYN packet too short"));
+        }
+
+        let profile = Profile::from_u8(compressed[1])
+            .ok_or_else(|| anyhow!("Unknown profile: {}", compressed[1]))?;
+        let cid = compressed[2];
+
+        // Extract context data to avoid borrow issues
+        let ctx_data = {
+            let ctx = self.contexts.get_mut(&cid)
+                .ok_or_else(|| anyhow!("IR-DYN requires existing context for CID {}", cid))?;
+            ctx.packet_count += 1;
+            (ctx.src_addr, ctx.dst_addr, ctx.src_port, ctx.dst_port, ctx.protocol)
+        };
+        
+        match profile {
+            Profile::Udp | Profile::Ipv6Udp => {
+                // Dynamic chain for UDP: [ip_id:2][ttl:1][checksum:2]
+                if compressed.len() < 8 {
+                    return Err(anyhow!("IR-DYN UDP packet too short"));
+                }
+                let ip_id = u16::from_be_bytes([compressed[3], compressed[4]]);
+                let ttl = compressed[5];
+                let payload = &compressed[8..];
+
+                // Update context
+                if let Some(ctx) = self.contexts.get_mut(&cid) {
+                    ctx.last_ip_id = ip_id;
+                    ctx.last_ttl = ttl;
+                }
+                self.packets_decompressed += 1;
+                self.build_udp_packet(
+                    ctx_data.0, ctx_data.1, ctx_data.2, ctx_data.3,
+                    ctx_data.4, ttl, ip_id, payload,
+                )
+            }
+            Profile::Ip => {
+                // Dynamic chain for IP: [ip_id:2][ttl:1]
+                if compressed.len() < 6 {
+                    return Err(anyhow!("IR-DYN IP packet too short"));
+                }
+                let ip_id = u16::from_be_bytes([compressed[3], compressed[4]]);
+                let ttl = compressed[5];
+                let payload = &compressed[6..];
+
+                // Update context
+                if let Some(ctx) = self.contexts.get_mut(&cid) {
+                    ctx.last_ip_id = ip_id;
+                    ctx.last_ttl = ttl;
+                }
+                self.packets_decompressed += 1;
+                self.build_ip_packet(ctx_data.0, ctx_data.1, ctx_data.4, ttl, ip_id, payload)
+            }
+            Profile::Tcp | Profile::Ipv6Tcp => {
+                // Dynamic chain for TCP: [ip_id:2][ttl:1][seq_delta:4][ack_delta:4]
+                if compressed.len() < 14 {
+                    return Err(anyhow!("IR-DYN TCP packet too short"));
+                }
+                let ip_id = u16::from_be_bytes([compressed[3], compressed[4]]);
+                let ttl = compressed[5];
+                let payload = &compressed[14..];
+
+                // Update context
+                if let Some(ctx) = self.contexts.get_mut(&cid) {
+                    ctx.last_ip_id = ip_id;
+                    ctx.last_ttl = ttl;
+                }
+                self.packets_decompressed += 1;
+                self.build_tcp_packet(
+                    ctx_data.0, ctx_data.1, ctx_data.2, ctx_data.3,
+                    ctx_data.4, ttl, ip_id, payload,
+                )
+            }
+            _ => Err(anyhow!("IR-DYN not supported for profile {:?}", profile)),
+        }
     }
 
     /// Decompress UO-0 packet (minimal 1-byte header)

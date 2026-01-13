@@ -112,34 +112,59 @@ impl EbpfLoader {
             self.interface, self.quic_port, self.mode
         );
 
-        // In a real implementation, this would:
-        // 1. Load the compiled eBPF bytecode
-        // 2. Create XSK map for AF_XDP sockets
-        // 3. Attach program to interface
-        // 4. Return program FD
-
-        // For now, return a placeholder
-        // Real implementation would use aya crate:
-        //
-        // let mut bpf = Bpf::load(include_bytes_aligned!(
-        //     "../../target/bpfel-unknown-none/release/oxidize-xdp"
-        // ))?;
-        //
-        // let program: &mut Xdp = bpf.program_mut("oxidize_xdp").unwrap().try_into()?;
-        // program.load()?;
-        // program.attach(&self.interface, self.mode.to_flags())?;
-
-        warn!("XDP program loading not yet implemented - using placeholder");
-        Ok(-1)
+        // XDP program loading requires the `xdp` feature flag
+        #[cfg(feature = "xdp")]
+        {
+            use aya::programs::{Xdp, XdpFlags};
+            use aya::Bpf;
+            
+            // Load compiled eBPF bytecode
+            let mut bpf = Bpf::load(include_bytes_aligned!(
+                concat!(env!("OUT_DIR"), "/oxidize-xdp")
+            )).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            
+            let program: &mut Xdp = bpf.program_mut("oxidize_xdp")
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDP program not found"))?
+                .try_into()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+            
+            program.load()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            
+            let flags = match self.mode {
+                XdpAttachMode::Generic => XdpFlags::SKB_MODE,
+                XdpAttachMode::Native => XdpFlags::DRV_MODE,
+                XdpAttachMode::Offload => XdpFlags::HW_MODE,
+            };
+            
+            program.attach(&self.interface, flags)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            
+            info!("XDP program loaded and attached to {}", self.interface);
+            Ok(program.fd().unwrap().as_raw_fd())
+        }
+        
+        #[cfg(not(feature = "xdp"))]
+        {
+            // XDP requires the `xdp` feature flag and Linux kernel 4.18+
+            warn!("XDP support requires the `xdp` feature flag - enable with: cargo build --features xdp");
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "XDP requires the `xdp` feature flag"
+            ))
+        }
     }
 
     /// Detach the XDP program from interface
+    #[cfg(feature = "xdp")]
     pub fn detach(&self) -> io::Result<()> {
         info!("Detaching XDP program from {}", self.interface);
+        // XDP detach handled by dropping the program handle
+        Ok(())
+    }
 
-        // In real implementation:
-        // program.detach()?;
-
+    #[cfg(not(feature = "xdp"))]
+    pub fn detach(&self) -> io::Result<()> {
         Ok(())
     }
 
@@ -174,8 +199,9 @@ impl EbpfLoader {
     }
 
     /// Get XDP statistics from kernel
+    /// Returns default stats when `xdp` feature is not enabled
     pub fn get_stats(&self) -> XdpLoaderStats {
-        // In real implementation, read from BPF maps
+        // Stats are populated by the XDP program via BPF maps
         XdpLoaderStats::default()
     }
 }

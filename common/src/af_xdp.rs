@@ -350,15 +350,48 @@ impl XdpSocket {
     }
 
     /// Poll for incoming packets (non-blocking)
-    pub fn poll_rx(&mut self, _max_packets: usize) -> io::Result<Vec<XdpPacket>> {
-        // Placeholder - real implementation would use xsk-rs
-        let packets = Vec::new();
+    /// 
+    /// Note: Full AF_XDP support requires the `xdp` feature flag and Linux kernel 5.4+.
+    /// Without the feature, this returns an empty vec (graceful degradation).
+    #[cfg(feature = "xdp")]
+    pub fn poll_rx(&mut self, max_packets: usize) -> io::Result<Vec<XdpPacket>> {
+        use xsk_rs::Umem;
+        
+        let mut packets = Vec::with_capacity(max_packets);
+        
+        // Poll the RX ring for incoming packets
+        // Real implementation uses xsk-rs socket polling
+        if let Some(ref mut socket) = self.socket {
+            while packets.len() < max_packets {
+                match socket.recv() {
+                    Ok(frame) => {
+                        let data = frame.data().to_vec();
+                        packets.push(XdpPacket {
+                            data,
+                            timestamp: Instant::now(),
+                            queue_id: self.config.queue_id,
+                        });
+                        self.stats.rx_packets.fetch_add(1, Ordering::Relaxed);
+                        self.stats.rx_bytes.fetch_add(frame.len() as u64, Ordering::Relaxed);
+                    }
+                    Err(_) => break, // No more packets available
+                }
+            }
+        }
 
         if !packets.is_empty() {
             self.stats.rx_batches.fetch_add(1, Ordering::Relaxed);
         }
 
         Ok(packets)
+    }
+
+    /// Poll for incoming packets (non-blocking) - stub when xdp feature disabled
+    #[cfg(not(feature = "xdp"))]
+    pub fn poll_rx(&mut self, _max_packets: usize) -> io::Result<Vec<XdpPacket>> {
+        // AF_XDP requires the `xdp` feature flag
+        // Without it, gracefully return empty (use standard sockets instead)
+        Ok(Vec::new())
     }
 
     /// Process packets in a loop (blocking)

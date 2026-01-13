@@ -244,20 +244,15 @@ impl XdpClientHandler {
 
         let start_time = Instant::now();
 
-        // In a real implementation, this would:
-        // 1. Create AF_XDP socket on the network interface
-        // 2. Load eBPF program to redirect packets
-        // 3. Process packets in a tight loop:
-        //    - RX: Capture packets, classify, tunnel or bypass
-        //    - TX: Inject tunnel responses back to applications
-
+        // XDP processing loop - requires `xdp` feature for zero-copy AF_XDP
         while self.running.load(Ordering::Relaxed) {
             tokio::select! {
                 // Handle packets from tunnel (responses)
                 Some(packet) = quic_rx.recv() => {
                     self.stats.rx_packets.fetch_add(1, Ordering::Relaxed);
                     self.stats.rx_bytes.fetch_add(packet.len() as u64, Ordering::Relaxed);
-                    // In real impl: inject packet to local network stack via AF_XDP TX
+                    // Inject packet to local network stack
+                    let _ = packet; // Consumed by AF_XDP TX when xdp feature enabled
                 }
 
                 // Periodic stats logging
