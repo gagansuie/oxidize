@@ -1,4 +1,4 @@
-//! kTLS (Kernel TLS) Integration
+//! kTLS (Kernel TLS) Integration (Linux-only)
 //!
 //! Offloads TLS encryption/decryption to the Linux kernel for ~30% CPU reduction.
 //! Works with QUIC by offloading the underlying UDP socket encryption.
@@ -11,6 +11,8 @@
 //! ```text
 //! Application → kTLS Socket → Kernel TLS → NIC (hardware offload if supported)
 //! ```
+//!
+//! Note: This module is Linux-only. On other platforms, use standard TLS.
 
 use std::io;
 use std::os::unix::io::RawFd;

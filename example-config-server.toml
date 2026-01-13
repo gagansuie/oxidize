@@ -50,11 +50,10 @@ rate_limit_per_ip = 100
 # Rate limit time window in seconds
 rate_limit_window_secs = 60
 
-# WireGuard settings for mobile client compatibility
-# Generate keys with: ./oxidize-server --generate-wg-config
-enable_wireguard = false
-# wireguard_port = 51820
-# wireguard_private_key = "YOUR_PRIVATE_KEY_HERE"
+# Mobile Tunnel settings for mobile client compatibility
+# Generate config with: ./oxidize-server --generate-mobile-config
+enable_mobile_tunnel = false
+# mobile_tunnel_port = 51820
 
 # ROHC (Robust Header Compression) - RFC 3095
 # Compresses IP/UDP/TCP headers for bandwidth savings

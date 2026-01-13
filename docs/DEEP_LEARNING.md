@@ -1,6 +1,6 @@
-# 🤖 AI/ML Engine Documentation
+# 🧠 Deep Learning Driven Engine Documentation
 
-Oxidize includes a self-improving AI/ML engine built entirely in Rust. No Python runtime required.
+Oxidize includes a self-improving deep learning driven engine built entirely in Rust. Neural networks learn from your network traffic to predict and prevent issues before they happen. No Python runtime required.
 
 ## Overview
 
@@ -125,12 +125,22 @@ ML-based decision engine for compression strategy selection.
 
 ### Decision Types
 
-| Decision | When Used |
-|----------|-----------|
-| `Skip` | High entropy data (encrypted/compressed) |
-| `Light` | Medium entropy, time-sensitive |
-| `Aggressive` | Low entropy, large payload |
-| `RohcOnly` | Small packets with compressible headers |
+| Decision | When Used | Compression Mode |
+|----------|-----------|------------------|
+| `Skip` | High entropy data (encrypted/compressed) | None |
+| `Light` | Medium entropy, time-sensitive | LZ4 DEFAULT (~6 GB/s) |
+| `Aggressive` | Low entropy, large payload | LZ4 DEFAULT (~6 GB/s) |
+| `RohcOnly` | Small packets with compressible headers | ROHC only |
+
+### Compression Performance
+
+| Mode | Throughput | Use Case |
+|------|------------|----------|
+| **LZ4 DEFAULT** | ~6 GB/s | All compression (optimized for real-time) |
+| LZ4 HIGH | ~200 MB/s | ❌ Not used (30x slower, only ~5% better ratio) |
+| ROHC | Header-only | Small UDP/VoIP packets (44% reduction) |
+
+**Note:** We use LZ4 DEFAULT mode exclusively for real-time traffic. The HIGH compression mode provides only ~5% better compression ratio but is 30x slower - not worth it for network acceleration.
 
 ### Features Analyzed
 
@@ -150,8 +160,8 @@ let decision = engine.compression_decision(data);
 
 match decision {
     MlCompressionDecision::Skip => { /* don't compress */ }
-    MlCompressionDecision::Light => { /* fast LZ4 */ }
-    MlCompressionDecision::Aggressive => { /* high ratio LZ4 */ }
+    MlCompressionDecision::Light => { /* fast LZ4 DEFAULT */ }
+    MlCompressionDecision::Aggressive => { /* LZ4 DEFAULT */ }
     MlCompressionDecision::RohcOnly => { /* header compression only */ }
 }
 ```

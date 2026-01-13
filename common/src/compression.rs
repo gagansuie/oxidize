@@ -47,13 +47,10 @@ pub fn decompress_data(compressed: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Native LZ4 compression with size prepended (compatible with lz4_flex format)
+/// Uses DEFAULT mode (~6 GB/s) instead of HIGHCOMPRESSION (~200 MB/s) for real-time traffic
 fn compress_native(data: &[u8]) -> Result<Vec<u8>> {
-    // Use lz4 crate's block compression without prepending size (we do it ourselves)
-    let compressed = lz4::block::compress(
-        data,
-        Some(lz4::block::CompressionMode::HIGHCOMPRESSION(9)),
-        false,
-    )?;
+    // Use DEFAULT mode for speed - HIGHCOMPRESSION(9) is 30x slower and only ~5% better ratio
+    let compressed = lz4::block::compress(data, Some(lz4::block::CompressionMode::DEFAULT), false)?;
 
     // Prepend original size (4 bytes, little-endian) for compatibility with lz4_flex format
     let mut result = Vec::with_capacity(4 + compressed.len());

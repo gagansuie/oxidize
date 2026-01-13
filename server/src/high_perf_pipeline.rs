@@ -9,11 +9,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info};
+#[cfg(all(target_os = "linux", feature = "dpdk"))]
+use tracing::debug;
+use tracing::info;
 
 #[cfg(target_os = "linux")]
 use oxidize_common::bbr_v3::{BbrCongestionControl, BbrState};
-#[cfg(target_os = "linux")]
+// DPDK is feature-gated - only available with --features dpdk
+#[cfg(all(target_os = "linux", feature = "dpdk"))]
 use oxidize_common::dpdk::{DpdkConfig, DpdkPacket, DpdkProcessor};
 
 /// High-performance pipeline configuration
@@ -161,8 +164,10 @@ pub struct HighPerfPipeline {
     stats: Arc<PipelineStats>,
     running: Arc<AtomicBool>,
     start_time: Instant,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "dpdk"))]
     dpdk: Option<DpdkProcessor>,
+    #[cfg(all(target_os = "linux", not(feature = "dpdk")))]
+    dpdk: Option<()>,
     #[cfg(target_os = "linux")]
     bbr_controllers: Vec<BbrCongestionControl>,
 }
@@ -190,7 +195,7 @@ impl HighPerfPipeline {
             }
         );
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "dpdk"))]
         let dpdk = if !config.dpdk.pci_address.is_empty() {
             let dpdk_config = DpdkConfig {
                 pci_address: config.dpdk.pci_address.clone(),
@@ -205,6 +210,8 @@ impl HighPerfPipeline {
             info!("DPDK disabled - no PCI address configured");
             None
         };
+        #[cfg(all(target_os = "linux", not(feature = "dpdk")))]
+        let dpdk: Option<()> = None;
 
         #[cfg(target_os = "linux")]
         let bbr_controllers = (0..config.workers)
@@ -230,9 +237,14 @@ impl HighPerfPipeline {
     }
 
     /// Check if DPDK is available and configured
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "dpdk"))]
     pub fn dpdk_available(&self) -> bool {
         self.dpdk.is_some() && DpdkProcessor::is_available()
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "dpdk")))]
+    pub fn dpdk_available(&self) -> bool {
+        false
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -245,7 +257,7 @@ impl HighPerfPipeline {
         self.running.store(true, Ordering::SeqCst);
         self.start_time = Instant::now();
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "dpdk"))]
         if let Some(ref dpdk) = self.dpdk {
             dpdk.start();
         }
@@ -257,7 +269,7 @@ impl HighPerfPipeline {
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "dpdk"))]
         if let Some(ref dpdk) = self.dpdk {
             dpdk.stop();
         }
@@ -276,7 +288,7 @@ impl HighPerfPipeline {
     }
 
     /// Process a batch of packets (main hot path)
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "dpdk"))]
     pub fn process_batch(
         &mut self,
         worker_id: usize,
@@ -339,7 +351,7 @@ impl HighPerfPipeline {
     }
 
     /// Process a single packet
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "dpdk"))]
     fn process_single_packet(&self, mut packet: DpdkPacket) -> Option<DpdkPacket> {
         // Parse headers
         if !packet.parse_headers() {
@@ -428,9 +440,9 @@ impl PipelineIntegration {
     /// Check system capabilities
     pub fn check_capabilities() -> PipelineCapabilities {
         PipelineCapabilities {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "dpdk"))]
             dpdk_available: DpdkProcessor::is_available(),
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(all(target_os = "linux", feature = "dpdk")))]
             dpdk_available: false,
             #[cfg(target_os = "linux")]
             ktls_available: oxidize_common::ktls::KtlsSocket::is_available(),

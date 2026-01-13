@@ -7,9 +7,11 @@ use tracing::{info, warn};
 
 use relay_server::config::Config;
 use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
+use relay_server::mobile_server::{
+    generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
+};
 use relay_server::prometheus::PrometheusMetrics;
 use relay_server::server::RelayServer;
-use relay_server::wireguard::{generate_client_config, generate_server_config, WireGuardServer};
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-server")]
@@ -31,10 +33,10 @@ struct Args {
     disable_metrics: bool,
 
     #[arg(long)]
-    generate_wg_config: bool,
+    generate_mobile_config: bool,
 
     #[arg(long)]
-    wg_endpoint: Option<String>,
+    mobile_endpoint: Option<String>,
 }
 
 #[tokio::main]
@@ -53,30 +55,27 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    // Handle WireGuard config generation
-    if args.generate_wg_config {
+    // Handle mobile tunnel config generation
+    if args.generate_mobile_config {
         let endpoint = args
-            .wg_endpoint
+            .mobile_endpoint
             .unwrap_or_else(|| format!("{}:51820", args.listen.ip()));
 
-        info!("Generating WireGuard server configuration...");
-        let (private_key, public_key, _key_bytes) = generate_server_config()?;
+        info!("Generating Mobile Tunnel server configuration...");
+        let (server_id_hex, _, _server_id) = generate_server_config()?;
 
-        println!("\n=== WireGuard Server Configuration ===");
-        println!("Server Private Key: {}", private_key);
-        println!("Server Public Key: {}", public_key);
+        println!("\n=== Mobile Tunnel Server Configuration ===");
+        println!("Server ID: {}", server_id_hex);
         println!("\nAdd to your server config.toml:");
-        println!("[wireguard]");
-        println!("enable_wireguard = true");
-        println!("wireguard_port = 51820");
-        println!("wireguard_private_key = \"{}\"", private_key);
+        println!("[mobile_tunnel]");
+        println!("enable_mobile_tunnel = true");
+        println!("mobile_tunnel_port = 51820");
 
         println!("\n=== Client Configuration ===");
-        let client_config = generate_client_config(&endpoint, &public_key, None)?;
+        let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
         println!("{}", client_config);
 
-        println!("\nSave the client config to a file and import into WireGuard app,");
-        println!("or generate a QR code with: qrencode -t ansiutf8 < client.conf");
+        println!("\nSave the client config to a JSON file for mobile app import.");
 
         return Ok(());
     }
@@ -143,65 +142,46 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start WireGuard server if enabled
+    // Start Mobile Tunnel server if enabled
     let config_ref = server.config();
-    if config_ref.enable_wireguard {
-        let wg_port = config_ref.wireguard_port.unwrap_or(51820);
-        let wg_addr: SocketAddr = format!("0.0.0.0:{}", wg_port).parse()?;
+    if config_ref.enable_mobile_tunnel {
+        let mobile_port = config_ref.mobile_tunnel_port.unwrap_or(51820);
+        let mobile_addr: SocketAddr = format!("0.0.0.0:{}", mobile_port).parse()?;
 
-        // Auto-generate keys if not configured
-        let (private_key, public_key_b64) =
-            if let Some(ref private_key_b64) = config_ref.wireguard_private_key {
-                use base64::{engine::general_purpose, Engine as _};
-                let key_bytes = general_purpose::STANDARD.decode(private_key_b64)?;
-                let mut pk = [0u8; 32];
-                pk.copy_from_slice(&key_bytes);
-
-                // Derive public key for display
-                use boringtun::x25519;
-                let secret = x25519::StaticSecret::from(pk);
-                let public = x25519::PublicKey::from(&secret);
-                let pub_b64 = general_purpose::STANDARD.encode(public.as_bytes());
-
-                (pk, pub_b64)
-            } else {
-                // Auto-generate new keys
-                info!("🔑 Auto-generating WireGuard keys...");
-                let (private_b64, public_b64, private_key) = generate_server_config()?;
-
-                info!("╔════════════════════════════════════════════════════════════════╗");
-                info!("║              WireGuard Auto-Generated Keys                      ║");
-                info!("╠════════════════════════════════════════════════════════════════╣");
-                info!("║ Add to config.toml to persist:                                 ║");
-                info!("║ wireguard_private_key = \"{}\"  ║", private_b64);
-                info!("╚════════════════════════════════════════════════════════════════╝");
-
-                (private_key, public_b64)
-            };
-
-        let wg_server = WireGuardServer::new(wg_addr, private_key).await?;
-        info!("📱 WireGuard server listening on {}", wg_addr);
-
-        // Auto-display client config for mobile users
-        let endpoint = format!("{}:{}", args.listen.ip(), wg_port);
-        let client_config = generate_client_config(&endpoint, &public_key_b64, None)?;
+        // Generate server ID
+        let (server_id_hex, _, _) = generate_server_config()?;
 
         info!("╔════════════════════════════════════════════════════════════════╗");
-        info!("║              WireGuard Mobile Client Config                     ║");
+        info!("║           Mobile Tunnel Server Configuration                    ║");
         info!("╠════════════════════════════════════════════════════════════════╣");
-        info!("║ Scan QR code or import config in WireGuard app:                ║");
+        info!("║ Server ID: {}  ║", &server_id_hex[..32]);
+        info!("╚════════════════════════════════════════════════════════════════╝");
+
+        let mobile_config = MobileServerConfig {
+            listen_addr: mobile_addr,
+            enable_encryption: true,
+            ..Default::default()
+        };
+
+        let mobile_server = MobileTunnelServer::new(mobile_config).await?;
+        info!("📱 Mobile Tunnel server listening on {}", mobile_addr);
+
+        // Auto-display client config for mobile users
+        let endpoint = format!("{}:{}", args.listen.ip(), mobile_port);
+        let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
+
+        info!("╔════════════════════════════════════════════════════════════════╗");
+        info!("║              Mobile Client Configuration                        ║");
+        info!("╠════════════════════════════════════════════════════════════════╣");
+        info!("║ Import this JSON config in the Oxidize mobile app:             ║");
         info!("╚════════════════════════════════════════════════════════════════╝");
         for line in client_config.lines() {
             info!("  {}", line);
         }
-        info!(
-            "Generate QR: echo '{}' | qrencode -t ansiutf8",
-            client_config.replace('\n', "\\n")
-        );
 
         tokio::spawn(async move {
-            if let Err(e) = wg_server.run().await {
-                warn!("WireGuard server error: {}", e);
+            if let Err(e) = mobile_server.run().await {
+                warn!("Mobile Tunnel server error: {}", e);
             }
         });
     }

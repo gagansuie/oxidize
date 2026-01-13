@@ -1,15 +1,96 @@
 use anyhow::{Context, Result};
+use oxidize_common::mobile_tunnel::{
+    encode_packet, flags, PacketBatch, HEADER_SIZE, MAX_PACKET_SIZE,
+};
 use oxidize_common::packet_capture::{create_queue, QueueConfig, Verdict};
 use relay_client::{ClientConfig, RelayClient};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::signal;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+// ============================================================================
+// OxTunnel Batching for NFQUEUE
+// ============================================================================
+
+/// Simple packet batcher for OxTunnel encapsulation
+struct PacketBatcher {
+    packets: Vec<Vec<u8>>,
+    total_size: usize,
+    max_batch_size: usize,
+    sequence: AtomicU32,
+}
+
+impl PacketBatcher {
+    fn new(max_batch_size: usize) -> Self {
+        Self {
+            packets: Vec::with_capacity(max_batch_size),
+            total_size: 0,
+            max_batch_size,
+            sequence: AtomicU32::new(0),
+        }
+    }
+
+    fn next_seq(&self) -> u32 {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn add(&mut self, packet: Vec<u8>) -> Option<Vec<u8>> {
+        let new_size = self.total_size + packet.len() + 2;
+        let should_flush = new_size > MAX_PACKET_SIZE - HEADER_SIZE - 32
+            || self.packets.len() >= self.max_batch_size;
+
+        if should_flush && !self.packets.is_empty() {
+            let result = self.flush();
+            self.packets.push(packet);
+            self.total_size = self.packets.last().map(|p| p.len() + 2).unwrap_or(0);
+            return result;
+        }
+
+        self.packets.push(packet);
+        self.total_size = new_size;
+        None
+    }
+
+    fn flush(&mut self) -> Option<Vec<u8>> {
+        if self.packets.is_empty() {
+            return None;
+        }
+
+        let mut batch = PacketBatch::new();
+        for pkt in &self.packets {
+            batch.add(pkt);
+        }
+        self.packets.clear();
+        self.total_size = 0;
+
+        let mut payload = vec![0u8; MAX_PACKET_SIZE];
+        let payload_len = match batch.encode(&mut payload) {
+            Ok(len) => len,
+            Err(_) => return None,
+        };
+        payload.truncate(payload_len);
+
+        let seq = self.next_seq();
+        let mut output = vec![0u8; HEADER_SIZE + payload.len() + 32];
+        match encode_packet(&mut output, &payload, seq, flags::BATCH, None) {
+            Ok(len) => {
+                output.truncate(len);
+                Some(output)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 #[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
@@ -324,31 +405,44 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         };
     }
 
-    // Create channel for packets -> QUIC
-    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
+    // Create channel for OxTunnel-encapsulated packets -> QUIC
+    let (oxtunnel_tx, oxtunnel_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
 
-    // Spawn queue reading task (blocking, runs in separate thread)
+    // Spawn queue reading task with OxTunnel batching (blocking, runs in separate thread)
     let queue_task = tokio::task::spawn_blocking(move || {
-        info!("📡 NFQUEUE capture started");
+        info!("📡 NFQUEUE capture started with OxTunnel batching");
         let mut packet_count: u64 = 0;
+        let mut batch_count: u64 = 0;
+        let mut batcher = PacketBatcher::new(64);
+        let start = Instant::now();
 
         loop {
             match queue.recv() {
                 Ok(packet) => {
                     packet_count += 1;
 
-                    // Log periodically
-                    if packet_count.is_multiple_of(100) {
-                        info!("📦 Captured {} packets via NFQUEUE", packet_count);
+                    // Extract packet ID before taking ownership of data
+                    let packet_id = packet.id;
+
+                    // Add packet to OxTunnel batch - take ownership, avoid clone
+                    if let Some(batch) = batcher.add(packet.data) {
+                        batch_count += 1;
+                        let _ = oxtunnel_tx.blocking_send(batch);
                     }
 
-                    // Send packet data to QUIC channel
-                    let data = packet.data.clone();
-                    let _ = raw_tx.blocking_send(data);
-
                     // Accept the packet (forward it normally)
-                    if let Err(e) = queue.set_verdict(packet.id, Verdict::Accept) {
+                    if let Err(e) = queue.set_verdict(packet_id, Verdict::Accept) {
                         error!("Failed to set verdict: {}", e);
+                    }
+
+                    // Log throughput periodically
+                    if packet_count.is_multiple_of(10000) {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let pps = packet_count as f64 / elapsed;
+                        info!(
+                            "📦 OxTunnel: {} packets, {} batches, {:.0} pps",
+                            packet_count, batch_count, pps
+                        );
                     }
                 }
                 Err(e) => {
@@ -360,19 +454,29 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
             }
         }
 
-        info!("NFQUEUE capture ended ({} packets)", packet_count);
+        // Flush remaining packets
+        if let Some(batch) = batcher.flush() {
+            let _ = oxtunnel_tx.blocking_send(batch);
+        }
+
+        info!(
+            "NFQUEUE capture ended ({} packets, {} batches)",
+            packet_count, batch_count
+        );
     });
 
-    // Spawn client task with packet forwarding
+    // Spawn client task with OxTunnel packet forwarding
     let task = tokio::spawn(async move {
-        info!("🚀 Starting HIGH-PERFORMANCE relay client...");
+        info!("🚀 Starting HIGH-PERFORMANCE relay client with OxTunnel...");
         info!("   ├─ Packet queue: {}", platform_clone);
+        info!("   ├─ OxTunnel batching: enabled (64 packets/batch)");
         info!("   ├─ QUIC datagrams: enabled");
         info!("   └─ Zero-copy forwarding: enabled");
 
-        if let Err(e) = client.run_with_sender(raw_rx).await {
+        if let Err(e) = client.run_with_sender(oxtunnel_rx).await {
             error!("Client error: {}", e);
         }
+
         info!("Client task ended");
     });
 

@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use oxidize_common::mobile_tunnel::{
+    decode_packet, flags, PacketBatch, HEADER_SIZE, PROTOCOL_MAGIC,
+};
 use oxidize_common::zero_copy::BufferPool;
 use oxidize_common::{
     decompress_data, MessageBatch, MessageFramer, MessageType, RelayMessage, RelayMetrics,
@@ -14,7 +17,7 @@ use tracing::{debug, error, info};
 
 use crate::cache::DataCache;
 use crate::config::Config;
-use crate::xdp_forwarder::SharedTunForwarder;
+use crate::forwarder::SharedForwarder;
 
 static CONNECTION_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -41,7 +44,7 @@ pub struct ConnectionHandler {
     cache: Arc<DataCache>,
     pending_acks: Vec<(u64, u64)>,
     framer: MessageFramer,
-    forwarder: Arc<SharedTunForwarder>,
+    forwarder: Arc<SharedForwarder>,
     response_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 }
 
@@ -52,7 +55,7 @@ impl ConnectionHandler {
         metrics: RelayMetrics,
         config: Config,
         cache: Arc<DataCache>,
-        forwarder: Arc<SharedTunForwarder>,
+        forwarder: Arc<SharedForwarder>,
     ) -> Self {
         let id = CONNECTION_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -229,12 +232,47 @@ impl ConnectionHandler {
             self.cache.insert(message.payload.clone()).await;
         }
 
-        // Forward the IP packet to the internet
-        // Use self.id (server's connection ID) not message.connection_id (client's ID)
-        // This ensures responses route back to the correct subscriber
+        // Check if this is an OxTunnel packet (unified protocol from desktop/mobile)
         let forward_start = Instant::now();
-        if let Err(e) = self.forwarder.forward(self.id, message.payload).await {
-            debug!("Forward error: {}", e);
+        if message.payload.len() >= HEADER_SIZE && message.payload[0..2] == PROTOCOL_MAGIC {
+            // Decode OxTunnel packet - decode_packet works in-place, avoid clone
+            let mut buf = message.payload;
+            match decode_packet(&mut buf, None) {
+                Ok((header, payload)) => {
+                    if header.flags & flags::BATCH != 0 {
+                        // Handle batch of packets - PacketBatch::decode returns owned Vec<u8>
+                        match PacketBatch::decode(payload) {
+                            Ok(packets) => {
+                                debug!("OxTunnel batch: {} packets", packets.len());
+                                for packet in packets {
+                                    if let Err(e) = self.forwarder.forward(self.id, packet).await {
+                                        debug!("Forward error: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Batch decode error: {}", e);
+                            }
+                        }
+                    } else {
+                        // Single OxTunnel packet - payload is already a slice into buf
+                        // We need to own it since buf will be dropped, but avoid double allocation
+                        let owned_payload = payload.to_vec();
+                        drop(buf); // Explicit drop to clarify ownership
+                        if let Err(e) = self.forwarder.forward(self.id, owned_payload).await {
+                            debug!("Forward error: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("OxTunnel decode error: {}", e);
+                }
+            }
+        } else {
+            // Legacy raw IP packet (backward compatibility) - no copy needed
+            if let Err(e) = self.forwarder.forward(self.id, message.payload).await {
+                debug!("Forward error: {}", e);
+            }
         }
         self.metrics.record_forward_latency(forward_start.elapsed());
 

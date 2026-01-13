@@ -65,7 +65,8 @@ pub fn setup_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
                 // Emit event to frontend
                 let _ = app.emit("connection-changed", new_state);
 
-                // TODO: Actually connect/disconnect using oxidize-client
+                // Note: Actual connection is handled via commands::connect/disconnect
+                // This tray toggle just updates UI state - frontend calls the real connect command
                 tracing::info!("Connection toggled: {}", new_state);
             }
             "show" => {

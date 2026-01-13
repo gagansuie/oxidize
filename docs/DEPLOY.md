@@ -136,6 +136,75 @@ fly scale count 6 --region iad,ord,lax,dfw,sea,mia
 
 **<5ms is achievable** for users within ~200km of an edge node.
 
+---
+
+## Vultr Bare Metal (Coming Soon)
+
+For maximum performance, deploy on Vultr bare metal with DPDK kernel bypass.
+
+| Feature | Fly.io (Cloud) | Vultr Bare Metal |
+|---------|----------------|------------------|
+| **Throughput** | 1 Gbps | **40+ Gbps per core** |
+| **Latency** | 5-15ms | **<5µs per packet** |
+| **Kernel** | Standard | **Complete bypass (DPDK)** |
+| **PPS** | ~100K | **20+ Mpps per core** |
+| **Price** | $5-15/mo | ~$120/mo |
+
+### Why DPDK for Bare Metal?
+
+| Technology | Throughput | Best For |
+|------------|------------|----------|
+| Standard kernel | 1-2 Gbps | Cloud VMs |
+| eBPF/XDP | 10-25 Gbps | Cloud with XDP support |
+| **DPDK** | **40+ Gbps** | **Bare metal (Vultr)** |
+
+### DPDK Requirements
+
+```bash
+# Vultr bare metal setup (coming soon)
+# 1. Enable hugepages
+echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+
+# 2. Bind NIC to VFIO
+modprobe vfio-pci
+dpdk-devbind.py --bind=vfio-pci 0000:01:00.0
+
+# 3. Run with DPDK feature
+cargo build --release --features dpdk
+./target/release/oxidize-server --dpdk-pci 0000:01:00.0
+```
+
+### DPDK Roadmap
+
+| Phase | Status |
+|-------|--------|
+| DPDK module scaffolding | ✅ Complete |
+| DpdkConfig struct | ✅ Complete |
+| Feature flag (`--features dpdk`) | ✅ Complete |
+| DpdkRuntime with full feature integration | ✅ Complete |
+| io_uring bypass when DPDK enabled | ✅ Complete |
+| dpdk-rs FFI bindings | 🚧 Pending (waiting for stable crate) |
+| Vultr deployment scripts | 🚧 Pending |
+
+### DPDK Feature Integration
+
+When DPDK is enabled, all Oxidize features run on top:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  BBRv3 + ROHC + LZ4 + FEC + Deep Learning (ML)     │  ← All features enabled
+├─────────────────────────────────────────────────────┤
+│  DPDK Runtime (kernel bypass, 40+ Gbps)            │  ← Replaces io_uring
+└─────────────────────────────────────────────────────┘
+```
+
+Build with DPDK:
+```bash
+cargo build --release --features dpdk
+```
+
+---
+
 ## Scaling
 
 Scale to multiple regions for lowest latency:

@@ -33,13 +33,11 @@ pub struct Config {
     #[serde(default = "default_enable_challenges")]
     pub enable_challenges: bool,
 
-    // WireGuard settings
-    #[serde(default = "default_enable_wireguard")]
-    pub enable_wireguard: bool,
+    // Mobile Tunnel settings
+    #[serde(default = "default_enable_mobile_tunnel")]
+    pub enable_mobile_tunnel: bool,
     #[serde(default)]
-    pub wireguard_port: Option<u16>,
-    #[serde(default)]
-    pub wireguard_private_key: Option<String>,
+    pub mobile_tunnel_port: Option<u16>,
 
     /// Enable ROHC (Robust Header Compression) for IP/UDP/TCP headers
     #[serde(default = "default_enable_rohc")]
@@ -81,7 +79,7 @@ pub struct Config {
     pub max_early_data_size: u32,
 }
 
-fn default_enable_wireguard() -> bool {
+fn default_enable_mobile_tunnel() -> bool {
     false
 }
 
@@ -160,9 +158,8 @@ impl Default for Config {
             tls_key_path: None,
             rate_limit_per_ip: 100,
             rate_limit_window_secs: 60,
-            enable_wireguard: false,
-            wireguard_port: None,
-            wireguard_private_key: None,
+            enable_mobile_tunnel: false,
+            mobile_tunnel_port: None,
             enable_rohc: true,
             rohc_max_size: 1500,
             ack_batch_size: 8,

@@ -27,8 +27,11 @@ pub mod traffic_classifier;
 pub mod udp_batch;
 pub mod zero_copy;
 
+pub mod mobile_tunnel;
+pub mod oxtunnel_client;
 pub mod packet_capture;
 pub mod rohc;
+pub mod unified_transport;
 
 #[cfg(target_os = "linux")]
 pub mod io_uring_support;
@@ -36,15 +39,9 @@ pub mod io_uring_support;
 #[cfg(target_os = "linux")]
 pub mod io_uring_impl;
 
-// High-performance networking (pick ONE - DPDK is preferred for bare metal)
-#[cfg(target_os = "linux")]
-pub mod dpdk; // DPDK: 40+ Gbps, requires hugepages + VFIO (Hetzner)
-
-#[cfg(target_os = "linux")]
-pub mod af_xdp; // AF_XDP: 20 Gbps, fallback for non-bare-metal
-
-#[cfg(target_os = "linux")]
-pub mod ebpf;
+// DPDK high-performance networking for bare metal (40+ Gbps)
+#[cfg(all(target_os = "linux", feature = "dpdk"))]
+pub mod dpdk;
 
 pub mod bbr_v3;
 pub mod crypto_accel;

@@ -495,6 +495,13 @@ pub trait PacketQueue: Send {
 }
 
 /// Create the appropriate packet queue for the current platform
+///
+/// Supported platforms:
+/// - Linux: NFQUEUE via Netlink sockets
+/// - Windows: WinDivert packet capture
+/// - macOS: Divert sockets (pf/ipfw style)
+/// - Android: VpnService-based packet queue
+/// - iOS: NetworkExtension-based packet queue
 pub fn create_queue() -> anyhow::Result<Box<dyn PacketQueue>> {
     #[cfg(target_os = "linux")]
     {
@@ -511,7 +518,23 @@ pub fn create_queue() -> anyhow::Result<Box<dyn PacketQueue>> {
         Ok(Box::new(macos::DivertQueue::new()?))
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        Ok(Box::new(android::VpnServiceQueue::new()?))
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        Ok(Box::new(ios::NetworkExtensionQueue::new()?))
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android",
+        target_os = "ios"
+    )))]
     {
         anyhow::bail!("Packet queue not supported on this platform")
     }
@@ -758,12 +781,10 @@ pub mod linux {
             // Check for NLMSG_ERROR
             if n >= 16 {
                 let msg_type = u16::from_ne_bytes([buf[4], buf[5]]);
-                if msg_type == libc::NLMSG_ERROR as u16 {
-                    if n >= 20 {
-                        let error = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
-                        if error != 0 {
-                            return Err(anyhow::anyhow!("Netlink error: {}", error));
-                        }
+                if msg_type == libc::NLMSG_ERROR as u16 && n >= 20 {
+                    let error = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+                    if error != 0 {
+                        return Err(anyhow::anyhow!("Netlink error: {}", error));
                     }
                 }
             }
@@ -1735,21 +1756,6 @@ pub mod ios {
             "iOS NetworkExtension"
         }
     }
-}
-
-// ============================================================================
-// Factory function update for all platforms
-// ============================================================================
-
-/// Create the appropriate packet queue for the current platform
-#[cfg(target_os = "android")]
-pub fn create_queue() -> anyhow::Result<Box<dyn PacketQueue>> {
-    Ok(Box::new(android::VpnServiceQueue::new()?))
-}
-
-#[cfg(target_os = "ios")]
-pub fn create_queue() -> anyhow::Result<Box<dyn PacketQueue>> {
-    Ok(Box::new(ios::NetworkExtensionQueue::new()?))
 }
 
 // ============================================================================

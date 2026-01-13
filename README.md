@@ -2,9 +2,9 @@
 
 # 🦀 Oxidize
 
-### Open Source Network Acceleration, Supercharged by AI
+### Open Source Deep Learning Driven Network Acceleration
 
-**Machine learning predicts packet loss before it happens, optimizes routing in real-time, and accelerates your network automatically.**
+**Neural networks predict packet loss before it happens, optimize routing in real-time, and accelerate your network automatically.**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
@@ -58,7 +58,7 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **DPDK Kernel Bypass** - Complete kernel bypass for 40+ Gbps per core on bare metal
+- **DPDK Kernel Bypass** - Complete kernel bypass for 40+ Gbps per core (`--features dpdk`)
 - **io_uring Integration** - Real io_uring syscalls, 10-20x syscall reduction on Linux 5.1+
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
@@ -68,6 +68,35 @@ Your ISP's routing is suboptimal:
 - **Lock-Free Streams** - No mutex contention on hot path
 - **ACK Batching** - Configurable batching reduces round-trips
 - **Latency Instrumentation** - Built-in µs-level timing for optimization
+- **LZ4 DEFAULT Mode** - ~6 GB/s compression (30x faster than HIGH mode)
+- **Zero-Allocation Hot Path** - Ownership transfer instead of cloning in packet pipeline
+
+### 📱 OxTunnel Protocol (Unified Cross-Platform)
+Custom high-performance tunnel protocol replacing WireGuard with **unified architecture** for all platforms:
+
+```
+Desktop (NFQUEUE) ──┐                      ┌── QUIC Datagrams ──┐
+                    ├── OxTunnel Batching ─┤                    ├── Relay Server
+Mobile (VpnService) ┘                      └── UDP Fallback ────┘
+```
+
+- **Same protocol everywhere** - Desktop, Android, iOS use identical OxTunnel encapsulation
+- **QUIC primary transport** - Encrypted, multiplexed, 0-RTT for all platforms
+- **UDP fallback** - For networks that block QUIC
+- **9-byte header** - Minimal overhead vs WireGuard's 32+ byte Noise protocol
+- **64 packets/batch** - Reduces syscalls by 64x
+- **Optional encryption** - ChaCha20-Poly1305 when needed, skip on QUIC (already encrypted)
+- **Zero-copy buffer pools** - 128 pre-allocated buffers, no heap allocation per packet
+
+| Feature | WireGuard | OxTunnel |
+|---------|-----------|----------|
+| Header size | 32+ bytes | 9 bytes |
+| Encryption | Always on | Optional (QUIC encrypts) |
+| Handshake | Multi-round | Single round-trip |
+| Buffer allocation | Per-packet | Zero-copy pool |
+| Batch processing | No | 64 packets/batch |
+| Transport | UDP only | QUIC + UDP fallback |
+| Cross-platform | Separate implementations | Unified protocol |
 
 ### 🎭 MASQUE-Inspired "Invisible Relay" (NEW)
 Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-warp-with-a-masque/):
@@ -84,8 +113,8 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
 - **Smart Split-Tunneling** - Gaming tunneled for optimization, streaming bypassed for clean IP
 - **Edge Caching** - LRU cache for static content at relay points
 
-### 🤖 AI/ML Engine (Pure Rust)
-Self-improving network optimization powered by machine learning:
+### 🧠 Deep Learning Driven Engine (Pure Rust)
+Self-improving network optimization using neural networks:
 
 **Tier 1 - Core Intelligence:**
 - **LSTM Loss Predictor** - Predicts packet loss 50-100ms ahead, enabling proactive FEC
@@ -281,7 +310,7 @@ enable_priority_scheduler = true
 ┌────────────────────────────────────────────────────────────────┐
 │                    PERFORMANCE BREAKDOWN                        │
 ├────────────────────────────────────────────────────────────────┤
-│  Per-packet processing:     0.7µs (with AI heuristics)         │
+│  Per-packet processing:     0.7µs (with neural inference)      │
 │  Gaming tick (64 Hz):       15,625µs                           │
 │  Overhead percentage:       0.004%                             │
 │                                                                │
@@ -340,14 +369,15 @@ See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 ## Daemon Management
 
-The daemon enables **NFQUEUE packet capture** for automatic traffic optimization:
+The daemon enables **NFQUEUE + OxTunnel** for automatic traffic optimization with unified protocol:
 
 ### Features
+- **Unified OxTunnel Protocol** - Same protocol as mobile clients
 - **Auto-connect on start** - No manual intervention needed
-- **NFQUEUE full tunnel** - All UDP traffic captured and forwarded through relay
-- **Pure userspace** - No kernel modules required
-- **UDP GSO/GRO batching** - 64 packets per syscall
+- **NFQUEUE packet capture** - All UDP traffic captured at kernel level
+- **OxTunnel batching** - 64 packets/batch before sending over QUIC
 - **QUIC datagrams** - Zero head-of-line blocking for gaming/VoIP
+- **Pure userspace** - No kernel modules required
 
 ### Commands
 ```bash
@@ -375,7 +405,8 @@ sudo iptables -L OUTPUT -n | grep -E 'NFQUEUE|4433'
 
 ## Documentation
 
-- [AI.md](docs/AI.md) - AI/ML engine deep dive (LSTM, DRL, UCB1)
+- [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
+- [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning driven engine deep dive (LSTM, DQN, UCB1)
 - [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
 - [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io)

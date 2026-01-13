@@ -403,10 +403,33 @@ cat blocked_ips.txt | \
 
 | Feature | Oxidize | WireGuard | OpenVPN |
 |---------|---------|-----------|---------|
-| Protocol | QUIC | Custom UDP | TLS/UDP |
+| Protocol | QUIC + OxTunnel | Custom UDP | TLS/UDP |
 | DDoS resistance | High | Medium | Low |
 | Speed | Very Fast | Very Fast | Slow |
-| Encryption | TLS 1.3 | ChaCha20 | Various |
+| Encryption | TLS 1.3 / ChaCha20 (optional) | ChaCha20 (always) | Various |
 | Multiplexing | ✅ | ❌ | ❌ |
 | 0-RTT | ✅ | ❌ | ❌ |
 | FEC | ✅ | ❌ | ❌ |
+| Batch processing | ✅ | ❌ | ❌ |
+| Zero-copy buffers | ✅ | ❌ | ❌ |
+
+### OxTunnel vs WireGuard
+
+Oxidize uses **OxTunnel**, a unified cross-platform protocol that replaces WireGuard:
+
+| Aspect | WireGuard | OxTunnel | Advantage |
+|--------|-----------|----------|-----------|
+| Header overhead | 32+ bytes | 9 bytes | **72% smaller** |
+| Transport | UDP only | **QUIC + UDP fallback** | **Encrypted, multiplexed** |
+| Encryption | Mandatory | Optional (QUIC encrypts) | **No double-encryption** |
+| Handshake | Multi-round Noise | Single round-trip | **Faster reconnects** |
+| Buffer allocation | Per-packet malloc | Zero-copy pool | **Lower CPU/memory** |
+| Packet batching | No | 64 packets/batch | **64x fewer syscalls** |
+| Cross-platform | Separate implementations | **Unified protocol** | **Same code everywhere** |
+
+**Unified Architecture Benefits:**
+1. **Same protocol** on desktop (NFQUEUE), Android (VpnService), iOS (NEPacketTunnel)
+2. **QUIC primary** - All platforms use encrypted QUIC datagrams
+3. **UDP fallback** - Automatic fallback when QUIC is blocked
+4. **Single server** - Handles all client types with unified OxTunnel decoding
+5. **No double-encryption** - QUIC provides encryption, OxTunnel encryption optional

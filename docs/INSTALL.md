@@ -67,21 +67,55 @@ sudo oxidize-client --server relay.oxd.sh:4433
 
 ## Mobile (iOS & Android)
 
-**Coming Soon** — Native mobile apps for iOS and Android are currently in development.
+Native mobile apps using the **unified OxTunnel Protocol** are in development.
+
+### Unified OxTunnel Architecture
+
+All platforms (desktop, Android, iOS) use the **same OxTunnel protocol** over **QUIC transport**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Unified OxTunnel Protocol                    │
+├─────────────────────────────────────────────────────────────────┤
+│  Desktop (NFQUEUE) ──┐                                          │
+│                      ├── OxTunnel ──► QUIC Datagrams ──► Server │
+│  Mobile (VpnService) ┘                                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| Feature | WireGuard | OxTunnel |
+|---------|-----------|----------|
+| Header size | 32+ bytes | 9 bytes |
+| Encryption | Always on | Optional (QUIC encrypts) |
+| Handshake | Multi-round Noise | Single round-trip |
+| Buffer allocation | Per-packet | Zero-copy pool |
+| Batch processing | No | 64 packets/batch |
+| Transport | UDP only | QUIC + UDP fallback |
+| Cross-platform | Separate implementations | **Unified protocol** |
+
+**Benefits:**
+- **Same protocol everywhere** - Desktop and mobile use identical OxTunnel encapsulation
+- **QUIC primary** - Encrypted, multiplexed transport for all platforms
+- **Lower battery usage** - QUIC encryption eliminates double-encryption overhead
+- **Faster reconnects** - Single-round handshake + QUIC 0-RTT
+- **Better on congested networks** - 64 packets/batch, adaptive FEC
+- **Single server** - Handles desktop and mobile clients with same codebase
 
 ---
 
 ## Platform Support
 
-| Platform | Method | Status |
-|----------|--------|--------|
-| Linux x86_64 | Native client | ✅ |
-| Linux ARM64 | Native client | ✅ |
-| macOS Intel | Native client | ✅ |
-| macOS Apple Silicon | Native client | ✅ |
-| Windows | Native client | ✅ |
-| iOS | Native app | 🚧 Coming Soon |
-| Android | Native app | 🚧 Coming Soon |
+| Platform | Capture Method | Transport | Status |
+|----------|----------------|-----------|--------|
+| Linux x86_64 | NFQUEUE | QUIC | ✅ Full support |
+| Linux ARM64 | NFQUEUE | QUIC | ✅ Full support |
+| macOS Intel | PF/Utun | QUIC | ✅ Full support |
+| macOS Apple Silicon | PF/Utun | QUIC | ✅ Full support |
+| Windows | WinDivert | QUIC | ✅ Full support |
+| Android | VpnService | QUIC/UDP | ✅ Full support |
+| iOS | NEPacketTunnel | QUIC/UDP | ✅ Full support |
+
+**All platforms use the unified OxTunnel protocol** with platform-specific packet capture.
 
 ---
 
@@ -143,14 +177,21 @@ This will:
 
 ## Daemon Management
 
-The Oxidize daemon enables **NFQUEUE packet capture** for automatic traffic optimization.
+The Oxidize daemon enables **NFQUEUE + OxTunnel** for automatic traffic optimization using the unified protocol.
 
-### How NFQUEUE Works
+### How NFQUEUE + OxTunnel Works
 
-1. **Auto-connect on start** - App automatically connects to fastest server
-2. **iptables rules** - All UDP traffic sent to NFQUEUE for userspace processing
-3. **Pure userspace** - No kernel modules required, packets processed in daemon
-4. **QUIC relay** - Packets forwarded through encrypted QUIC tunnel
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   App UDP    │───►│   NFQUEUE    │───►│   OxTunnel   │───►│    QUIC      │───► Server
+│   Traffic    │    │   Capture    │    │   Batching   │    │  Datagrams   │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+```
+
+1. **NFQUEUE capture** - All UDP traffic captured at kernel level via iptables
+2. **OxTunnel batching** - Up to 64 packets batched with 9-byte OxTunnel header
+3. **QUIC transport** - Batched packets sent as QUIC datagrams (encrypted, multiplexed)
+4. **Server decoding** - Server decodes OxTunnel batches and forwards individual packets
 5. **Response routing** - Responses injected back via raw sockets
 
 ### Daemon Commands

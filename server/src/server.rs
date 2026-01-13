@@ -15,9 +15,9 @@ use tracing::{debug, error, info, warn};
 use crate::cache::DataCache;
 use crate::config::Config;
 use crate::connection::ConnectionHandler;
+use crate::forwarder::SharedForwarder;
 use crate::graceful::{create_reuseport_socket, ShutdownCoordinator};
 use crate::tls::{load_tls_config, TlsConfig};
-use crate::xdp_forwarder::SharedTunForwarder;
 
 pub struct RelayServer {
     endpoint: Endpoint,
@@ -26,7 +26,7 @@ pub struct RelayServer {
     connections: Arc<RwLock<HashMap<u64, Arc<ConnectionHandler>>>>,
     cache: Arc<DataCache>,
     security: Arc<Mutex<SecurityManager>>,
-    forwarder: Arc<SharedTunForwarder>,
+    forwarder: Arc<SharedForwarder>,
     /// Edge cache for static content
     edge_cache: Arc<RwLock<EdgeCache>>,
     /// ML Engine for AI-powered decisions (NO HEURISTIC FALLBACK)
@@ -147,7 +147,7 @@ impl RelayServer {
         let security = Arc::new(Mutex::new(SecurityManager::new(security_config)));
 
         // Initialize shared TUN forwarder at server startup
-        let forwarder = SharedTunForwarder::new().await?;
+        let forwarder = SharedForwarder::new().await?;
 
         // Initialize edge cache
         let edge_cache_config = CacheConfig {
@@ -542,7 +542,7 @@ impl RelayServer {
         metrics: RelayMetrics,
         config: Config,
         cache: Arc<DataCache>,
-        forwarder: Arc<SharedTunForwarder>,
+        forwarder: Arc<SharedForwarder>,
     ) -> Result<()> {
         // === MASQUE-INSPIRED: Spawn datagram handler for real-time traffic ===
         let datagram_connection = connection.clone();
@@ -597,7 +597,7 @@ impl RelayServer {
     /// This bypasses stream ordering for ultra-low latency
     async fn handle_datagrams(
         connection: Connection,
-        forwarder: Arc<SharedTunForwarder>,
+        forwarder: Arc<SharedForwarder>,
         metrics: RelayMetrics,
     ) {
         loop {

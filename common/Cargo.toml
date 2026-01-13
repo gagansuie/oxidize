@@ -7,8 +7,8 @@ license = { workspace = true }
 
 [features]
 default = ["ai"]
-ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # AI-powered ML engine with training + HF Hub sync
-xdp = ["dep:aya", "dep:aya-log", "dep:xsk-rs", "dep:libbpf-rs"]  # AF_XDP high-performance networking (requires libelf-dev)
+ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
+dpdk = []  # DPDK kernel bypass for bare metal (40+ Gbps) - Vultr deployment
 
 [[bin]]
 name = "oxidize-train"
@@ -42,15 +42,15 @@ rand = { workspace = true }
 hf-hub = { workspace = true, optional = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
-socket2.workspace = true
+socket2 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { workspace = true }
-aya = { workspace = true, optional = true }         # eBPF loader
-aya-log = { workspace = true, optional = true }     # eBPF logging  
-xsk-rs = { workspace = true, optional = true }      # AF_XDP zero-copy sockets
-libbpf-rs = { workspace = true, optional = true }   # eBPF bindings
-nix = "0.27"  # Unix utilities
+# DPDK bindings will be added when dpdk-rs crate is stable
+# For now, we use FFI bindings directly in dpdk.rs
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.27"  # Unix utilities (Linux, macOS, Android, iOS)
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windivert = { version = "0.6", features = ["vendored"] }  # WinDivert packet capture

@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.28"
+version = "0.1.29"
 edition = "2021"
 authors = ["gagansuie <https://github.com/gagansuie>"]
 license = "MIT OR Apache-2.0"
@@ -22,7 +22,6 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 rustls-pemfile = "2.2"
 rcgen = "0.13"
 reed-solomon-erasure = "6.0"
-boringtun = "0.6"
 base64 = "0.22"
 anyhow = "1.0"
 tracing = "0.1"

@@ -9,7 +9,6 @@ mod client;
 mod config;
 mod dns_cache;
 mod speedtest;
-mod xdp_handler;
 
 use client::RelayClient;
 use config::ClientConfig;

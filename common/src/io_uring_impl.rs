@@ -6,6 +6,9 @@
 //! - Zero-copy buffer registration
 //!
 //! This gives 10-20x syscall reduction compared to regular async I/O.
+//!
+//! **Note:** When DPDK feature is enabled, io_uring is bypassed entirely.
+//! DPDK provides complete kernel bypass (40+ Gbps) which supersedes io_uring.
 
 #[cfg(target_os = "linux")]
 use io_uring::{opcode, types, IoUring, Probe};
