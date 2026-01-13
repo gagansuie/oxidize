@@ -225,7 +225,7 @@ fn bench_adaptive_fec() {
     for _ in 0..100 {
         let seq = fec_light.encode(&data).unwrap().seq;
         // Simulate some loss to trigger adaptation
-        if !seq.is_multiple_of(10) {
+        if seq % 10 != 0 {
             fec_light.ack(seq);
         }
     }

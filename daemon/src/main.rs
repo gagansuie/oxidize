@@ -476,7 +476,8 @@ fn run_nfqueue_capture(
                 metrics.record_received(len as u64);
 
                 // Log periodically
-                if packet_count.is_multiple_of(100) {
+                #[allow(clippy::manual_is_multiple_of)]
+                if packet_count % 100 == 0 {
                     info!(
                         "📦 Captured {} packets via NFQUEUE, last: {} bytes",
                         packet_count, len
