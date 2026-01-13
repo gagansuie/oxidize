@@ -3,7 +3,7 @@
 //! Provides packet batching, optional encryption, and OxTunnel encapsulation
 //! for the daemon's NFQUEUE pipeline. Works with both QUIC transport and raw UDP.
 
-use crate::mobile_tunnel::{
+use crate::oxtunnel_protocol::{
     encode_packet, flags, generate_id, CryptoEngine, HandshakeInit, PacketBatch, TunnelBufferPool,
     HEADER_SIZE, MAX_PACKET_SIZE,
 };
@@ -389,7 +389,7 @@ impl OxTunnelSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mobile_tunnel::PROTOCOL_MAGIC;
+    use crate::oxtunnel_protocol::PROTOCOL_MAGIC;
 
     #[test]
     fn test_encapsulate_single() {

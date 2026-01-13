@@ -10,9 +10,18 @@
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use oxidize_common::adaptive_fec::{AdaptiveFec, FecLevel};
+use oxidize_common::ai_engine::HeuristicEngine;
+use oxidize_common::low_latency::LatencyTracker;
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
+use oxidize_common::parallel_compression::ParallelCompressor;
+use oxidize_common::priority_scheduler::PriorityScheduler;
+use oxidize_common::simd_compression::SimdCompressor;
+use oxidize_common::simd_fec::FecSimdLevel;
 use oxidize_common::udp_batch::{GsoBatch, UdpBatcher, UdpCoalescer};
 use oxidize_common::zero_copy::{BufferPool, PacketRingBuffer};
+
+#[cfg(target_os = "linux")]
+use oxidize_common::io_uring_impl::UringInstance;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,6 +52,14 @@ pub struct HighPerfConfig {
     pub enable_zero_copy: bool,
     /// Enable multi-path
     pub enable_multipath: bool,
+    /// Enable parallel compression
+    pub enable_parallel_compression: bool,
+    /// Enable priority scheduling
+    pub enable_priority_scheduler: bool,
+    /// Enable SIMD FEC acceleration
+    pub enable_simd_fec: bool,
+    /// Enable io_uring (Linux only)
+    pub enable_io_uring: bool,
     /// Buffer pool size
     pub buffer_pool_size: usize,
     /// Maximum batch size
@@ -58,6 +75,10 @@ impl Default for HighPerfConfig {
             enable_batching: true,
             enable_zero_copy: true,
             enable_multipath: false, // Requires multiple interfaces
+            enable_parallel_compression: true,
+            enable_priority_scheduler: true,
+            enable_simd_fec: true,
+            enable_io_uring: cfg!(target_os = "linux"),
             buffer_pool_size: 256,
             max_batch_size: 64,
             batch_flush_us: 100,
@@ -79,6 +100,12 @@ pub struct HighPerfPipeline {
     coalescer: Mutex<UdpCoalescer>,
     /// Multi-path scheduler
     multipath: Mutex<MultipathScheduler>,
+    /// Parallel compressor for multi-threaded compression
+    parallel_compressor: ParallelCompressor,
+    /// Priority scheduler for traffic prioritization
+    priority_scheduler: Mutex<PriorityScheduler>,
+    /// SIMD FEC level detected at runtime
+    simd_fec_level: FecSimdLevel,
     /// Packet ring buffer for queueing
     #[allow(dead_code)]
     ring_buffer: Mutex<PacketRingBuffer>,
@@ -86,6 +113,19 @@ pub struct HighPerfPipeline {
     stats: Arc<PipelineStatsAtomic>,
     /// Last batch flush time
     last_flush: Mutex<Instant>,
+    /// io_uring instance (Linux only)
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    io_uring: Option<Mutex<UringInstance>>,
+    /// Latency tracker for µs-precision monitoring
+    #[allow(dead_code)]
+    latency_tracker: LatencyTracker,
+    /// Heuristic AI engine for fallback decisions
+    #[allow(dead_code)]
+    heuristic_engine: HeuristicEngine,
+    /// SIMD-accelerated compressor
+    #[allow(dead_code)]
+    simd_compressor: SimdCompressor,
 }
 
 /// Atomic statistics for lock-free updates
@@ -113,15 +153,47 @@ impl Default for PipelineStatsAtomic {
 
 impl HighPerfPipeline {
     pub fn new(config: HighPerfConfig) -> Self {
+        // Detect SIMD FEC level at runtime
+        let simd_fec_level = FecSimdLevel::detect();
+        tracing::info!("SIMD FEC level: {:?}", simd_fec_level);
+
+        // Initialize io_uring on Linux if enabled
+        #[cfg(target_os = "linux")]
+        let io_uring = if config.enable_io_uring {
+            match UringInstance::new(256, 64, 65536) {
+                Ok(ring) => {
+                    tracing::info!("io_uring initialized with 256 entries, 64 buffers");
+                    Some(Mutex::new(ring))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to initialize io_uring: {}, falling back to standard I/O",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         HighPerfPipeline {
             fec: Mutex::new(AdaptiveFec::new()),
             buffer_pool: Mutex::new(BufferPool::new(65536, 64, config.buffer_pool_size)),
             batcher: Mutex::new(UdpBatcher::with_config(config.max_batch_size, 1472)),
             coalescer: Mutex::new(UdpCoalescer::default()),
             multipath: Mutex::new(MultipathScheduler::new(SchedulingStrategy::Weighted)),
+            parallel_compressor: ParallelCompressor::new(100), // Min 100 bytes to compress
+            priority_scheduler: Mutex::new(PriorityScheduler::new(1000)),
+            simd_fec_level,
             ring_buffer: Mutex::new(PacketRingBuffer::new(1024 * 1024)), // 1MB ring
             stats: Arc::new(PipelineStatsAtomic::default()),
             last_flush: Mutex::new(Instant::now()),
+            #[cfg(target_os = "linux")]
+            io_uring,
+            latency_tracker: LatencyTracker::default(),
+            heuristic_engine: HeuristicEngine::new(),
+            simd_compressor: SimdCompressor::new(),
             config,
         }
     }
@@ -279,6 +351,36 @@ impl HighPerfPipeline {
     pub async fn flush(&self) -> Vec<GsoBatch> {
         let mut batcher = self.batcher.lock().await;
         batcher.flush_all()
+    }
+
+    /// Compress data using parallel compression if enabled
+    pub fn compress_parallel(&self, data: &[u8]) -> Vec<u8> {
+        if self.config.enable_parallel_compression {
+            self.parallel_compressor.compress(data)
+        } else {
+            data.to_vec()
+        }
+    }
+
+    /// Get compression statistics
+    pub fn compression_stats(&self) -> f64 {
+        self.parallel_compressor.stats.compression_ratio()
+    }
+
+    /// Get the detected SIMD FEC level
+    pub fn simd_level(&self) -> FecSimdLevel {
+        self.simd_fec_level
+    }
+
+    /// Check if SIMD FEC is available
+    pub fn has_simd_fec(&self) -> bool {
+        self.config.enable_simd_fec && self.simd_fec_level != FecSimdLevel::Scalar
+    }
+
+    /// Get number of streams in priority scheduler
+    pub async fn scheduled_streams(&self) -> usize {
+        let scheduler = self.priority_scheduler.lock().await;
+        scheduler.pending_count()
     }
 
     /// Get pipeline statistics

@@ -67,9 +67,9 @@ async fn main() -> Result<()> {
         println!("\n=== Mobile Tunnel Server Configuration ===");
         println!("Server ID: {}", server_id_hex);
         println!("\nAdd to your server config.toml:");
-        println!("[mobile_tunnel]");
-        println!("enable_mobile_tunnel = true");
-        println!("mobile_tunnel_port = 51820");
+        println!("[oxtunnel]");
+        println!("enable_oxtunnel = true");
+        println!("oxtunnel_port = 51820");
 
         println!("\n=== Client Configuration ===");
         let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
@@ -144,9 +144,9 @@ async fn main() -> Result<()> {
 
     // Start Mobile Tunnel server if enabled
     let config_ref = server.config();
-    if config_ref.enable_mobile_tunnel {
-        let mobile_port = config_ref.mobile_tunnel_port.unwrap_or(51820);
-        let mobile_addr: SocketAddr = format!("0.0.0.0:{}", mobile_port).parse()?;
+    if config_ref.enable_oxtunnel {
+        let oxtunnel_port = config_ref.oxtunnel_port.unwrap_or(51820);
+        let oxtunnel_addr: SocketAddr = format!("0.0.0.0:{}", oxtunnel_port).parse()?;
 
         // Generate server ID
         let (server_id_hex, _, _) = generate_server_config()?;
@@ -158,16 +158,16 @@ async fn main() -> Result<()> {
         info!("╚════════════════════════════════════════════════════════════════╝");
 
         let mobile_config = MobileServerConfig {
-            listen_addr: mobile_addr,
+            listen_addr: oxtunnel_addr,
             enable_encryption: true,
             ..Default::default()
         };
 
         let mobile_server = MobileTunnelServer::new(mobile_config).await?;
-        info!("📱 Mobile Tunnel server listening on {}", mobile_addr);
+        info!("📱 OxTunnel server listening on {}", oxtunnel_addr);
 
         // Auto-display client config for mobile users
-        let endpoint = format!("{}:{}", args.listen.ip(), mobile_port);
+        let endpoint = format!("{}:{}", args.listen.ip(), oxtunnel_port);
         let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
 
         info!("╔════════════════════════════════════════════════════════════════╗");

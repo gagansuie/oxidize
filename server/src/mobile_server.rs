@@ -4,7 +4,7 @@
 //! Oxidize Mobile Tunnel Protocol. Replaces WireGuard with faster, lighter implementation.
 
 use anyhow::{Context, Result};
-use oxidize_common::mobile_tunnel::{
+use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, CryptoEngine, HandshakeInit,
     HandshakeResponse, IpPool, PacketBatch, PacketHeader, TunnelBufferPool, TunnelSession,
     TunnelStats, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,

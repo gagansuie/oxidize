@@ -4,7 +4,7 @@
 //! This allows desktop and mobile clients to use the same OxTunnel protocol
 //! over whichever transport is most appropriate for their platform.
 
-use crate::mobile_tunnel::{
+use crate::oxtunnel_protocol::{
     decode_packet, encode_packet, flags, CryptoEngine, HandshakeInit, HandshakeResponse,
     PacketBatch, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
 };
@@ -329,7 +329,7 @@ pub fn parse_handshake_response(data: &[u8]) -> Option<HandshakeResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mobile_tunnel::generate_id;
+    use crate::oxtunnel_protocol::generate_id;
 
     #[test]
     fn test_config_desktop() {

@@ -1,7 +1,7 @@
 //! High-Performance Pipeline
 //!
-//! Integrates DPDK, BBRv3, and XDP for maximum throughput on Hetzner bare metal.
-//! Target: 10-40 Gbps with sub-5µs latency per packet.
+//! Integrates kernel bypass and BBRv3 for maximum throughput on Vultr bare metal.
+//! Target: 40-100+ Gbps with sub-1µs latency per packet.
 
 #![allow(dead_code)] // Integration scaffolding
 
@@ -9,21 +9,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(all(target_os = "linux", feature = "dpdk"))]
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 use tracing::debug;
 use tracing::info;
 
 #[cfg(target_os = "linux")]
 use oxidize_common::bbr_v3::{BbrCongestionControl, BbrState};
-// DPDK is feature-gated - only available with --features dpdk
-#[cfg(all(target_os = "linux", feature = "dpdk"))]
-use oxidize_common::dpdk::{DpdkConfig, DpdkPacket, DpdkProcessor};
+// Kernel bypass is feature-gated - only available with --features kernel-bypass
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor};
 
 /// High-performance pipeline configuration
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// DPDK configuration
-    pub dpdk: DpdkConfigWrapper,
+    /// Kernel bypass configuration
+    pub bypass: BypassConfigWrapper,
     /// BBRv3 configuration
     pub bbr: BbrConfigWrapper,
     /// Number of worker threads
@@ -38,9 +38,9 @@ pub struct PipelineConfig {
     pub quic_port: u16,
 }
 
-/// Wrapper for DPDK config (allows non-Linux builds)
+/// Wrapper for kernel bypass config (allows non-Linux builds)
 #[derive(Debug, Clone, Default)]
-pub struct DpdkConfigWrapper {
+pub struct BypassConfigWrapper {
     pub pci_address: String,
     pub rx_queues: u16,
     pub tx_queues: u16,
@@ -66,7 +66,7 @@ impl Default for BbrConfigWrapper {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            dpdk: DpdkConfigWrapper::default(),
+            bypass: BypassConfigWrapper::default(),
             bbr: BbrConfigWrapper::default(),
             workers: std::thread::available_parallelism()
                 .map(|p| p.get())
@@ -84,7 +84,7 @@ impl PipelineConfig {
     /// Configuration for maximum throughput
     pub fn high_throughput() -> Self {
         Self {
-            dpdk: DpdkConfigWrapper {
+            bypass: BypassConfigWrapper {
                 rx_queues: 8,
                 tx_queues: 8,
                 enable_rss: true,
@@ -107,7 +107,7 @@ impl PipelineConfig {
     /// Configuration for gaming (low latency)
     pub fn gaming() -> Self {
         Self {
-            dpdk: DpdkConfigWrapper {
+            bypass: BypassConfigWrapper {
                 rx_queues: 4,
                 tx_queues: 4,
                 enable_rss: true,
@@ -164,10 +164,10 @@ pub struct HighPerfPipeline {
     stats: Arc<PipelineStats>,
     running: Arc<AtomicBool>,
     start_time: Instant,
-    #[cfg(all(target_os = "linux", feature = "dpdk"))]
-    dpdk: Option<DpdkProcessor>,
-    #[cfg(all(target_os = "linux", not(feature = "dpdk")))]
-    dpdk: Option<()>,
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    bypass: Option<BypassProcessor>,
+    #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
+    bypass: Option<()>,
     #[cfg(target_os = "linux")]
     bbr_controllers: Vec<BbrCongestionControl>,
 }
@@ -195,23 +195,23 @@ impl HighPerfPipeline {
             }
         );
 
-        #[cfg(all(target_os = "linux", feature = "dpdk"))]
-        let dpdk = if !config.dpdk.pci_address.is_empty() {
-            let dpdk_config = DpdkConfig {
-                pci_address: config.dpdk.pci_address.clone(),
-                rx_queues: config.dpdk.rx_queues,
-                tx_queues: config.dpdk.tx_queues,
-                enable_rss: config.dpdk.enable_rss,
+        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        let bypass = if !config.bypass.pci_address.is_empty() {
+            let bypass_config = BypassConfig {
+                pci_address: config.bypass.pci_address.clone(),
+                rx_queues: config.bypass.rx_queues,
+                tx_queues: config.bypass.tx_queues,
+                enable_rss: config.bypass.enable_rss,
                 quic_port: config.quic_port,
-                ..DpdkConfig::default()
+                ..BypassConfig::default()
             };
-            Some(DpdkProcessor::new(dpdk_config)?)
+            Some(BypassProcessor::new(bypass_config)?)
         } else {
-            info!("DPDK disabled - no PCI address configured");
+            info!("Kernel bypass disabled - no PCI address configured");
             None
         };
-        #[cfg(all(target_os = "linux", not(feature = "dpdk")))]
-        let dpdk: Option<()> = None;
+        #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
+        let bypass: Option<()> = None;
 
         #[cfg(target_os = "linux")]
         let bbr_controllers = (0..config.workers)
@@ -230,25 +230,25 @@ impl HighPerfPipeline {
             running: Arc::new(AtomicBool::new(false)),
             start_time: Instant::now(),
             #[cfg(target_os = "linux")]
-            dpdk,
+            bypass,
             #[cfg(target_os = "linux")]
             bbr_controllers,
         })
     }
 
-    /// Check if DPDK is available and configured
-    #[cfg(all(target_os = "linux", feature = "dpdk"))]
-    pub fn dpdk_available(&self) -> bool {
-        self.dpdk.is_some() && DpdkProcessor::is_available()
+    /// Check if kernel bypass is available and configured
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    pub fn bypass_available(&self) -> bool {
+        self.bypass.is_some() && BypassProcessor::is_available()
     }
 
-    #[cfg(all(target_os = "linux", not(feature = "dpdk")))]
-    pub fn dpdk_available(&self) -> bool {
+    #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
+    pub fn bypass_available(&self) -> bool {
         false
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn dpdk_available(&self) -> bool {
+    pub fn bypass_available(&self) -> bool {
         false
     }
 
@@ -257,9 +257,9 @@ impl HighPerfPipeline {
         self.running.store(true, Ordering::SeqCst);
         self.start_time = Instant::now();
 
-        #[cfg(all(target_os = "linux", feature = "dpdk"))]
-        if let Some(ref dpdk) = self.dpdk {
-            dpdk.start();
+        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        if let Some(ref bypass) = self.bypass {
+            bypass.start();
         }
 
         info!("High-performance pipeline started");
@@ -269,9 +269,9 @@ impl HighPerfPipeline {
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
 
-        #[cfg(all(target_os = "linux", feature = "dpdk"))]
-        if let Some(ref dpdk) = self.dpdk {
-            dpdk.stop();
+        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        if let Some(ref bypass) = self.bypass {
+            bypass.stop();
         }
 
         info!("{}", self.stats.summary(self.start_time.elapsed()));
@@ -288,12 +288,12 @@ impl HighPerfPipeline {
     }
 
     /// Process a batch of packets (main hot path)
-    #[cfg(all(target_os = "linux", feature = "dpdk"))]
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
     pub fn process_batch(
         &mut self,
         worker_id: usize,
-        packets: &mut Vec<DpdkPacket>,
-    ) -> Vec<DpdkPacket> {
+        packets: &mut Vec<BypassPacket>,
+    ) -> Vec<BypassPacket> {
         let start = Instant::now();
         let mut output = Vec::with_capacity(packets.len());
         let bbr_idx = worker_id % self.bbr_controllers.len();
@@ -351,8 +351,8 @@ impl HighPerfPipeline {
     }
 
     /// Process a single packet
-    #[cfg(all(target_os = "linux", feature = "dpdk"))]
-    fn process_single_packet(&self, mut packet: DpdkPacket) -> Option<DpdkPacket> {
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    fn process_single_packet(&self, mut packet: BypassPacket) -> Option<BypassPacket> {
         // Parse headers
         if !packet.parse_headers() {
             return None;
@@ -416,7 +416,7 @@ pub struct PipelineIntegration;
 impl PipelineIntegration {
     /// Create pipeline from server config
     pub fn from_config(
-        enable_dpdk: bool,
+        enable_bypass: bool,
         pci_address: Option<&str>,
         gaming_mode: bool,
         quic_port: u16,
@@ -427,9 +427,9 @@ impl PipelineIntegration {
             PipelineConfig::high_throughput()
         };
 
-        if enable_dpdk {
+        if enable_bypass {
             if let Some(pci) = pci_address {
-                config.dpdk.pci_address = pci.to_string();
+                config.bypass.pci_address = pci.to_string();
             }
         }
 
@@ -440,10 +440,10 @@ impl PipelineIntegration {
     /// Check system capabilities
     pub fn check_capabilities() -> PipelineCapabilities {
         PipelineCapabilities {
-            #[cfg(all(target_os = "linux", feature = "dpdk"))]
-            dpdk_available: DpdkProcessor::is_available(),
-            #[cfg(not(all(target_os = "linux", feature = "dpdk")))]
-            dpdk_available: false,
+            #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+            bypass_available: BypassProcessor::is_available(),
+            #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+            bypass_available: false,
             #[cfg(target_os = "linux")]
             ktls_available: oxidize_common::ktls::KtlsSocket::is_available(),
             #[cfg(not(target_os = "linux"))]
@@ -459,7 +459,7 @@ impl PipelineIntegration {
 /// System capabilities for pipeline
 #[derive(Debug)]
 pub struct PipelineCapabilities {
-    pub dpdk_available: bool,
+    pub bypass_available: bool,
     pub ktls_available: bool,
     pub cpu_cores: usize,
     pub numa_nodes: usize,
@@ -468,8 +468,8 @@ pub struct PipelineCapabilities {
 impl PipelineCapabilities {
     pub fn summary(&self) -> String {
         format!(
-            "Capabilities: DPDK={}, kTLS={}, cores={}, NUMA={}",
-            if self.dpdk_available { "yes" } else { "no" },
+            "Capabilities: Bypass={}, kTLS={}, cores={}, NUMA={}",
+            if self.bypass_available { "yes" } else { "no" },
             if self.ktls_available { "yes" } else { "no" },
             self.cpu_cores,
             self.numa_nodes

@@ -49,11 +49,5 @@ rand = "0.8"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
 webpki-roots = "0.26"
 
-# High-performance networking (AF_XDP)
-aya = "0.12"              # eBPF loader
-aya-log = "0.2"           # eBPF logging
-xsk-rs = "0.4"            # AF_XDP sockets for zero-copy networking
-libbpf-rs = "0.22"        # Alternative eBPF bindings
-
 # Crypto acceleration
 ring = "0.17"             # Hardware-accelerated crypto (AES-NI, etc.)

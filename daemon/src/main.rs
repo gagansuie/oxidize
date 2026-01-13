@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use oxidize_common::mobile_tunnel::{
+// OxTunnelConfig available for future daemon OxTunnel integration
+#[allow(unused_imports)]
+use oxidize_common::oxtunnel_client::OxTunnelConfig;
+use oxidize_common::oxtunnel_protocol::{
     encode_packet, flags, PacketBatch, HEADER_SIZE, MAX_PACKET_SIZE,
 };
 use oxidize_common::packet_capture::{create_queue, QueueConfig, Verdict};

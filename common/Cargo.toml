@@ -8,7 +8,7 @@ license = { workspace = true }
 [features]
 default = ["ai"]
 ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
-dpdk = []  # DPDK kernel bypass for bare metal (40+ Gbps) - Vultr deployment
+kernel-bypass = []  # Kernel bypass for bare metal (100+ Gbps) - Vultr deployment
 
 [[bin]]
 name = "oxidize-train"

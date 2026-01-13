@@ -7,7 +7,7 @@ license = { workspace = true }
 
 [features]
 default = []
-dpdk = ["oxidize-common/dpdk"]  # DPDK kernel bypass for bare metal (40+ Gbps)
+kernel-bypass = ["oxidize-common/kernel-bypass"]  # Kernel bypass for bare metal (100+ Gbps)
 
 [[bin]]
 name = "oxidize-server"

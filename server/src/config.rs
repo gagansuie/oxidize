@@ -33,11 +33,10 @@ pub struct Config {
     #[serde(default = "default_enable_challenges")]
     pub enable_challenges: bool,
 
-    // Mobile Tunnel settings
-    #[serde(default = "default_enable_mobile_tunnel")]
-    pub enable_mobile_tunnel: bool,
-    #[serde(default)]
-    pub mobile_tunnel_port: Option<u16>,
+    // Oxtunnel settings
+    #[serde(default = "default_enable_oxtunnel")]
+    pub enable_oxtunnel: bool,
+    pub oxtunnel_port: Option<u16>,
 
     /// Enable ROHC (Robust Header Compression) for IP/UDP/TCP headers
     #[serde(default = "default_enable_rohc")]
@@ -79,7 +78,7 @@ pub struct Config {
     pub max_early_data_size: u32,
 }
 
-fn default_enable_mobile_tunnel() -> bool {
+fn default_enable_oxtunnel() -> bool {
     false
 }
 
@@ -158,8 +157,8 @@ impl Default for Config {
             tls_key_path: None,
             rate_limit_per_ip: 100,
             rate_limit_window_secs: 60,
-            enable_mobile_tunnel: false,
-            mobile_tunnel_port: None,
+            enable_oxtunnel: false,
+            oxtunnel_port: None,
             enable_rohc: true,
             rohc_max_size: 1500,
             ack_batch_size: 8,

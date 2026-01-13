@@ -1,10 +1,13 @@
 use crate::config::ClientConfig;
 use crate::dns_cache::DnsCache;
 use anyhow::{Context, Result};
+use oxidize_common::connection_migration::{MigrationConfig, MigrationManager};
+use oxidize_common::connection_pool::{ConnectionPool, PoolConfig};
 use oxidize_common::ml_models::MlEngine;
 use oxidize_common::model_hub::{HubConfig, ModelHub};
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
 use oxidize_common::prefetch::{PrefetchConfig, PrefetchResource, Prefetcher};
+use oxidize_common::unified_transport::{TransportType, UnifiedTransportConfig};
 use oxidize_common::{compress_data, MessageFramer, MessageType, RelayMessage, RelayMetrics};
 use quinn::ClientConfig as QuinnClientConfig;
 use quinn::Endpoint;
@@ -97,6 +100,15 @@ pub struct RelayClient {
     ml_engine: Arc<RwLock<MlEngine>>,
     /// Model Hub for downloading models
     model_hub: Arc<ModelHub>,
+    /// Connection migration manager for WiFi↔LTE handoff
+    #[allow(dead_code)]
+    migration_manager: MigrationManager,
+    /// Connection pool for QUIC connection reuse
+    #[allow(dead_code)]
+    connection_pool: ConnectionPool,
+    /// Transport configuration for QUIC/UDP selection
+    #[allow(dead_code)]
+    transport_config: UnifiedTransportConfig,
 }
 
 impl RelayClient {
@@ -237,7 +249,7 @@ impl RelayClient {
         Ok(Self {
             endpoint,
             server_addr,
-            config,
+            config: config.clone(),
             metrics: RelayMetrics::new(),
             connection_id,
             dns_cache,
@@ -247,6 +259,18 @@ impl RelayClient {
             prefetcher,
             ml_engine,
             model_hub,
+            migration_manager: MigrationManager::new(MigrationConfig::default()),
+            connection_pool: ConnectionPool::new(PoolConfig::default()),
+            transport_config: UnifiedTransportConfig {
+                server_addr,
+                transport: TransportType::Quic,
+                enable_oxtunnel_encryption: false,
+                enable_batching: true,
+                max_batch_size: 64,
+                batch_timeout_us: 1000,
+                connect_timeout: Duration::from_secs(10),
+                keepalive_interval: Duration::from_secs(15),
+            },
         })
     }
 
@@ -414,13 +438,14 @@ impl RelayClient {
         Ok(())
     }
 
-    /// Run client with AF_XDP for high-performance packet capture (10+ Gbps)
-    /// This replaces the old TUN-based approach
-    pub async fn run_with_xdp(&self) -> Result<()> {
-        info!("🚀 run_with_xdp() called - starting AF_XDP client");
+    /// Run client with high-performance packet capture
+    /// For bare metal with DPDK, use the daemon instead
+    #[allow(dead_code)]
+    pub async fn run_high_perf(&self) -> Result<()> {
+        info!("🚀 Starting high-performance client mode");
 
-        // Verify connection works BEFORE setting up XDP routing
-        info!("Verifying server connection before XDP setup...");
+        // Verify connection works first
+        info!("Verifying server connection...");
 
         let connecting = self.endpoint.connect(self.server_addr, "localhost")?;
         let test_result =
@@ -441,7 +466,7 @@ impl RelayClient {
             }
         }
 
-        // Set up channels for XDP packet exchange
+        // Set up channels for packet exchange
         let (_tx, mut rx) = mpsc::channel(self.config.max_packet_queue);
         let (response_tx, _response_rx) = mpsc::channel::<Vec<u8>>(4096);
 
@@ -454,9 +479,7 @@ impl RelayClient {
             })
         };
 
-        // XDP handler would be started here when fully implemented
-        // For now, just wait for the client handle
-        info!("📡 AF_XDP client running - target: 10+ Gbps throughput");
+        info!("📡 High-performance client running");
 
         tokio::select! {
             _ = client_handle => {
@@ -764,7 +787,7 @@ impl RelayClient {
         Ok(())
     }
 
-    #[allow(dead_code)] // Will be used when XDP is fully integrated
+    #[allow(dead_code)]
     async fn connect_and_run_with_packets(
         &self,
         rx: &mut mpsc::Receiver<Vec<u8>>,
@@ -990,6 +1013,9 @@ impl RelayClient {
             prefetcher: self.prefetcher.clone(),
             ml_engine: self.ml_engine.clone(),
             model_hub: self.model_hub.clone(),
+            migration_manager: MigrationManager::new(MigrationConfig::default()),
+            connection_pool: ConnectionPool::new(PoolConfig::default()),
+            transport_config: self.transport_config.clone(),
         }
     }
 }

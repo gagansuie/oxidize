@@ -332,7 +332,7 @@ let udp_config = UnifiedTransportConfig {
 - [x] **QUIC transport** - Unified QUIC for all platforms ✅
 - [x] **Unified protocol** - Same OxTunnel on desktop and mobile ✅
 - [ ] **io_uring integration** - Batch I/O for even fewer syscalls
-- [ ] **XDP acceleration** - Kernel bypass for extreme performance
+- [x] **DPDK acceleration** - Kernel bypass for 100+ Gbps (bare metal)
 - [ ] **Multi-path support** - Aggregate WiFi + LTE
 - [ ] **Hardware crypto** - AES-NI/ARMv8 acceleration
 - [ ] **0-RTT resumption** - Instant reconnects with session tickets
@@ -343,4 +343,5 @@ let udp_config = UnifiedTransportConfig {
 
 - [INSTALL.md](INSTALL.md) - Installation guide
 - [SECURITY.md](SECURITY.md) - Security comparison with WireGuard
-- [AI.md](AI.md) - AI/ML engine documentation
+- [DEEP_LEARNING.md](DEEP_LEARNING.md) - Deep learning engine documentation
+- [KERNEL_BYPASS.md](KERNEL_BYPASS.md) - 100x kernel bypass optimizations

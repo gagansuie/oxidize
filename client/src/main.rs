@@ -27,9 +27,6 @@ struct Args {
     #[arg(short, long)]
     verbose: bool,
 
-    #[arg(long)]
-    no_xdp: bool,
-
     /// Run a speed test comparing direct vs relay connection
     #[arg(long)]
     speedtest: bool,
@@ -143,13 +140,8 @@ async fn main() -> Result<()> {
         }
     });
 
-    if !args.no_xdp {
-        info!("🚀 Starting AF_XDP high-performance mode (10+ Gbps)...");
-        client.run_with_xdp().await?;
-    } else {
-        info!("⚙️  Running in proxy mode (no packet capture)...");
-        client.run().await?;
-    }
+    info!("🚀 Starting Oxidize client...");
+    client.run().await?;
 
     Ok(())
 }
