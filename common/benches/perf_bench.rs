@@ -225,6 +225,7 @@ fn bench_adaptive_fec() {
     for _ in 0..100 {
         let seq = fec_light.encode(&data).unwrap().seq;
         // Simulate some loss to trigger adaptation
+        #[allow(clippy::manual_is_multiple_of)]
         if seq % 10 != 0 {
             fec_light.ack(seq);
         }
