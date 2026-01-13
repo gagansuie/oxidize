@@ -288,7 +288,7 @@ impl RelayClient {
                     match connection.send_datagram(packet.into()) {
                         Ok(_) => {
                             self.metrics.record_sent(len as u64);
-                            if forwarded_count % 100 == 0 {
+                            if forwarded_count.is_multiple_of(100) {
                                 info!("📤 Forwarded {} packets through QUIC ({} failed)", forwarded_count, failed_count);
                             }
                         }
@@ -560,7 +560,7 @@ impl RelayClient {
                                         // Log all message types received
                                         static MSG_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                                         let msg_count = MSG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        if msg_count % 50 == 0 {
+                                        if msg_count.is_multiple_of(50) {
                                             info!("📨 Received {} messages, latest type: {:?}", msg_count, message.msg_type);
                                         }
 
@@ -568,7 +568,7 @@ impl RelayClient {
                                             // Log every 100th Data packet at INFO level
                                             static DATA_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                                             let count = DATA_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            if count % 100 == 0 {
+                                            if count.is_multiple_of(100) {
                                                 info!("📥 Received {} Data packets from server", count);
                                             }
                                             if response_tx.send(message.payload).await.is_err() {

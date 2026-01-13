@@ -476,7 +476,7 @@ fn run_nfqueue_capture(
                 metrics.record_received(len as u64);
 
                 // Log periodically
-                if packet_count % 100 == 0 {
+                if packet_count.is_multiple_of(100) {
                     info!(
                         "📦 Captured {} packets via NFQUEUE, last: {} bytes",
                         packet_count, len

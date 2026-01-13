@@ -399,8 +399,8 @@ impl DqnTrainer {
         self.steps_trained += 1;
 
         // Soft update target network
-        #[allow(clippy::manual_is_multiple_of)]
-        if self.target_update_freq > 0 && self.steps_trained % self.target_update_freq == 0 {
+        if self.target_update_freq > 0 && self.steps_trained.is_multiple_of(self.target_update_freq)
+        {
             self.soft_update_target()?;
         }
 
