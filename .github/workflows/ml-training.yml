@@ -71,60 +71,33 @@ jobs:
           huggingface-cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
           
           if [ -d "./hf_download/training_data" ]; then
-            # Count files before aggregation
             FILE_COUNT=$(find ./hf_download/training_data -name '*.json' 2>/dev/null | wc -l)
             echo "Found $FILE_COUNT training data files from servers"
-            
-            # Copy all training data files
             cp -r ./hf_download/training_data/* ./training_data/ 2>/dev/null || true
-            
-            # Aggregate all loss samples into single file
-            echo "Aggregating loss samples..."
-            python3 << 'PYEOF'
-import json
-import glob
-import os
-
-# Aggregate loss samples
-loss_samples = []
-for f in glob.glob('training_data/*loss*.json') + glob.glob('training_data/training-*.json'):
-    try:
-        with open(f) as fp:
-            data = json.load(fp)
-            if isinstance(data, list):
-                loss_samples.extend(data)
-            elif isinstance(data, dict) and 'loss_samples' in data:
-                loss_samples.extend(data['loss_samples'])
-    except Exception as e:
-        print(f'Warning: Could not parse {f}: {e}')
-
-# Aggregate DRL experiences
-drl_experiences = []
-for f in glob.glob('training_data/*drl*.json') + glob.glob('training_data/*experience*.json') + glob.glob('training_data/training-*.json'):
-    try:
-        with open(f) as fp:
-            data = json.load(fp)
-            if isinstance(data, list) and len(data) > 0 and 'state' in str(data[0]):
-                drl_experiences.extend(data)
-            elif isinstance(data, dict) and 'drl_experiences' in data:
-                drl_experiences.extend(data['drl_experiences'])
-    except Exception as e:
-        print(f'Warning: Could not parse {f}: {e}')
-
-print(f'Aggregated {len(loss_samples)} loss samples')
-print(f'Aggregated {len(drl_experiences)} DRL experiences')
-
-# Write aggregated files
-if loss_samples:
-    with open('training_data/loss_samples.json', 'w') as fp:
-        json.dump(loss_samples, fp)
-
-if drl_experiences:
-    with open('training_data/drl_experiences.json', 'w') as fp:
-        json.dump(drl_experiences, fp)
-PYEOF
           fi
-          
+
+      - name: Aggregate training data
+        run: |
+          echo "Aggregating loss samples..."
+          python3 -c "
+          import json, glob
+          loss_samples, drl_experiences = [], []
+          for f in glob.glob('training_data/*loss*.json') + glob.glob('training_data/training-*.json'):
+              try:
+                  data = json.load(open(f))
+                  if isinstance(data, list): loss_samples.extend(data)
+                  elif isinstance(data, dict) and 'loss_samples' in data: loss_samples.extend(data['loss_samples'])
+              except Exception as e: print(f'Warning: Could not parse {f}: {e}')
+          for f in glob.glob('training_data/*drl*.json') + glob.glob('training_data/*experience*.json') + glob.glob('training_data/training-*.json'):
+              try:
+                  data = json.load(open(f))
+                  if isinstance(data, list) and len(data) > 0 and 'state' in str(data[0]): drl_experiences.extend(data)
+                  elif isinstance(data, dict) and 'drl_experiences' in data: drl_experiences.extend(data['drl_experiences'])
+              except Exception as e: print(f'Warning: Could not parse {f}: {e}')
+          print(f'Aggregated {len(loss_samples)} loss samples, {len(drl_experiences)} DRL experiences')
+          if loss_samples: json.dump(loss_samples, open('training_data/loss_samples.json', 'w'))
+          if drl_experiences: json.dump(drl_experiences, open('training_data/drl_experiences.json', 'w'))
+          "
           echo "Training samples ready: $(find training_data -name '*.json' | wc -l) files"
 
       - name: Train models
