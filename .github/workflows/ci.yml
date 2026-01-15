@@ -48,6 +48,10 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
+      - name: Check frontend (TypeScript/Svelte)
+        working-directory: app
+        run: bun run check
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -79,18 +83,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Build daemon (required by Tauri)
+        run: cargo build --release --package oxidize-daemon
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
+
       - name: Build (CI profile - no LTO for speed)
-        run: cargo build --profile ci --all
+        run: cargo build --profile ci --workspace
         env:
           CARGO_INCREMENTAL: 0
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --workspace
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
