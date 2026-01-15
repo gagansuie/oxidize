@@ -297,6 +297,7 @@ impl RelayClient {
 
     /// Establish QUIC connection (handshake only, no message loop)
     /// Call this before setting up NFQUEUE to ensure the connection is established
+    #[allow(dead_code)]
     pub async fn connect(&self) -> Result<quinn::Connection> {
         info!("🔌 Establishing QUIC connection to {}...", self.server_addr);
 
@@ -320,6 +321,7 @@ impl RelayClient {
 
     /// Run with an existing connection and packet sender channel
     /// Use connect() first to establish the connection before NFQUEUE setup
+    #[allow(dead_code)]
     pub async fn run_with_connection(
         &self,
         connection: quinn::Connection,
