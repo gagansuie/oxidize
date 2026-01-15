@@ -6,7 +6,7 @@
 
 **Neural networks predict packet loss before it happens, optimize routing in real-time, and accelerate your network automatically.**
 
-> 🔥 **10,000-50,000 concurrent users** per instance • **0.7µs** per-packet processing • **100+ Gbps** with kernel bypass
+> 🔥 **0.7µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
@@ -77,30 +77,38 @@ Your ISP's routing is suboptimal:
 Custom high-performance tunnel protocol replacing WireGuard with **unified architecture** for all platforms:
 
 ```
-Desktop (NFQUEUE) ──┐                      ┌── QUIC Datagrams ──┐
-                    ├── OxTunnel Batching ─┤                    ├── Relay Server
-Mobile (VpnService) ┘                      └── UDP Fallback ────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         OxTunnel Protocol                           │
+├─────────────────────────────────────────────────────────────────────┤
+│  Linux:   App → NFQUEUE → OxTunnel → QUIC Datagrams → Server       │
+│  macOS:   App → PF/Utun → OxTunnel → QUIC Datagrams → Server       │
+│  Windows: App → WinDivert → OxTunnel → QUIC Datagrams → Server     │
+│  Android: App → VpnService → OxTunnel → QUIC Datagrams → Server    │
+│  iOS:     App → NEPacketTunnel → OxTunnel → QUIC Datagrams → Server│
+└─────────────────────────────────────────────────────────────────────┘
+         All platforms: UDP fallback when QUIC is blocked
 ```
 
-- **Same protocol everywhere** - Desktop, Android, iOS use identical OxTunnel encapsulation
+- **Same protocol everywhere** - All platforms use identical OxTunnel encapsulation
+- **Platform-specific capture** - NFQUEUE (Linux), PF (macOS), WinDivert (Windows), VpnService (Android)
 - **QUIC primary transport** - Encrypted, multiplexed, 0-RTT for all platforms
 - **UDP fallback** - For networks that block QUIC
 - **9-byte header** - Minimal overhead vs WireGuard's 32+ byte Noise protocol
 - **64 packets/batch** - Reduces syscalls by 64x
-- **Optional encryption** - ChaCha20-Poly1305 when needed, skip on QUIC (already encrypted)
 - **Zero-copy buffer pools** - 128 pre-allocated buffers, no heap allocation per packet
 
 | Feature | WireGuard | OxTunnel |
 |---------|-----------|----------|
 | Header size | 32+ bytes | 9 bytes |
-| Encryption | Always on | Optional (QUIC encrypts) |
-| Handshake | Multi-round | Single round-trip |
-| Buffer allocation | Per-packet | Zero-copy pool |
+| Encryption | Double (WG + TLS) | Single (QUIC TLS 1.3) |
+| Handshake | Multi-round Noise | Single round-trip |
+| Buffer allocation | Per-packet malloc | Zero-copy pool |
 | Batch processing | No | 64 packets/batch |
+| Packet capture | TUN device | NFQUEUE/PF/WinDivert |
 | Transport | UDP only | QUIC + UDP fallback |
 | Cross-platform | Separate implementations | Unified protocol |
 
-### 🎭 MASQUE-Inspired "Invisible Relay" (NEW)
+### 🎭 MASQUE-Inspired Architecture
 Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-warp-with-a-masque/):
 - **QUIC Datagrams** - Real-time traffic (gaming/VoIP) bypasses stream ordering, eliminating head-of-line blocking
 - **0-RTT Session Resumption** - Instant reconnects via cached session tickets
@@ -358,7 +366,7 @@ enable_priority_scheduler = true
 curl http://localhost:9090/metrics
 ```
 
-**Latency Metrics** (new):
+**Latency Metrics:**
 ```
 ║ Avg Process Latency: 0.7µs    # Per-packet processing time
 ║ Avg Forward Latency: 12.3µs   # Time to forward to destination
@@ -372,17 +380,40 @@ Use these metrics to identify bottlenecks and tune `ack_batch_size` for your wor
 
 See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
-## Daemon Management
+## Desktop App
 
-The daemon enables **NFQUEUE + OxTunnel** for automatic traffic optimization with unified protocol:
+The Oxidize desktop app provides a modern GUI for managing connections:
 
 ### Features
-- **Unified OxTunnel Protocol** - Same protocol as mobile clients
-- **Auto-connect on start** - No manual intervention needed
-- **NFQUEUE packet capture** - All UDP traffic captured at kernel level
-- **OxTunnel batching** - 64 packets/batch before sending over QUIC
+- **Auto-connect** - Automatically connects to closest region on launch (configurable)
+- **Closest Region Detection** - Uses IP geolocation + haversine distance to find optimal server
+- **Server List** - Browse all available regions with status, latency, and server count
+- **Connection Stats** - Real-time bytes sent/received and uptime
+- **Launch at Startup** - Optional system startup integration
+
+### Settings
+| Setting | Description |
+|---------|-------------|
+| Launch at Startup | Start Oxidize when your computer boots |
+| Auto-connect | Automatically connect to closest region on launch |
+
+---
+
+## Daemon Management
+
+The daemon runs **OxTunnel** - our unified protocol that captures packets via NFQUEUE and tunnels them over QUIC:
+
+### How OxTunnel Works (Linux)
+```
+App Traffic → NFQUEUE (kernel) → OxTunnel Batching → QUIC Datagrams → Relay Server
+```
+
+### Features
+- **NFQUEUE packet capture** - Intercepts UDP at kernel level, processes in userspace
+- **64 packets/batch** - Reduces syscalls, improves throughput
 - **QUIC datagrams** - Zero head-of-line blocking for gaming/VoIP
-- **Pure userspace** - No kernel modules required
+- **Pure userspace** - No kernel modules, no TUN devices
+- **Same protocol as mobile** - Unified OxTunnel on all platforms
 
 ### Commands
 ```bash
@@ -448,7 +479,7 @@ cargo bench --package oxidize-common
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
-**Kernel Bypass Mode (100+ Gbps):**
+**Kernel Bypass Mode (100+ Gbps) (coming soon):**
 ```
 ╔════════════════════════════════════════════════════════════════╗
 ║              KERNEL BYPASS BENCHMARKS                          ║

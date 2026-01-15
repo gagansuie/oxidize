@@ -1,7 +1,7 @@
 //! Real io_uring Implementation for Linux
 //!
 //! Provides actual io_uring syscall batching for:
-//! - TUN device read/write
+//! - NFQUEUE packet read/write
 //! - UDP socket sendmsg/recvmsg
 //! - Zero-copy buffer registration
 //!
@@ -52,8 +52,8 @@ struct PendingOp {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 enum OpType {
-    TunRead,
-    TunWrite,
+    PacketRead,
+    PacketWrite,
     UdpSend,
     UdpRecv,
 }
@@ -118,8 +118,8 @@ impl UringInstance {
         })
     }
 
-    /// Queue a TUN read operation
-    pub fn queue_tun_read(&mut self, fd: RawFd, buffer_idx: usize) -> u64 {
+    /// Queue a packet read operation
+    pub fn queue_packet_read(&mut self, fd: RawFd, buffer_idx: usize) -> u64 {
         let user_data = self.next_id;
         self.next_id += 1;
 
@@ -135,7 +135,7 @@ impl UringInstance {
         self.pending.insert(
             user_data,
             PendingOp {
-                op_type: OpType::TunRead,
+                op_type: OpType::PacketRead,
                 buffer_idx: Some(buffer_idx),
             },
         );
@@ -144,8 +144,8 @@ impl UringInstance {
         user_data
     }
 
-    /// Queue a TUN write operation
-    pub fn queue_tun_write(&mut self, fd: RawFd, data: &[u8]) -> u64 {
+    /// Queue a packet write operation
+    pub fn queue_packet_write(&mut self, fd: RawFd, data: &[u8]) -> u64 {
         let user_data = self.next_id;
         self.next_id += 1;
 
@@ -160,7 +160,7 @@ impl UringInstance {
         self.pending.insert(
             user_data,
             PendingOp {
-                op_type: OpType::TunWrite,
+                op_type: OpType::PacketWrite,
                 buffer_idx: None,
             },
         );
@@ -169,13 +169,13 @@ impl UringInstance {
         user_data
     }
 
-    /// Queue multiple TUN writes (batched)
+    /// Queue multiple packet writes (batched)
     /// This is the key optimization - multiple packets in one submit
-    pub fn queue_tun_writes_batch(&mut self, fd: RawFd, packets: &[&[u8]]) -> Vec<u64> {
+    pub fn queue_packet_writes_batch(&mut self, fd: RawFd, packets: &[&[u8]]) -> Vec<u64> {
         let mut ids = Vec::with_capacity(packets.len());
 
         for data in packets {
-            ids.push(self.queue_tun_write(fd, data));
+            ids.push(self.queue_packet_write(fd, data));
         }
 
         // Track syscalls saved (n packets in 1 submit vs n syscalls)
@@ -321,7 +321,7 @@ impl Completion {
     }
 
     pub fn is_read(&self) -> bool {
-        matches!(self.op_type, OpType::TunRead | OpType::UdpRecv)
+        matches!(self.op_type, OpType::PacketRead | OpType::UdpRecv)
     }
 }
 

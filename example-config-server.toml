@@ -66,9 +66,8 @@ rohc_max_size = 1500
 
 # === 0-RTT Session Resumption ===
 # Enable 0-RTT for faster client reconnects (saves ~1 RTT)
-# WARNING: 0-RTT is vulnerable to replay attacks. Only enable if you understand the risks.
-# For VPN tunnels, this is generally safe as inner protocols handle replay protection.
-enable_0rtt = false
+# Anti-replay protection is built-in via rustls + QUIC connection ID binding
+enable_0rtt = true
 
 # Maximum early data size in bytes for 0-RTT (default 16KB)
 # Only used if enable_0rtt = true

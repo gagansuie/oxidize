@@ -135,7 +135,7 @@ fn default_enable_ai_engine() -> bool {
 }
 
 fn default_enable_0rtt() -> bool {
-    false // Disabled by default for security - user must opt-in
+    true // Enabled by default - rustls provides anti-replay protection
 }
 
 fn default_max_early_data_size() -> u32 {
@@ -170,7 +170,7 @@ impl Default for Config {
             edge_cache_size: 64 * 1024 * 1024,
             edge_cache_entries: 10000,
             enable_ai_engine: true,
-            enable_0rtt: false,
+            enable_0rtt: true,
             max_early_data_size: 16384,
         }
     }

@@ -168,8 +168,8 @@ compression_threshold = 512
 buffer_size = 65536
 max_packet_queue = 10000
 
-# TUN interface settings
-tun_mtu = 1400
+# Packet settings (NFQUEUE)
+packet_mtu = 1400
 
 # Connection settings
 reconnect_interval = 5
@@ -285,11 +285,9 @@ setup_firewall() {
     
     case $OS in
         ubuntu|debian|fedora|centos|rhel|arch)
-            # Allow TUN traffic
-            if command -v ufw &> /dev/null; then
-                ufw allow out on oxidize0
-                ufw allow in on oxidize0
-            fi
+            # NFQUEUE uses iptables rules (configured by daemon)
+            # No additional firewall rules needed for NFQUEUE
+            echo "NFQUEUE firewall rules managed by daemon"
             
             # iptables rules for NAT (if server mode)
             # iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
@@ -310,7 +308,7 @@ print_success() {
     echo -e "${BLUE}Status:${NC}"
     echo "  • Server: $SERVER_ADDR"
     echo "  • Service: Running and enabled on boot"
-    echo "  • TUN interface: Active (all traffic tunneled)"
+    echo "  • NFQUEUE: Active (packet interception enabled)"
     echo ""
     echo -e "${BLUE}Commands:${NC}"
     echo "  sudo systemctl status oxidize   # Check status"
@@ -342,11 +340,8 @@ uninstall() {
     rm -rf "$SERVICE_DIR/oxidize.service.d"
     rm -rf "$CONFIG_DIR"
     
-    # Remove firewall rules if UFW is present
-    if command -v ufw &> /dev/null; then
-        ufw delete allow out on oxidize0 2>/dev/null || true
-        ufw delete allow in on oxidize0 2>/dev/null || true
-    fi
+    # NFQUEUE rules are auto-cleaned by daemon on unbind
+    # No manual firewall cleanup needed
     
     # macOS
     launchctl unload /Library/LaunchDaemons/com.oxidize.client.plist 2>/dev/null || true

@@ -89,34 +89,6 @@
         </label>
     </div>
 
-    <div class="setting-group">
-        <h3>Optimizations</h3>
-
-        <div class="setting-item info-only">
-            <div class="setting-info">
-                <span class="setting-name">Smart Traffic Detection</span>
-                <span class="setting-desc">Gaming & VoIP auto-prioritized</span>
-            </div>
-            <span class="status-badge">Active</span>
-        </div>
-
-        <div class="setting-item info-only">
-            <div class="setting-info">
-                <span class="setting-name">LZ4 Compression</span>
-                <span class="setting-desc">Fast compression enabled</span>
-            </div>
-            <span class="status-badge">Active</span>
-        </div>
-
-        <div class="setting-item info-only">
-            <div class="setting-info">
-                <span class="setting-name">Split Tunneling</span>
-                <span class="setting-desc">Streaming services bypassed</span>
-            </div>
-            <span class="status-badge">Active</span>
-        </div>
-    </div>
-
     <div class="about">
         <p>Oxidize v{appVersion}</p>
         <p class="links">
@@ -157,10 +129,6 @@
 
     .setting-item:hover {
         background: rgba(255, 255, 255, 0.05);
-    }
-
-    .setting-item.info-only {
-        cursor: default;
     }
 
     .setting-info {
@@ -208,15 +176,6 @@
 
     .toggle.active .toggle-slider {
         transform: translateX(20px);
-    }
-
-    .status-badge {
-        padding: 0.25rem 0.75rem;
-        border-radius: 12px;
-        background: rgba(0, 212, 170, 0.15);
-        color: #00d4aa;
-        font-size: 0.75rem;
-        font-weight: 500;
     }
 
     .about {

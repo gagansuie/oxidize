@@ -11,7 +11,7 @@ Oxidize is designed to be resilient against attacks. This guide covers security 
 | Encrypts traffic | ✅ TLS/IPsec | ✅ TLS 1.3 + QUIC |
 | Hides client IP | ✅ | ✅ (relay IP visible) |
 | Tunnels traffic | ✅ All system traffic | ✅ All UDP via NFQUEUE |
-| Kernel integration | ✅ tun/tap device | ✅ NFQUEUE (userspace processing) |
+| Kernel integration | ✅ tun/tap device | ✅ NFQUEUE (userspace, no kernel modules) |
 | Protocol | OpenVPN/WireGuard/IPsec | QUIC |
 
 **Key difference:** Oxidize uses NFQUEUE to intercept all UDP traffic in userspace, then forwards it through an encrypted QUIC tunnel. No kernel modules required.
@@ -39,29 +39,29 @@ All traffic is encrypted with TLS 1.3:
 - No downgrade attacks
 - Fast handshakes (0-RTT resumption when enabled)
 
-### 3. 0-RTT Security Considerations
+### 3. 0-RTT Session Resumption
 
-0-RTT session resumption is **disabled by default** for security:
+0-RTT session resumption is **enabled by default** with built-in anti-replay protection:
 
 ```toml
 # Client config
-enable_0rtt = false  # Default: disabled for security
+enable_0rtt = true  # Default: enabled
 
 # Server config  
-enable_0rtt = false  # Default: disabled
-max_early_data_size = 16384  # 16KB when enabled
+enable_0rtt = true  # Default: enabled
+max_early_data_size = 16384  # 16KB
 ```
 
-**Why 0-RTT is disabled by default:**
-- 0-RTT data is vulnerable to **replay attacks**
-- An attacker can capture and re-send 0-RTT data
-- For VPN tunnels, this is usually safe (inner protocols have replay protection)
-- Enable only if you understand the risks and need lowest latency
+**Anti-replay protection (built-in):**
+- **rustls anti-replay** - Tracks recently used tickets with time-based window
+- **Single-use session tickets** - Each ticket can only be used once
+- **Time-bounded validity** - Tickets expire after a short window
+- **QUIC connection ID binding** - 0-RTT data bound to specific connection
 
-**When to enable 0-RTT:**
-- Gaming/VoIP where latency is critical
-- When inner protocols (TCP, game protocols) handle replay protection
-- When you trust your network path
+**Benefits of 0-RTT:**
+- **Instant reconnects** - No handshake latency on reconnection
+- **Better gaming/VoIP** - Critical for latency-sensitive traffic
+- **Seamless WiFi/cellular handoff** - Combined with connection migration
 
 ### 4. Rate Limiting
 

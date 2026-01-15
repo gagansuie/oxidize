@@ -4,7 +4,19 @@
   import ServerList from "./lib/ServerList.svelte";
   import Settings from "./lib/Settings.svelte";
   import Stats from "./lib/Stats.svelte";
-  import type { ConnectionStatus } from "./lib/types";
+  import type { ConnectionStatus, AppConfig } from "./lib/types";
+
+  interface Region {
+    id: string;
+    name: string;
+    location: string;
+    country_code: string;
+    status: string;
+    latency_ms: number | null;
+    load: number;
+    server_count: number;
+    server_ids: string[];
+  }
 
   let status: ConnectionStatus = $state({
     connected: false,
@@ -17,7 +29,59 @@
 
   let connecting = $state(false);
   let activeTab = $state<"servers" | "settings">("servers");
-  let selectedServer = $state<string | null>(null);
+  let selectedRegionId = $state<string | null>(null);
+  let selectedServerId = $state<string | null>(null);
+  let selectedRegionLocation = $state<string | null>(null);
+  let connectedRegionLocation = $state<string | null>(null);
+  let autoConnectAttempted = $state(false);
+
+  async function autoConnect() {
+    if (autoConnectAttempted || connecting || status.connected) return;
+    autoConnectAttempted = true;
+
+    try {
+      const config: AppConfig = await invoke("get_config");
+      if (!config.auto_connect) return;
+
+      console.log("Auto-connect enabled, finding closest region...");
+      const closestRegion: Region = await invoke("get_closest_region");
+
+      if (closestRegion && closestRegion.server_ids.length > 0) {
+        const serverId = closestRegion.server_ids[0];
+        console.log(
+          `Auto-connecting to ${closestRegion.location} (${serverId})`,
+        );
+
+        selectedRegionId = closestRegion.id;
+        selectedServerId = serverId;
+        selectedRegionLocation = closestRegion.location;
+
+        connecting = true;
+        status = await invoke("connect", { serverId });
+        connectedRegionLocation = closestRegion.location;
+      }
+    } catch (e) {
+      console.error("Auto-connect failed:", e);
+    } finally {
+      connecting = false;
+    }
+  }
+
+  async function syncSelectionWithConnection(regions: Region[]) {
+    if (!status.connected || !status.server) return;
+
+    const connectedServerId = status.server;
+    const region = regions.find((r) =>
+      r.server_ids.includes(connectedServerId),
+    );
+
+    if (region) {
+      selectedRegionId = region.id;
+      selectedServerId = connectedServerId;
+      selectedRegionLocation = region.location;
+      connectedRegionLocation = region.location;
+    }
+  }
 
   $effect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -26,24 +90,22 @@
     (async () => {
       status = await invoke("get_status");
 
+      // If already connected on startup, sync selection
+      if (status.connected && status.server) {
+        try {
+          const regions: Region[] = await invoke("get_regions");
+          await syncSelectionWithConnection(regions);
+        } catch (e) {
+          console.error("Failed to sync selection:", e);
+        }
+      } else {
+        // Try auto-connect if not already connected
+        await autoConnect();
+      }
+
       unlisten = await listen("connection-changed", (event) => {
         status.connected = event.payload as boolean;
       });
-
-      // Auto-connect on start if not already connected
-      if (!status.connected) {
-        console.log("Auto-connecting to fastest server...");
-        connecting = true;
-        try {
-          // Use "auto" to let the backend select the fastest server
-          status = await invoke("connect", { serverId: "auto" });
-          console.log("Auto-connected successfully");
-        } catch (e) {
-          console.error("Auto-connect failed:", e);
-        } finally {
-          connecting = false;
-        }
-      }
 
       // Poll for status updates
       pollInterval = setInterval(async () => {
@@ -64,10 +126,16 @@
     try {
       if (status.connected) {
         status = await invoke("disconnect");
+        connectedRegionLocation = null;
       } else {
-        // Use selected server or "auto" for fastest
-        const serverId = selectedServer || "auto";
-        status = await invoke("connect", { serverId });
+        // Use selected server (best server from selected region)
+        if (!selectedServerId) {
+          console.error("No server selected");
+          return;
+        }
+        status = await invoke("connect", { serverId: selectedServerId });
+        // Store the region location for display
+        connectedRegionLocation = selectedRegionLocation;
       }
     } catch (e) {
       console.error("Connection error:", e);
@@ -76,8 +144,14 @@
     }
   }
 
-  function handleServerSelect(serverId: string) {
-    selectedServer = serverId;
+  function handleRegionSelect(
+    regionId: string,
+    serverId: string,
+    regionLocation: string,
+  ) {
+    selectedRegionId = regionId;
+    selectedServerId = serverId;
+    selectedRegionLocation = regionLocation;
   }
 </script>
 
@@ -105,7 +179,7 @@
       class="connect-btn"
       class:connected={status.connected}
       class:connecting
-      disabled={connecting || (!status.connected && !selectedServer)}
+      disabled={connecting || (!status.connected && !selectedServerId)}
       onclick={toggleConnection}
     >
       <div class="btn-inner">
@@ -125,14 +199,22 @@
 
     <div class="connection-info">
       {#if status.connected}
-        <p class="ip">Your IP: <strong>{status.ip}</strong></p>
-        <p class="server">Connected to: <strong>{status.server}</strong></p>
-      {:else if selectedServer}
+        {#if status.ip}
+          <p class="ip">Your IP: <strong>{status.ip}</strong></p>
+        {/if}
+        <p class="server">
+          Connected to: <strong
+            >{connectedRegionLocation ||
+              selectedRegionLocation ||
+              "Unknown"}</strong
+          >
+        </p>
+      {:else if selectedRegionLocation}
         <p class="ready">
-          Ready to connect to <strong>{selectedServer}</strong>
+          Ready to connect to <strong>{selectedRegionLocation}</strong>
         </p>
       {:else}
-        <p class="select-prompt">Select a server to connect</p>
+        <p class="select-prompt">Select a region to connect</p>
       {/if}
     </div>
   </section>
@@ -180,7 +262,7 @@
 
   <section class="content">
     {#if activeTab === "servers"}
-      <ServerList onselect={handleServerSelect} selected={selectedServer} />
+      <ServerList onselect={handleRegionSelect} selected={selectedRegionId} />
     {:else}
       <Settings />
     {/if}

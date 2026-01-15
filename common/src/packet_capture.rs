@@ -456,7 +456,14 @@ impl Default for QueueConfig {
             queue_num: 0,
             max_len: 8192,
             copy_range: 65535, // Copy entire packet
-            exclude_ports: vec![4433],
+            // Exclude essential UDP services that should not be intercepted:
+            // - 53: DNS (critical for name resolution)
+            // - 67/68: DHCP (network configuration)
+            // - 123: NTP (time sync)
+            // - 443: QUIC/HTTP3 (web traffic - usually handled by apps)
+            // - 4433: Oxidize relay server
+            // - 5353: mDNS (local discovery)
+            exclude_ports: vec![53, 67, 68, 123, 443, 4433, 5353],
             exclude_ips: Vec::new(),
         }
     }
@@ -576,6 +583,12 @@ pub mod linux {
     const NFQA_PAYLOAD: u16 = 10;
     const NFQA_CFG_CMD: u16 = 1;
     const NFQA_CFG_PARAMS: u16 = 2;
+    const NFQA_CFG_QUEUE_MAXLEN: u16 = 3;
+    const NFQA_CFG_MASK: u16 = 4;
+    const NFQA_CFG_FLAGS: u16 = 5;
+
+    // NFQUEUE config flags
+    const NFQA_CFG_F_FAIL_OPEN: u32 = 1 << 0; // Pass packets if queue is full
 
     /// NFQUEUE implementation via raw netlink sockets
     pub struct NetlinkQueue {
@@ -589,7 +602,32 @@ pub mod linux {
     }
 
     impl NetlinkQueue {
+        /// Check if we have the required capabilities for NFQUEUE
+        fn check_capabilities() -> anyhow::Result<()> {
+            // Check if running as root
+            if unsafe { libc::geteuid() } == 0 {
+                return Ok(());
+            }
+
+            // Check for CAP_NET_ADMIN capability
+            // Try a simple iptables command to verify permissions
+            let output = std::process::Command::new("iptables")
+                .args(["-L", "OUTPUT", "-n"])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => Ok(()),
+                _ => anyhow::bail!(
+                    "NFQUEUE requires root or CAP_NET_ADMIN capability. \
+                     Run with sudo or install daemon with: sudo ./scripts/install-daemon.sh"
+                ),
+            }
+        }
+
         pub fn new() -> anyhow::Result<Self> {
+            // Verify we have required permissions before proceeding
+            Self::check_capabilities()?;
+
             // Create netlink socket
             let socket = socket2::Socket::new(
                 socket2::Domain::from(libc::AF_NETLINK),
@@ -738,6 +776,42 @@ pub mod linux {
             Ok(())
         }
 
+        /// Send queue maxlen and FAIL_OPEN flag configuration
+        /// FAIL_OPEN ensures packets pass through if queue is full (prevents network stall)
+        fn send_config_flags(&mut self, max_len: u32) -> anyhow::Result<()> {
+            let seq = self.next_seq();
+
+            // Build maxlen attribute
+            let maxlen_attr = self.build_nlattr(NFQA_CFG_QUEUE_MAXLEN, &max_len.to_be_bytes());
+
+            // Build flags attribute (FAIL_OPEN = pass packets if queue full)
+            let flags_attr = self.build_nlattr(NFQA_CFG_FLAGS, &NFQA_CFG_F_FAIL_OPEN.to_be_bytes());
+
+            // Build mask attribute (which flags to set)
+            let mask_attr = self.build_nlattr(NFQA_CFG_MASK, &NFQA_CFG_F_FAIL_OPEN.to_be_bytes());
+
+            // Build nfgenmsg
+            let nfgen = self.build_nfgenmsg(libc::AF_UNSPEC as u8, 0, self.queue_num);
+
+            let payload_len = nfgen.len() + maxlen_attr.len() + flags_attr.len() + mask_attr.len();
+            let total_len = 16 + payload_len;
+
+            let msg_type = ((NFNL_SUBSYS_QUEUE as u16) << 8) | (NFQNL_MSG_CONFIG as u16);
+
+            let mut msg =
+                self.build_nlmsghdr(total_len as u32, msg_type, NLM_F_REQUEST | NLM_F_ACK, seq);
+            msg.extend_from_slice(&nfgen);
+            msg.extend_from_slice(&maxlen_attr);
+            msg.extend_from_slice(&flags_attr);
+            msg.extend_from_slice(&mask_attr);
+
+            self.send_netlink(&msg)?;
+            self.recv_ack(seq)?;
+
+            tracing::info!("NFQUEUE configured: maxlen={}, FAIL_OPEN=enabled", max_len);
+            Ok(())
+        }
+
         fn send_netlink(&self, data: &[u8]) -> anyhow::Result<()> {
             let mut dst_addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
             dst_addr.nl_family = libc::AF_NETLINK as u16;
@@ -859,12 +933,12 @@ pub mod linux {
 
         /// Setup iptables rules to redirect traffic to NFQUEUE
         fn setup_iptables(&self, config: &QueueConfig) -> anyhow::Result<()> {
-            // Clean up existing rules
+            // Clean up existing rules first
             self.cleanup_iptables();
 
-            // Add exclusion rules first
+            // Add exclusion rules first (inserted at top, so added in reverse priority)
             for port in &config.exclude_ports {
-                let _ = Command::new("iptables")
+                let output = Command::new("iptables")
                     .args([
                         "-I",
                         "OUTPUT",
@@ -875,13 +949,27 @@ pub mod linux {
                         "-j",
                         "ACCEPT",
                     ])
-                    .output();
+                    .output()?;
+                if !output.status.success() {
+                    tracing::warn!(
+                        "Failed to add exclusion for port {}: {}",
+                        port,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
             }
 
             for ip in &config.exclude_ips {
-                let _ = Command::new("iptables")
+                let output = Command::new("iptables")
                     .args(["-I", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
-                    .output();
+                    .output()?;
+                if !output.status.success() {
+                    tracing::warn!(
+                        "Failed to add exclusion for IP {}: {}",
+                        ip,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
             }
 
             // Add NFQUEUE rule for outgoing UDP
@@ -915,11 +1003,31 @@ pub mod linux {
         }
 
         fn cleanup_iptables(&self) {
-            // Remove NFQUEUE rules
+            // Remove NFQUEUE rule
             let _ = Command::new("sh")
                 .arg("-c")
                 .arg("iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 --queue-bypass 2>/dev/null || true")
                 .output();
+
+            // Remove exclusion rules we added (run multiple times to catch duplicates)
+            for _ in 0..3 {
+                for port in &[53u16, 67, 68, 123, 443, 4433, 5353] {
+                    let _ = Command::new("iptables")
+                        .args([
+                            "-D",
+                            "OUTPUT",
+                            "-p",
+                            "udp",
+                            "--dport",
+                            &port.to_string(),
+                            "-j",
+                            "ACCEPT",
+                        ])
+                        .output();
+                }
+            }
+
+            tracing::debug!("iptables rules cleaned up");
         }
     }
 
@@ -936,6 +1044,13 @@ pub mod linux {
 
             // Set copy mode
             self.send_config_params(config.copy_range)?;
+
+            // Set queue maxlen and FAIL_OPEN flag (critical for preventing network stall)
+            // FAIL_OPEN = if queue is full or daemon crashes, packets pass through normally
+            if let Err(e) = self.send_config_flags(config.max_len) {
+                tracing::warn!("Failed to set FAIL_OPEN flag (older kernel?): {}", e);
+                // Continue anyway - older kernels may not support this
+            }
 
             // Setup iptables
             self.setup_iptables(&config)?;

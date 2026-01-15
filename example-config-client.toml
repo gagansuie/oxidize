@@ -32,9 +32,9 @@ dns_cache_size = 1000
 # Higher = more memory, lower = packet loss under burst
 max_packet_queue = 10000
 
-# TUN interface MTU (Maximum Transmission Unit)
+# Packet MTU (Maximum Transmission Unit)
 # Standard Ethernet = 1500, Jumbo frames = 9000
-tun_mtu = 1500
+packet_mtu = 1500
 
 # Enable header compression (experimental)
 # Further reduces overhead for small packets
@@ -56,10 +56,8 @@ rohc_max_size = 1500
 
 # Enable 0-RTT session resumption for instant reconnects
 # Saves ~1 RTT on reconnection by caching session tickets
-# WARNING: 0-RTT is vulnerable to replay attacks. Only enable if you understand the risks.
-# For VPN tunnels, this is generally safe as inner protocols handle replay protection.
-# Set to true for lowest latency, false (default) for maximum security.
-enable_0rtt = false
+# Anti-replay protection is built-in via rustls + QUIC connection ID binding
+enable_0rtt = true
 
 # Path to session ticket cache file
 session_cache_path = "/tmp/oxidize-session-cache"

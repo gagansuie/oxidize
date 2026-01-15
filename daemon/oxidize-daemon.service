@@ -2,13 +2,10 @@
 Description=Oxidize Network Relay Daemon
 After=network-online.target
 Wants=network-online.target
-# Socket activation support (optional - for instant handoff)
-After=oxidize-server.socket
-Requires=oxidize-server.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/oxidize-server
+ExecStart=/usr/local/bin/oxidize-daemon
 Restart=on-failure
 RestartSec=1
 Environment=RUST_LOG=info

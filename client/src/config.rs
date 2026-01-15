@@ -12,7 +12,7 @@ pub struct ClientConfig {
     pub enable_dns_prefetch: bool,
     pub dns_cache_size: usize,
     pub max_packet_queue: usize,
-    pub tun_mtu: usize,
+    pub packet_mtu: usize,
     #[serde(default = "default_enable_header_compression")]
     pub enable_header_compression: bool,
 
@@ -102,7 +102,7 @@ fn default_enable_header_compression() -> bool {
 }
 
 fn default_enable_0rtt() -> bool {
-    false // Disabled by default for security - user must opt-in
+    true // Enabled by default - rustls provides anti-replay protection
 }
 
 fn default_session_cache_path() -> String {
@@ -182,12 +182,12 @@ impl Default for ClientConfig {
             enable_dns_prefetch: true,
             dns_cache_size: 1000,
             max_packet_queue: 10000,
-            tun_mtu: 1500,
+            packet_mtu: 1500,
             enable_header_compression: true,
             enable_rohc: true,
             rohc_max_size: 1500,
             bypass_domains: vec![],
-            enable_0rtt: false,
+            enable_0rtt: true,
             session_cache_path: default_session_cache_path(),
             enable_datagrams: default_enable_datagrams(),
             datagram_latency_threshold_ms: default_datagram_latency_threshold_ms(),

@@ -600,36 +600,65 @@ impl RelayServer {
         forwarder: Arc<SharedForwarder>,
         metrics: RelayMetrics,
     ) {
+        // Use a fixed connection ID for datagram responses (based on connection hash)
+        let datagram_conn_id = connection.stable_id() as u64;
+
+        // Register this connection for responses
+        let mut response_rx = forwarder.register_connection(datagram_conn_id).await;
+        info!(
+            "Datagram handler registered with conn_id {}",
+            datagram_conn_id
+        );
+
+        // Spawn response sender task
+        let conn_for_responses = connection.clone();
+        let metrics_for_responses = metrics.clone();
+        let response_task = tokio::spawn(async move {
+            while let Some(response_packet) = response_rx.recv().await {
+                // Send response back as datagram (no header needed for responses)
+                if let Err(e) = conn_for_responses.send_datagram(response_packet.into()) {
+                    debug!("Failed to send response datagram: {}", e);
+                } else {
+                    metrics_for_responses.record_sent(1);
+                }
+            }
+        });
+
         loop {
             match connection.read_datagram().await {
                 Ok(datagram) => {
+                    info!("Datagram received: {} bytes", datagram.len());
                     metrics.record_received(datagram.len() as u64);
 
                     // Parse minimal header: connection_id (8) + sequence (8) + payload
                     if datagram.len() < 16 {
-                        debug!("Datagram too small, skipping");
+                        info!("Datagram too small ({}), skipping", datagram.len());
                         continue;
                     }
 
-                    let connection_id =
-                        u64::from_le_bytes(datagram[0..8].try_into().unwrap_or([0; 8]));
+                    // Use the datagram_conn_id for response routing (ignore client's conn_id)
                     // Sequence is bytes 8-16 (unused for now, could track for stats)
                     let payload = &datagram[16..];
+                    info!("Forwarding payload: {} bytes", payload.len());
 
-                    // Forward directly to TUN - no framing overhead
-                    if let Err(e) = forwarder.forward(connection_id, payload.to_vec()).await {
-                        debug!("Datagram forward error: {}", e);
+                    // Forward directly to destination - no framing overhead
+                    if let Err(e) = forwarder.forward(datagram_conn_id, payload.to_vec()).await {
+                        info!("Datagram forward error: {}", e);
                     }
                 }
                 Err(quinn::ConnectionError::ApplicationClosed(_)) => {
-                    debug!("Datagram connection closed");
+                    info!("Datagram connection closed");
                     break;
                 }
                 Err(e) => {
-                    debug!("Datagram read error: {}", e);
+                    info!("Datagram read error: {}", e);
                     break;
                 }
             }
         }
+
+        // Cleanup
+        response_task.abort();
+        forwarder.unregister_connection(datagram_conn_id).await;
     }
 }

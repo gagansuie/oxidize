@@ -283,6 +283,12 @@ impl RelayClient {
         &self.metrics
     }
 
+    /// Get the QUIC endpoint for direct connection operations
+    #[allow(dead_code)]
+    pub fn get_endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
     /// Get the server address for this client
     #[allow(dead_code)]
     pub fn get_server_addr(&self) -> SocketAddr {
@@ -346,7 +352,7 @@ impl RelayClient {
         }
 
         // Open bidirectional stream for control messages
-        let (mut send, _recv) = connection.open_bi().await?;
+        let (mut send, mut recv) = connection.open_bi().await?;
 
         // Open separate streams for different traffic types if stream multiplexing is enabled
         let _bulk_stream = if self.config.enable_stream_multiplexing {
@@ -368,6 +374,7 @@ impl RelayClient {
 
         let mut forwarded_count: u64 = 0;
         let mut failed_count: u64 = 0;
+        let mut recv_buf = vec![0u8; 65536];
         loop {
             tokio::select! {
                 // Receive packets to forward through QUIC
@@ -379,29 +386,52 @@ impl RelayClient {
                         info!("📥 First packet received: {} bytes", len);
                     }
 
-                    // Send via QUIC datagram for lowest latency
-                    match connection.send_datagram(packet.into()) {
-                        Ok(_) => {
-                            self.metrics.record_sent(len as u64);
-                            #[allow(clippy::manual_is_multiple_of)]
-                            if forwarded_count % 100 == 0 {
-                                info!("📤 Forwarded {} packets through QUIC ({} failed)", forwarded_count, failed_count);
+                    // Send via QUIC stream as Data message (datagrams not working reliably)
+                    let data_msg = RelayMessage::data(self.connection_id, forwarded_count, packet);
+                    match data_msg.encode() {
+                        Ok(encoded) => {
+                            if let Err(e) = send.write_all(&encoded).await {
+                                failed_count += 1;
+                                if failed_count <= 3 {
+                                    error!("❌ Stream send failed: {} (packet {})", e, forwarded_count);
+                                }
+                            } else {
+                                self.metrics.record_sent(len as u64);
+                                #[allow(clippy::manual_is_multiple_of)]
+                                if forwarded_count % 100 == 0 {
+                                    info!("📤 Forwarded {} packets through QUIC stream ({} failed)", forwarded_count, failed_count);
+                                }
                             }
                         }
                         Err(e) => {
                             failed_count += 1;
                             if failed_count <= 3 {
-                                error!("❌ Datagram send failed: {} (packet {}, size {})", e, forwarded_count, len);
+                                error!("❌ Message encode failed: {} (packet {})", e, forwarded_count);
                             }
                         }
                     }
                 }
 
-                // Receive datagrams from relay
+                // Receive datagrams from relay (real-time responses)
                 Ok(datagram) = connection.read_datagram() => {
                     self.metrics.record_received(datagram.len() as u64);
-                    // In full implementation, route back to original client
-                    debug!("Received {} bytes from relay", datagram.len());
+                    info!("📥 Datagram received from relay: {} bytes", datagram.len());
+                }
+
+                // Receive stream data from relay (reliable responses)
+                result = recv.read(&mut recv_buf) => {
+                    match result {
+                        Ok(Some(len)) => {
+                            self.metrics.record_received(len as u64);
+                            info!("📥 Stream data received from relay: {} bytes", len);
+                        }
+                        Ok(None) => {
+                            info!("Stream closed by relay");
+                        }
+                        Err(e) => {
+                            error!("Stream read error: {}", e);
+                        }
+                    }
                 }
 
                 // Connection closed
@@ -602,7 +632,7 @@ impl RelayClient {
 
         loop {
             tokio::select! {
-                // Handle outgoing packets from TUN
+                // Handle outgoing packets from NFQUEUE
                 Some(packet) = rx.recv() => {
                     // If disconnected, buffer the packet
                     if !is_connected.load(Ordering::SeqCst) {
@@ -628,7 +658,7 @@ impl RelayClient {
                 Ok(datagram) = connection.read_datagram(), if datagrams_enabled => {
                     self.metrics.record_received(datagram.len() as u64);
                     if response_tx.send(datagram.to_vec()).await.is_err() {
-                        error!("Failed to send datagram response to TUN");
+                        error!("Failed to send datagram response");
                     }
                 }
 
@@ -669,7 +699,7 @@ impl RelayClient {
                                                 info!("📥 Received {} Data packets from server", count);
                                             }
                                             if response_tx.send(message.payload).await.is_err() {
-                                                error!("Failed to send response to TUN");
+                                                error!("Failed to send response");
                                             }
                                         } else if let Err(e) = self.handle_message(message).await {
                                             error!("Failed to handle message: {}", e);
@@ -784,102 +814,6 @@ impl RelayClient {
         keepalive_handle.abort();
         self.metrics.record_connection_closed();
 
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    async fn connect_and_run_with_packets(
-        &self,
-        rx: &mut mpsc::Receiver<Vec<u8>>,
-        response_tx: mpsc::Sender<Vec<u8>>,
-    ) -> Result<()> {
-        let connection = self
-            .endpoint
-            .connect(self.server_addr, "localhost")?
-            .await?;
-
-        info!("✅ Connected to relay server (TUN mode)");
-        self.metrics.record_connection_opened();
-
-        // === MASQUE-INSPIRED: Dual-path architecture ===
-        // - Streams for reliable traffic (HTTP, TCP)
-        // - Datagrams for real-time traffic (gaming, VoIP) - no head-of-line blocking
-        let (mut send, mut recv) = connection.open_bi().await?;
-
-        let connect_msg = RelayMessage::connect(self.connection_id);
-        send.write_all(&connect_msg.encode()?).await?;
-
-        let mut recv_buf = vec![0u8; self.config.buffer_size];
-        let mut framer = MessageFramer::with_capacity(self.config.buffer_size);
-        let datagrams_enabled = self.config.enable_datagrams;
-
-        loop {
-            tokio::select! {
-                // Handle outgoing packets from TUN
-                Some(packet) = rx.recv() => {
-                    // Determine if this is real-time traffic that should use datagrams
-                    let use_datagram = datagrams_enabled && self.should_use_datagram(&packet);
-
-                    if use_datagram {
-                        // Send via QUIC datagram - unreliable but ultra-low latency
-                        if let Err(e) = self.send_datagram(&connection, packet).await {
-                            // Fallback to stream if datagram fails (e.g., too large)
-                            debug!("Datagram send failed, falling back to stream: {}", e);
-                        }
-                    } else {
-                        // Send via reliable stream
-                        if let Err(e) = self.send_packet(&mut send, packet).await {
-                            error!("Failed to send packet: {}", e);
-                        }
-                    }
-                }
-
-                // === MASQUE-INSPIRED: Receive datagrams for real-time responses ===
-                Ok(datagram) = connection.read_datagram(), if datagrams_enabled => {
-                    self.metrics.record_received(datagram.len() as u64);
-                    // Datagrams contain raw IP packets - send directly to TUN
-                    if response_tx.send(datagram.to_vec()).await.is_err() {
-                        error!("Failed to send datagram response to TUN");
-                    }
-                }
-
-                // Handle stream receives (reliable traffic)
-                result = recv.read(&mut recv_buf) => {
-                    match result {
-                        Ok(Some(len)) => {
-                            self.metrics.record_received(len as u64);
-                            framer.extend(&recv_buf[..len]);
-
-                            // Process all complete messages with decode timing
-                            loop {
-                                let decode_start = Instant::now();
-                                match framer.try_decode() {
-                                    Ok(Some(message)) => {
-                                        self.metrics.record_decode_latency(decode_start.elapsed());
-                                        // Handle Data messages - write to TUN
-                                        if message.msg_type == MessageType::Data {
-                                            if response_tx.send(message.payload).await.is_err() {
-                                                error!("Failed to send response to TUN");
-                                            }
-                                        } else if let Err(e) = self.handle_message(message).await {
-                                            error!("Failed to handle message: {}", e);
-                                        }
-                                    }
-                                    _ => break,
-                                }
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            error!("Read error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        self.metrics.record_connection_closed();
         Ok(())
     }
 

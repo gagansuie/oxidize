@@ -20,72 +20,30 @@ pub struct ConnectionStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Server {
-    pub id: String,
-    pub name: String,
-    pub location: String,
-    pub country_code: String,
-    pub load: u8,
+pub struct Region {
+    pub id: String,           // Region code (e.g., 'ord')
+    pub name: String,         // Region group (e.g., 'North America')
+    pub location: String,     // City (e.g., 'Chicago, Illinois')
+    pub country_code: String, // ISO country code for flag
+    pub status: String,       // online, maintenance, offline
     pub latency_ms: Option<u32>,
+    pub load: u8,
+    pub server_count: u32,
+    pub server_ids: Vec<String>, // Best server first
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct ApiServer {
+struct ApiRegion {
     id: String,
     name: String,
-    region: String,
     location: String,
+    country_code: String,
     status: String,
     latency: String,
     load: u8,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-struct ServersResponse {
-    servers: Vec<ApiServer>,
-    regions: Vec<String>,
-    timestamp: String,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-fn region_to_country_code(location: &str) -> String {
-    match location.to_lowercase().as_str() {
-        s if s.contains("virginia")
-            || s.contains("new york")
-            || s.contains("los angeles")
-            || s.contains("chicago")
-            || s.contains("denver")
-            || s.contains("dallas")
-            || s.contains("san jose")
-            || s.contains("seattle")
-            || s.contains("miami")
-            || s.contains("atlanta")
-            || s.contains("boston")
-            || s.contains("secaucus") =>
-        {
-            "US".to_string()
-        }
-        s if s.contains("toronto") || s.contains("montreal") => "CA".to_string(),
-        s if s.contains("amsterdam") => "NL".to_string(),
-        s if s.contains("paris") => "FR".to_string(),
-        s if s.contains("frankfurt") => "DE".to_string(),
-        s if s.contains("london") => "GB".to_string(),
-        s if s.contains("madrid") => "ES".to_string(),
-        s if s.contains("warsaw") => "PL".to_string(),
-        s if s.contains("stockholm") => "SE".to_string(),
-        s if s.contains("tokyo") => "JP".to_string(),
-        s if s.contains("hong kong") => "HK".to_string(),
-        s if s.contains("singapore") => "SG".to_string(),
-        s if s.contains("sydney") => "AU".to_string(),
-        s if s.contains("mumbai") => "IN".to_string(),
-        s if s.contains("são paulo") || s.contains("sao paulo") => "BR".to_string(),
-        s if s.contains("santiago") => "CL".to_string(),
-        s if s.contains("johannesburg") => "ZA".to_string(),
-        _ => "XX".to_string(),
-    }
+    server_count: u32,
+    server_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -138,14 +96,12 @@ pub async fn connect(
         }
     }
 
-    // Check if daemon is available
-    // If daemon is running, use it for optimized connection
+    // Use daemon for optimized NFQUEUE-based packet interception
     if is_daemon_running().await {
-        tracing::info!("Daemon available - using daemon connection");
+        tracing::info!("Daemon available - using daemon connection with NFQUEUE");
         let sid = server_id.clone();
         daemon_connect(server_id).await?;
 
-        // Update global connected state so UI stays updated
         crate::set_connected(true);
 
         return Ok(ConnectionStatus {
@@ -158,7 +114,7 @@ pub async fn connect(
         });
     }
 
-    tracing::info!("Daemon not running - using direct QUIC connection");
+    tracing::info!("Daemon not available - using direct QUIC connection");
 
     // Resolve Fly.io relay endpoint
     let server_addr: SocketAddr = format!("{}:{}", RELAY_HOST, RELAY_PORT)
@@ -227,7 +183,7 @@ pub async fn connect(
 pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<ConnectionStatus, String> {
     tracing::info!("Disconnecting...");
 
-    // Check if we're using daemon mode first
+    // Use daemon for disconnect if available
     if is_daemon_running().await {
         tracing::info!("Disconnecting via daemon...");
         let response = send_daemon_command(r#"{"type":"Disconnect"}"#).await;
@@ -363,19 +319,29 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
     })
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct RegionsResponse {
+    regions: Vec<ApiRegion>,
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[tauri::command]
-pub async fn get_servers() -> Result<Vec<Server>, String> {
+pub async fn get_regions() -> Result<Vec<Region>, String> {
     let url = format!("{}/api/servers", API_BASE_URL);
 
     let response = reqwest::get(&url)
         .await
-        .map_err(|e| format!("Failed to fetch servers: {}", e))?;
+        .map_err(|e| format!("Failed to fetch regions: {}", e))?;
 
     if !response.status().is_success() {
         return Err(format!("API returned status: {}", response.status()));
     }
 
-    let api_response: ServersResponse = response
+    let api_response: RegionsResponse = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
@@ -384,26 +350,127 @@ pub async fn get_servers() -> Result<Vec<Server>, String> {
         return Err(format!("API error: {}", error));
     }
 
-    let servers: Vec<Server> = api_response
-        .servers
+    let regions: Vec<Region> = api_response
+        .regions
         .into_iter()
-        .filter(|s| s.status == "online" || s.status == "maintenance")
-        .map(|s| {
-            let latency_ms = s.latency.trim_end_matches("ms").parse::<u32>().ok();
+        .filter(|r| r.status == "online" || r.status == "maintenance")
+        .map(|r| {
+            let latency_ms = r.latency.trim_end_matches("ms").parse::<u32>().ok();
 
-            Server {
-                id: s.id,
-                name: s.name,
-                location: s.location.clone(),
-                country_code: region_to_country_code(&s.location),
-                load: s.load,
+            Region {
+                id: r.id,
+                name: r.name,
+                location: r.location,
+                country_code: r.country_code,
+                status: r.status,
                 latency_ms,
+                load: r.load,
+                server_count: r.server_count,
+                server_ids: r.server_ids,
             }
         })
         .collect();
 
-    tracing::info!("Fetched {} servers from API", servers.len());
-    Ok(servers)
+    tracing::info!("Fetched {} regions from API", regions.len());
+    Ok(regions)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GeoLocation {
+    #[serde(default)]
+    lat: f64,
+    #[serde(default)]
+    lon: f64,
+    #[serde(default)]
+    country_code: String,
+}
+
+// Region coordinates (approximate city centers)
+fn get_region_coords(region_id: &str) -> Option<(f64, f64)> {
+    match region_id {
+        "ord" => Some((41.8781, -87.6298)),  // Chicago
+        "iad" => Some((38.9072, -77.0369)),  // Washington DC / Ashburn
+        "sjc" => Some((37.3382, -121.8863)), // San Jose
+        "lax" => Some((34.0522, -118.2437)), // Los Angeles
+        "dfw" => Some((32.7767, -96.7970)),  // Dallas
+        "sea" => Some((47.6062, -122.3321)), // Seattle
+        "ewr" => Some((40.7128, -74.0060)),  // Newark/NYC
+        "mia" => Some((25.7617, -80.1918)),  // Miami
+        "atl" => Some((33.7490, -84.3880)),  // Atlanta
+        "den" => Some((39.7392, -104.9903)), // Denver
+        "phx" => Some((33.4484, -112.0740)), // Phoenix
+        "ams" => Some((52.3676, 4.9041)),    // Amsterdam
+        "lhr" => Some((51.5074, -0.1278)),   // London
+        "fra" => Some((50.1109, 8.6821)),    // Frankfurt
+        "cdg" => Some((48.8566, 2.3522)),    // Paris
+        "mad" => Some((40.4168, -3.7038)),   // Madrid
+        "waw" => Some((52.2297, 21.0122)),   // Warsaw
+        "sin" => Some((1.3521, 103.8198)),   // Singapore
+        "nrt" => Some((35.6762, 139.6503)),  // Tokyo
+        "hkg" => Some((22.3193, 114.1694)),  // Hong Kong
+        "syd" => Some((-33.8688, 151.2093)), // Sydney
+        "gru" => Some((-23.5505, -46.6333)), // São Paulo
+        "bom" => Some((19.0760, 72.8777)),   // Mumbai
+        "jnb" => Some((-26.2041, 28.0473)),  // Johannesburg
+        _ => None,
+    }
+}
+
+fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let r = 6371.0; // Earth's radius in km
+    let dlat = (lat2 - lat1).to_radians();
+    let dlon = (lon2 - lon1).to_radians();
+    let a = (dlat / 2.0).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().asin();
+    r * c
+}
+
+/// Get the closest region based on user's IP geolocation
+#[tauri::command]
+pub async fn get_closest_region() -> Result<Region, String> {
+    // Get user's location via IP geolocation
+    let geo_url = "http://ip-api.com/json/?fields=lat,lon,countryCode";
+    let geo: GeoLocation = reqwest::get(geo_url)
+        .await
+        .map_err(|e| format!("Failed to get location: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse location: {}", e))?;
+
+    tracing::info!(
+        "User location: lat={}, lon={}, country={}",
+        geo.lat,
+        geo.lon,
+        geo.country_code
+    );
+
+    // Get all regions
+    let regions = get_regions().await?;
+
+    if regions.is_empty() {
+        return Err("No regions available".to_string());
+    }
+
+    // Find closest region by distance
+    let closest = regions
+        .into_iter()
+        .filter(|r| r.status == "online")
+        .min_by(|a, b| {
+            let dist_a = get_region_coords(&a.id)
+                .map(|(lat, lon)| haversine_distance(geo.lat, geo.lon, lat, lon))
+                .unwrap_or(f64::MAX);
+            let dist_b = get_region_coords(&b.id)
+                .map(|(lat, lon)| haversine_distance(geo.lat, geo.lon, lat, lon))
+                .unwrap_or(f64::MAX);
+            dist_a
+                .partial_cmp(&dist_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .ok_or_else(|| "No online regions found".to_string())?;
+
+    tracing::info!("Closest region: {} ({})", closest.id, closest.location);
+    Ok(closest)
 }
 
 #[tauri::command]
@@ -417,10 +484,11 @@ pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Ping relay using actual QUIC connection (measures real latency)
+/// Ping relay using TCP connection time (lightweight, no full QUIC setup)
 #[tauri::command]
 pub async fn ping_relay() -> Result<u32, String> {
     use std::time::Instant;
+    use tokio::net::TcpStream;
 
     let server_addr: SocketAddr = format!("{}:{}", RELAY_HOST, RELAY_PORT)
         .to_socket_addrs()
@@ -428,19 +496,30 @@ pub async fn ping_relay() -> Result<u32, String> {
         .next()
         .ok_or_else(|| "No address found".to_string())?;
 
-    // Use the actual RelayClient to measure QUIC connection latency
-    let config = ClientConfig::default();
+    // Measure TCP connection time as a proxy for RTT
+    // This is lightweight and doesn't require creating a full QUIC client
     let start = Instant::now();
 
-    // Create client - this establishes the QUIC endpoint
-    let client = RelayClient::new(server_addr, config)
-        .await
-        .map_err(|e| format!("Failed to create client: {}", e))?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        TcpStream::connect(server_addr),
+    )
+    .await;
 
-    let latency = start.elapsed().as_millis() as u32;
-
-    // Client is dropped here, closing the connection
-    drop(client);
+    let latency = match result {
+        Ok(Ok(_stream)) => {
+            // TCP handshake completed - RTT is approximately half the elapsed time
+            // (SYN -> SYN-ACK -> ACK, we measure SYN to SYN-ACK which is ~1 RTT)
+            start.elapsed().as_millis() as u32
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("TCP ping failed: {}", e);
+            return Err(format!("Connection failed: {}", e));
+        }
+        Err(_) => {
+            return Err("Connection timeout".to_string());
+        }
+    };
 
     Ok(latency)
 }

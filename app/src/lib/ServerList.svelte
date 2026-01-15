@@ -1,32 +1,39 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
 
-    interface Server {
-        id: string;
-        name: string;
-        location: string;
-        country_code: string;
-        load: number;
+    interface Region {
+        id: string; // Region code (e.g., 'ord')
+        name: string; // Region group (e.g., 'North America')
+        location: string; // City (e.g., 'Chicago, Illinois')
+        country_code: string; // ISO country code for flag
+        status: string;
         latency_ms: number | null;
+        load: number;
+        server_count: number;
+        server_ids: string[]; // Best server first
     }
 
     interface Props {
         selected?: string | null;
-        onselect?: (serverId: string) => void;
+        onselect?: (
+            regionId: string,
+            serverId: string,
+            regionLocation: string,
+        ) => void;
     }
 
     let { selected = null, onselect }: Props = $props();
 
-    let servers = $state<Server[]>([]);
+    let regions = $state<Region[]>([]);
     let searchQuery = $state("");
     let liveLatency = $state<number | null>(null);
     let loading = $state(true);
 
-    let filteredServers = $derived(
-        servers.filter(
-            (s) =>
-                s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                s.location.toLowerCase().includes(searchQuery.toLowerCase()),
+    let filteredRegions = $derived(
+        regions.filter(
+            (r) =>
+                r.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                r.location.toLowerCase().includes(searchQuery.toLowerCase()),
         ),
     );
 
@@ -35,7 +42,7 @@
 
         (async () => {
             loading = true;
-            servers = await invoke("get_servers");
+            regions = await invoke("get_regions");
             loading = false;
 
             // Measure live latency immediately and then every 5 seconds
@@ -56,8 +63,10 @@
         };
     });
 
-    function selectServer(id: string) {
-        onselect?.(id);
+    function selectRegion(region: Region) {
+        // Pass region ID, best server ID (first in list), and location for display
+        const bestServerId = region.server_ids[0];
+        onselect?.(region.id, bestServerId, region.location);
     }
 
     function getLoadColor(load: number): string {
@@ -97,7 +106,7 @@
         </svg>
         <input
             type="text"
-            placeholder="Search servers..."
+            placeholder="Search regions..."
             bind:value={searchQuery}
         />
     </div>
@@ -117,41 +126,45 @@
                     </div>
                 </div>
             {/each}
-        {:else if filteredServers.length === 0}
-            <div class="empty-state">No servers found</div>
+        {:else if filteredRegions.length === 0}
+            <div class="empty-state">No regions found</div>
         {:else}
-            {#each filteredServers as server}
-            <button
-                class="server-item"
-                class:selected={selected === server.id}
-                onclick={() => selectServer(server.id)}
-            >
-                <span class="flag">{getFlagEmoji(server.country_code)}</span>
-                <div class="server-info">
-                    <span class="name">{server.name}</span>
-                    <span class="location">{server.location}</span>
-                </div>
-                <div class="server-stats">
-                    {#if liveLatency !== null}
-                        <span
-                            class="latency"
-                            style="color: {getLatencyColor(liveLatency)}"
-                            >{liveLatency}ms</span
+            {#each filteredRegions as region}
+                <button
+                    class="server-item"
+                    class:selected={selected === region.id}
+                    onclick={() => selectRegion(region)}
+                >
+                    <span class="flag">{getFlagEmoji(region.country_code)}</span
+                    >
+                    <div class="server-info">
+                        <span class="name">{region.location}</span>
+                        <span class="location"
+                            >{region.name}{#if region.server_count > 1}
+                                · {region.server_count} servers{/if}</span
                         >
-                    {/if}
-                    <div class="load-bar">
-                        <div
-                            class="load-fill"
-                            style="width: {liveLatency !== null
-                                ? Math.min((liveLatency / 200) * 100, 100)
-                                : server.load}%; background: {liveLatency !==
-                            null
-                                ? getLatencyColor(liveLatency)
-                                : getLoadColor(server.load)}"
-                        ></div>
                     </div>
-                </div>
-            </button>
+                    <div class="server-stats">
+                        {#if liveLatency !== null}
+                            <span
+                                class="latency"
+                                style="color: {getLatencyColor(liveLatency)}"
+                                >{liveLatency}ms</span
+                            >
+                        {/if}
+                        <div class="load-bar">
+                            <div
+                                class="load-fill"
+                                style="width: {liveLatency !== null
+                                    ? Math.min((liveLatency / 200) * 100, 100)
+                                    : region.load}%; background: {liveLatency !==
+                                null
+                                    ? getLatencyColor(liveLatency)
+                                    : getLoadColor(region.load)}"
+                            ></div>
+                        </div>
+                    </div>
+                </button>
             {/each}
         {/if}
     </div>
@@ -171,8 +184,12 @@
     }
 
     @keyframes shimmer {
-        0% { background-position: 200% 0; }
-        100% { background-position: -200% 0; }
+        0% {
+            background-position: 200% 0;
+        }
+        100% {
+            background-position: -200% 0;
+        }
     }
 
     .skeleton-item {
