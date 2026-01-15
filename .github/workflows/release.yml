@@ -48,7 +48,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
+      - name: Verify sccache or disable
+        id: sccache-check
+        shell: bash
+        run: |
+          if sccache --version 2>/dev/null && sccache --start-server 2>/dev/null; then
+            echo "sccache_works=true" >> $GITHUB_OUTPUT
+          else
+            echo "sccache_works=false" >> $GITHUB_OUTPUT
+            echo "⚠️ sccache unavailable, building without cache"
+          fi
 
       - name: Install musl-tools (Linux)
         if: contains(matrix.target, 'musl')
@@ -67,6 +79,8 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }} --package relay-client
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
       - name: Get version from Cargo.toml
         id: version
@@ -134,7 +148,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
+      - name: Verify sccache or disable
+        id: sccache-check
+        shell: bash
+        run: |
+          if sccache --version 2>/dev/null && sccache --start-server 2>/dev/null; then
+            echo "sccache_works=true" >> $GITHUB_OUTPUT
+          else
+            echo "sccache_works=false" >> $GITHUB_OUTPUT
+            echo "⚠️ sccache unavailable, building without cache"
+          fi
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -178,6 +204,8 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
           mkdir -p target/release
           cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
       - name: Build oxidize-daemon (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -185,6 +213,8 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
           mkdir -p target/release
           cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
       - name: Build oxidize-daemon (Windows)
         if: matrix.os == 'windows-latest'
@@ -193,6 +223,8 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
           mkdir -p target/release
           cp target/${{ matrix.target }}/release/oxidize-daemon.exe target/release/oxidize-daemon.exe
+        env:
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
       - name: Get version from tauri.conf.json
         id: version
