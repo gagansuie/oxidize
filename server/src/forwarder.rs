@@ -297,7 +297,7 @@ impl SharedForwarder {
                     dst_addr,
                 };
 
-                if syn && !((flags & 0x10) != 0) {
+                if syn && (flags & 0x10) == 0 {
                     // SYN packet - establish new TCP connection
                     self.establish_tcp_connection(conn_id, src_ip, src_port, dst_addr)
                         .await;
