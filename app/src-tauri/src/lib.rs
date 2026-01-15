@@ -127,8 +127,6 @@ pub fn run() {
             commands::get_version,
             commands::ping_relay,
             commands::is_daemon_available,
-            commands::daemon_connect_cmd,
-            commands::daemon_disconnect_cmd,
             commands::daemon_get_status,
             commands::install_daemon,
             commands::uninstall_daemon,

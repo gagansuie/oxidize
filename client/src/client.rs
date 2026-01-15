@@ -295,6 +295,146 @@ impl RelayClient {
         self.server_addr
     }
 
+    /// Establish QUIC connection (handshake only, no message loop)
+    /// Call this before setting up NFQUEUE to ensure the connection is established
+    pub async fn connect(&self) -> Result<quinn::Connection> {
+        info!("🔌 Establishing QUIC connection to {}...", self.server_addr);
+
+        let connecting = self.endpoint.connect(self.server_addr, "localhost")?;
+        let connection =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), connecting).await {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(e)) => {
+                    error!("❌ QUIC connection failed: {}", e);
+                    return Err(e.into());
+                }
+                Err(_) => {
+                    error!("❌ QUIC connection timed out after 10s");
+                    return Err(anyhow::anyhow!("Connection timeout"));
+                }
+            };
+
+        info!("✅ QUIC handshake complete!");
+        Ok(connection)
+    }
+
+    /// Run with an existing connection and packet sender channel
+    /// Use connect() first to establish the connection before NFQUEUE setup
+    pub async fn run_with_connection(
+        &self,
+        connection: quinn::Connection,
+        mut packet_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Result<()> {
+        info!("🚀 Starting relay client with existing connection...");
+
+        // Register this connection as the primary path for multipath scheduler
+        if self.config.enable_multipath {
+            let mut mp = self.multipath.lock().await;
+            let local_addr = connection
+                .local_ip()
+                .map(|ip| SocketAddr::new(ip, 0))
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let path_id = PathId::new(local_addr, self.server_addr);
+            let metrics = PathMetrics {
+                rtt_ms: 50.0,
+                bandwidth: 100_000_000,
+                loss_rate: 0.0,
+                jitter_ms: 5.0,
+                ..Default::default()
+            };
+            mp.add_path(path_id, metrics);
+            info!("🔀 Primary path registered with multipath scheduler");
+        }
+
+        // Record connection in prefetcher for pattern learning
+        if self.config.enable_prefetch {
+            let mut pf = self.prefetcher.lock().await;
+            pf.record_access(PrefetchResource::Connection(
+                self.server_addr.ip().to_string(),
+                self.server_addr.port(),
+            ));
+        }
+
+        // Open bidirectional stream for control messages
+        let (mut send, mut recv) = connection.open_bi().await?;
+
+        // Send connect message
+        let connect_msg = RelayMessage::connect(self.connection_id);
+        let encoded = connect_msg.encode()?;
+        send.write_all(&encoded).await?;
+        self.metrics.record_sent(encoded.len() as u64);
+
+        info!("📡 QUIC relay ready for packet forwarding");
+        info!("📡 Datagram max size: {:?}", connection.max_datagram_size());
+
+        let mut forwarded_count: u64 = 0;
+        let mut failed_count: u64 = 0;
+        let mut recv_buf = vec![0u8; 65536];
+
+        loop {
+            tokio::select! {
+                // Receive packets from the channel (from NFQUEUE)
+                Some(packet) = packet_rx.recv() => {
+                    // Send via QUIC datagram for low latency
+                    // Add 16-byte header: connection_id (8) + sequence (8)
+                    let sequence = SEQUENCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut datagram = Vec::with_capacity(16 + packet.len());
+                    datagram.extend_from_slice(&self.connection_id.to_le_bytes());
+                    datagram.extend_from_slice(&sequence.to_le_bytes());
+                    datagram.extend_from_slice(&packet);
+
+                    if let Some(max_size) = connection.max_datagram_size() {
+                        if datagram.len() <= max_size {
+                            match connection.send_datagram(datagram.into()) {
+                                Ok(_) => {
+                                    forwarded_count += 1;
+                                    self.metrics.record_sent(packet.len() as u64);
+                                }
+                                Err(e) => {
+                                    failed_count += 1;
+                                    if failed_count % 100 == 1 {
+                                        warn!("Datagram send failed: {} (total failures: {})", e, failed_count);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Receive datagrams from server
+                Ok(datagram) = connection.read_datagram() => {
+                    self.metrics.record_received(datagram.len() as u64);
+                    // Process received datagram (responses from relay)
+                    debug!("Received datagram: {} bytes", datagram.len());
+                }
+
+                // Receive stream data from server
+                result = recv.read(&mut recv_buf) => {
+                    match result {
+                        Ok(Some(n)) => {
+                            self.metrics.record_received(n as u64);
+                            debug!("Received stream data: {} bytes", n);
+                        }
+                        Ok(None) => {
+                            info!("Stream closed by server");
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Stream read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            "📊 Session stats: {} forwarded, {} failed",
+            forwarded_count, failed_count
+        );
+        Ok(())
+    }
+
     /// Run with a packet sender channel for external packet injection
     /// This allows the daemon to send intercepted packets through QUIC
     #[allow(dead_code)]

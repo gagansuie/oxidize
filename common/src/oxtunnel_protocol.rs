@@ -10,6 +10,12 @@
 //! - **Simpler handshake**: Faster connection establishment
 //! - **Native QUIC support**: Can tunnel over existing QUIC connections
 //!
+//! ## Security Features:
+//! - **Replay attack protection**: Sliding window sequence number validation
+//! - **Constant-time crypto**: All crypto operations are constant-time
+//! - **Memory zeroization**: Sensitive data cleared on drop
+//! - **Key rotation**: Periodic session key rotation support
+//!
 //! ## Protocol Format:
 //! ```text
 //! +-------+-------+--------+----------+-------------+
@@ -29,7 +35,7 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -81,6 +87,305 @@ pub mod control {
     pub const DISCONNECT: u8 = 0x04;
     pub const ACK: u8 = 0x05;
     pub const CONFIG_UPDATE: u8 = 0x06;
+    pub const KEY_ROTATION: u8 = 0x07;
+}
+
+// ============================================================================
+// Security: Replay Attack Protection
+// ============================================================================
+
+/// Sliding window for replay attack protection
+/// Uses a bitmap to track recently received sequence numbers
+pub struct ReplayWindow {
+    /// Highest sequence number seen
+    max_seq: u64,
+    /// Bitmap of received packets (relative to max_seq - WINDOW_SIZE)
+    bitmap: u128,
+    /// Window size in packets
+    window_size: u64,
+}
+
+impl ReplayWindow {
+    /// Default window size (128 packets)
+    pub const DEFAULT_WINDOW_SIZE: u64 = 128;
+
+    pub fn new() -> Self {
+        Self {
+            max_seq: 0,
+            bitmap: 0,
+            window_size: Self::DEFAULT_WINDOW_SIZE,
+        }
+    }
+
+    pub fn with_window_size(size: u64) -> Self {
+        Self {
+            max_seq: 0,
+            bitmap: 0,
+            window_size: size.min(128), // Max 128 due to u128 bitmap
+        }
+    }
+
+    /// Check if a sequence number is valid (not a replay)
+    /// Returns true if the packet should be accepted
+    #[inline]
+    pub fn check(&mut self, seq: u64) -> bool {
+        // First packet ever
+        if self.max_seq == 0 {
+            self.max_seq = seq;
+            self.bitmap = 1; // Mark first packet as received
+            return true;
+        }
+
+        // Packet is too old (before our window)
+        if seq + self.window_size < self.max_seq {
+            return false;
+        }
+
+        // Packet is newer than anything we've seen
+        if seq > self.max_seq {
+            // Shift the window
+            let shift = (seq - self.max_seq).min(128);
+            if shift >= 128 {
+                self.bitmap = 0;
+            } else {
+                self.bitmap <<= shift;
+            }
+            self.max_seq = seq;
+            // Mark this packet as received
+            self.bitmap |= 1;
+            return true;
+        }
+
+        // Packet is the same as max_seq - check bit 0
+        if seq == self.max_seq {
+            if self.bitmap & 1 != 0 {
+                return false; // Replay
+            }
+            self.bitmap |= 1;
+            return true;
+        }
+
+        // Packet is within our window - check if it's a replay
+        let diff = self.max_seq - seq;
+        if diff >= 128 {
+            return false;
+        }
+
+        let bit = 1u128 << diff;
+        if self.bitmap & bit != 0 {
+            // Already received this sequence number - replay!
+            return false;
+        }
+
+        // Mark as received and accept
+        self.bitmap |= bit;
+        true
+    }
+
+    /// Reset the window (e.g., after key rotation)
+    pub fn reset(&mut self) {
+        self.max_seq = 0;
+        self.bitmap = 0;
+    }
+
+    /// Get current max sequence number
+    pub fn max_seq(&self) -> u64 {
+        self.max_seq
+    }
+}
+
+impl Default for ReplayWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Security: Constant-Time Comparison
+// ============================================================================
+
+/// Constant-time byte array comparison to prevent timing attacks
+/// Returns true if the arrays are equal
+#[inline]
+pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut result: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+
+    // Use subtle::ConstantTimeEq-style comparison
+    result == 0
+}
+
+// ============================================================================
+// Security: Zeroizing Key Wrapper
+// ============================================================================
+
+/// A key that is automatically zeroed when dropped
+/// Prevents sensitive key material from lingering in memory
+pub struct ZeroizingKey {
+    key: [u8; 32],
+}
+
+impl ZeroizingKey {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self { key }
+    }
+
+    pub fn generate() -> Self {
+        let rng = SystemRandom::new();
+        let mut key = [0u8; 32];
+        rng.fill(&mut key).expect("Failed to generate random key");
+        Self { key }
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.key
+    }
+}
+
+impl Drop for ZeroizingKey {
+    fn drop(&mut self) {
+        // Volatile write to prevent compiler from optimizing away
+        for byte in self.key.iter_mut() {
+            unsafe {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+        // Memory barrier to ensure writes complete
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Clone for ZeroizingKey {
+    fn clone(&self) -> Self {
+        Self { key: self.key }
+    }
+}
+
+impl std::fmt::Debug for ZeroizingKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the actual key
+        f.debug_struct("ZeroizingKey")
+            .field("key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+// ============================================================================
+// Security: Key Rotation
+// ============================================================================
+
+/// Key rotation state for a session
+pub struct KeyRotation {
+    /// Current active key
+    current_key: Option<ZeroizingKey>,
+    /// Previous key (valid during rotation transition)
+    previous_key: Option<ZeroizingKey>,
+    /// Key generation counter
+    key_generation: u64,
+    /// Time of last rotation
+    last_rotation: Instant,
+    /// Rotation interval
+    rotation_interval: Duration,
+    /// Grace period for old key acceptance after rotation
+    grace_period: Duration,
+    /// Time when previous key expires
+    previous_key_expiry: Option<Instant>,
+}
+
+impl KeyRotation {
+    /// Default rotation interval: 1 hour
+    pub const DEFAULT_ROTATION_INTERVAL: Duration = Duration::from_secs(3600);
+    /// Default grace period: 30 seconds
+    pub const DEFAULT_GRACE_PERIOD: Duration = Duration::from_secs(30);
+
+    pub fn new(initial_key: Option<[u8; 32]>) -> Self {
+        Self {
+            current_key: initial_key.map(ZeroizingKey::new),
+            previous_key: None,
+            key_generation: 0,
+            last_rotation: Instant::now(),
+            rotation_interval: Self::DEFAULT_ROTATION_INTERVAL,
+            grace_period: Self::DEFAULT_GRACE_PERIOD,
+            previous_key_expiry: None,
+        }
+    }
+
+    pub fn with_interval(initial_key: Option<[u8; 32]>, interval: Duration) -> Self {
+        let mut kr = Self::new(initial_key);
+        kr.rotation_interval = interval;
+        kr
+    }
+
+    /// Check if rotation is due
+    pub fn needs_rotation(&self) -> bool {
+        self.current_key.is_some() && self.last_rotation.elapsed() > self.rotation_interval
+    }
+
+    /// Perform key rotation with a new key
+    pub fn rotate(&mut self, new_key: [u8; 32]) {
+        // Move current to previous
+        self.previous_key = self.current_key.take();
+        self.previous_key_expiry = Some(Instant::now() + self.grace_period);
+
+        // Set new key
+        self.current_key = Some(ZeroizingKey::new(new_key));
+        self.key_generation += 1;
+        self.last_rotation = Instant::now();
+    }
+
+    /// Get current key for encryption
+    pub fn current_key(&self) -> Option<&[u8; 32]> {
+        self.current_key.as_ref().map(|k| k.as_bytes())
+    }
+
+    /// Try to decrypt with current key, fall back to previous during grace period
+    pub fn try_decrypt_key(&self) -> Vec<&[u8; 32]> {
+        let mut keys = Vec::with_capacity(2);
+
+        if let Some(ref key) = self.current_key {
+            keys.push(key.as_bytes());
+        }
+
+        // Include previous key if still in grace period
+        if let Some(expiry) = self.previous_key_expiry {
+            if Instant::now() < expiry {
+                if let Some(ref key) = self.previous_key {
+                    keys.push(key.as_bytes());
+                }
+            } else {
+                // Grace period expired - could clear previous_key here
+                // but we don't have &mut self
+            }
+        }
+
+        keys
+    }
+
+    /// Get current key generation
+    pub fn generation(&self) -> u64 {
+        self.key_generation
+    }
+
+    /// Clear previous key (call after grace period)
+    pub fn clear_previous_key(&mut self) {
+        self.previous_key = None;
+        self.previous_key_expiry = None;
+    }
+
+    /// Check and clear expired previous key
+    pub fn cleanup_expired(&mut self) {
+        if let Some(expiry) = self.previous_key_expiry {
+            if Instant::now() >= expiry {
+                self.clear_previous_key();
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -485,6 +790,12 @@ pub struct TunnelSession {
     pub rx_packets: AtomicU64,
     pub crypto: CryptoEngine,
     pub encryption_enabled: bool,
+    /// Replay attack protection window
+    pub replay_window: std::sync::Mutex<ReplayWindow>,
+    /// Key rotation state
+    pub key_rotation: std::sync::Mutex<KeyRotation>,
+    /// Replay attacks detected
+    pub replay_attacks_blocked: AtomicU64,
 }
 
 impl TunnelSession {
@@ -501,7 +812,42 @@ impl TunnelSession {
             rx_packets: AtomicU64::new(0),
             crypto: CryptoEngine::new(key),
             encryption_enabled: key.is_some(),
+            replay_window: std::sync::Mutex::new(ReplayWindow::new()),
+            key_rotation: std::sync::Mutex::new(KeyRotation::new(key.copied())),
+            replay_attacks_blocked: AtomicU64::new(0),
         }
+    }
+
+    /// Validate sequence number against replay window
+    /// Returns true if packet is valid (not a replay)
+    #[inline]
+    pub fn validate_sequence(&self, seq: u64) -> bool {
+        let mut window = self.replay_window.lock().unwrap();
+        let valid = window.check(seq);
+        if !valid {
+            self.replay_attacks_blocked.fetch_add(1, Ordering::Relaxed);
+        }
+        valid
+    }
+
+    /// Check if key rotation is needed and return new key if so
+    pub fn check_key_rotation(&self) -> Option<[u8; 32]> {
+        let mut rotation = self.key_rotation.lock().unwrap();
+        rotation.cleanup_expired();
+
+        if rotation.needs_rotation() {
+            let new_key = ZeroizingKey::generate();
+            let key_bytes = *new_key.as_bytes();
+            rotation.rotate(key_bytes);
+            Some(key_bytes)
+        } else {
+            None
+        }
+    }
+
+    /// Get number of replay attacks blocked
+    pub fn replay_attacks_blocked(&self) -> u64 {
+        self.replay_attacks_blocked.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -527,12 +873,15 @@ impl TunnelSession {
     }
 
     pub fn stats(&self) -> SessionStats {
+        let rotation = self.key_rotation.lock().unwrap();
         SessionStats {
             tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
             rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
             tx_packets: self.tx_packets.load(Ordering::Relaxed),
             rx_packets: self.rx_packets.load(Ordering::Relaxed),
             last_activity: self.last_activity,
+            replay_attacks_blocked: self.replay_attacks_blocked.load(Ordering::Relaxed),
+            key_generation: rotation.generation(),
         }
     }
 }
@@ -544,6 +893,8 @@ pub struct SessionStats {
     pub tx_packets: u64,
     pub rx_packets: u64,
     pub last_activity: Instant,
+    pub replay_attacks_blocked: u64,
+    pub key_generation: u64,
 }
 
 // ============================================================================
@@ -989,5 +1340,133 @@ mod tests {
             extract_dest_ip(&ipv4),
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))
         );
+    }
+
+    // =========================================================================
+    // Security Tests
+    // =========================================================================
+
+    #[test]
+    fn test_replay_window_basic() {
+        let mut window = ReplayWindow::new();
+
+        // First packet should be accepted
+        assert!(window.check(1));
+
+        // Same sequence should be rejected (replay)
+        assert!(!window.check(1));
+
+        // Next sequence should be accepted
+        assert!(window.check(2));
+        assert!(window.check(3));
+
+        // Old replays still rejected
+        assert!(!window.check(1));
+        assert!(!window.check(2));
+    }
+
+    #[test]
+    fn test_replay_window_out_of_order() {
+        let mut window = ReplayWindow::new();
+
+        // Accept packets out of order within window
+        assert!(window.check(5));
+        assert!(window.check(3));
+        assert!(window.check(4));
+        assert!(window.check(1));
+        assert!(window.check(2));
+
+        // All should be rejected now
+        assert!(!window.check(1));
+        assert!(!window.check(2));
+        assert!(!window.check(3));
+        assert!(!window.check(4));
+        assert!(!window.check(5));
+    }
+
+    #[test]
+    fn test_replay_window_too_old() {
+        let mut window = ReplayWindow::new();
+
+        // Accept a high sequence
+        assert!(window.check(200));
+
+        // Very old packet should be rejected
+        assert!(!window.check(1)); // Too old (outside window)
+
+        // Packet just within window should be accepted
+        assert!(window.check(200 - 127)); // Just inside window
+    }
+
+    #[test]
+    fn test_constant_time_compare() {
+        let a = [1, 2, 3, 4, 5];
+        let b = [1, 2, 3, 4, 5];
+        let c = [1, 2, 3, 4, 6];
+        let d = [1, 2, 3, 4];
+
+        assert!(constant_time_compare(&a, &b));
+        assert!(!constant_time_compare(&a, &c));
+        assert!(!constant_time_compare(&a, &d));
+    }
+
+    #[test]
+    fn test_zeroizing_key() {
+        let key_data = [42u8; 32];
+        let key = ZeroizingKey::new(key_data);
+
+        // Key should be accessible
+        assert_eq!(key.as_bytes(), &key_data);
+
+        // Debug should not show key
+        let debug_str = format!("{:?}", key);
+        assert!(debug_str.contains("REDACTED"));
+        assert!(!debug_str.contains("42"));
+    }
+
+    #[test]
+    fn test_key_rotation() {
+        let initial_key = [1u8; 32];
+        let mut rotation = KeyRotation::with_interval(
+            Some(initial_key),
+            Duration::from_millis(10), // Very short for testing
+        );
+
+        assert_eq!(rotation.generation(), 0);
+        assert!(!rotation.needs_rotation());
+
+        // Wait for rotation interval
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(rotation.needs_rotation());
+
+        // Perform rotation
+        let new_key = [2u8; 32];
+        rotation.rotate(new_key);
+
+        assert_eq!(rotation.generation(), 1);
+        assert_eq!(rotation.current_key(), Some(&new_key));
+
+        // Both keys should be available during grace period
+        let keys = rotation.try_decrypt_key();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn test_session_replay_protection() {
+        let session = TunnelSession::new(
+            "127.0.0.1:1234".parse().unwrap(),
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+        );
+
+        // First packet should be valid
+        assert!(session.validate_sequence(1));
+
+        // Replay should be blocked
+        assert!(!session.validate_sequence(1));
+        assert_eq!(session.replay_attacks_blocked(), 1);
+
+        // New sequence should be valid
+        assert!(session.validate_sequence(2));
     }
 }

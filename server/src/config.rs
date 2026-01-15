@@ -135,11 +135,11 @@ fn default_enable_ai_engine() -> bool {
 }
 
 fn default_enable_0rtt() -> bool {
-    true // Enabled by default - rustls provides anti-replay protection
+    true // Enabled - requires max_early_data_size = 0 or u32::MAX
 }
 
 fn default_max_early_data_size() -> u32 {
-    16384 // 16KB - typical for QUIC
+    u32::MAX // QUIC requires 0 or u32::MAX for early data
 }
 
 impl Default for Config {
@@ -171,7 +171,7 @@ impl Default for Config {
             edge_cache_entries: 10000,
             enable_ai_engine: true,
             enable_0rtt: true,
-            max_early_data_size: 16384,
+            max_early_data_size: u32::MAX, // QUIC requires 0 or u32::MAX
         }
     }
 }

@@ -40,8 +40,12 @@ Your ISP's routing is suboptimal:
 │   Your Device   │  QUIC   │  Relay Server   │
 │  oxidize-client │ ──────► │  oxidize-server │ ──────► Internet
 └─────────────────┘         └─────────────────┘
+        ↑                           ↑
+   TCP + UDP                   TCP + UDP
+   captured                    forwarded
 ```
 
+- **Full traffic tunneling** — ALL TCP and UDP traffic flows through the relay
 - **Dedicated infrastructure** — no peer-to-peer, no bandwidth sharing with strangers
 - **Smart routing** — gaming tunneled, streaming bypassed for zero latency
 
@@ -78,7 +82,7 @@ Custom high-performance tunnel protocol replacing WireGuard with **unified archi
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         OxTunnel Protocol                           │
+│                    OxTunnel Protocol (TCP + UDP)                    │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Linux:   App → NFQUEUE → OxTunnel → QUIC Datagrams → Server       │
 │  macOS:   App → PF/Utun → OxTunnel → QUIC Datagrams → Server       │
@@ -86,7 +90,7 @@ Custom high-performance tunnel protocol replacing WireGuard with **unified archi
 │  Android: App → VpnService → OxTunnel → QUIC Datagrams → Server    │
 │  iOS:     App → NEPacketTunnel → OxTunnel → QUIC Datagrams → Server│
 └─────────────────────────────────────────────────────────────────────┘
-         All platforms: UDP fallback when QUIC is blocked
+         All platforms: TCP + UDP tunneled, UDP fallback when QUIC blocked
 ```
 
 - **Same protocol everywhere** - All platforms use identical OxTunnel encapsulation
@@ -382,9 +386,12 @@ See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
 
 ## Desktop App
 
-The Oxidize desktop app provides a modern GUI for managing connections:
+The Oxidize desktop app provides a modern GUI for managing connections.
+
+> **⚠️ Daemon Required**: The desktop app requires the daemon to be installed for full traffic tunneling and IP protection. Install via Settings → Install Daemon.
 
 ### Features
+- **Full IP Protection** - All traffic tunneled through relay, your real IP is hidden
 - **Auto-connect** - Automatically connects to closest region on launch (configurable)
 - **Closest Region Detection** - Uses IP geolocation + haversine distance to find optimal server
 - **Server List** - Browse all available regions with status, latency, and server count
@@ -396,6 +403,7 @@ The Oxidize desktop app provides a modern GUI for managing connections:
 |---------|-------------|
 | Launch at Startup | Start Oxidize when your computer boots |
 | Auto-connect | Automatically connect to closest region on launch |
+| Install Daemon | Required for connection - installs system service |
 
 ---
 
@@ -406,10 +414,15 @@ The daemon runs **OxTunnel** - our unified protocol that captures packets via NF
 ### How OxTunnel Works (Linux)
 ```
 App Traffic → NFQUEUE (kernel) → OxTunnel Batching → QUIC Datagrams → Relay Server
+     ↓                                                                      ↓
+ TCP + UDP                                                           TCP: Connection proxy
+ captured                                                            UDP: Direct forward
 ```
 
 ### Features
-- **NFQUEUE packet capture** - Intercepts UDP at kernel level, processes in userspace
+- **Full traffic capture** - Intercepts **both TCP and UDP** at kernel level via NFQUEUE
+- **TCP connection pooling** - Server maintains persistent TCP connections to destinations
+- **UDP direct forwarding** - Low-latency UDP packet forwarding
 - **64 packets/batch** - Reduces syscalls, improves throughput
 - **QUIC datagrams** - Zero head-of-line blocking for gaming/VoIP
 - **Pure userspace** - No kernel modules, no TUN devices
@@ -433,15 +446,20 @@ sudo ./target/release/oxidize-daemon
 ```
 
 ### NFQUEUE iptables Rules
-When connected, the daemon automatically configures:
+When connected, the daemon automatically configures rules for **both TCP and UDP**:
 ```bash
 # Check active rules
-sudo iptables -L OUTPUT -n | grep -E 'NFQUEUE|4433'
+sudo iptables -L OUTPUT -v -n --line-numbers
+
+# Expected output shows both protocols captured:
+# NFQUEUE udp  -- 0.0.0.0/0  0.0.0.0/0  NFQUEUE num 0 bypass
+# NFQUEUE tcp  -- 0.0.0.0/0  0.0.0.0/0  NFQUEUE num 0 bypass
 ```
 
 ## Documentation
 
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
+- [TCP_TUNNELING.md](docs/TCP_TUNNELING.md) - TCP over QUIC tunneling architecture
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning driven engine deep dive (LSTM, DQN, UCB1)
 - [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection

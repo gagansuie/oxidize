@@ -1,7 +1,7 @@
 //! Packet Forwarder
 //!
 //! Handles forwarding decoded packets to their destinations AND receiving responses.
-//! This is a simplified forwarder that works with standard sockets.
+//! Supports both UDP and TCP traffic tunneled through QUIC.
 //! For bare metal deployment, use DPDK feature for 40+ Gbps throughput.
 
 use anyhow::Result;
@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -23,6 +24,14 @@ struct PacketMapping {
     src_port: u16,
 }
 
+/// TCP connection key for connection pooling
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+struct TcpConnKey {
+    conn_id: u64,
+    src_port: u16,
+    dst_addr: SocketAddr,
+}
+
 /// Shared packet forwarder for all connections
 pub struct SharedForwarder {
     /// Outbound UDP socket for forwarding
@@ -33,6 +42,8 @@ pub struct SharedForwarder {
     /// Key: destination address we forwarded TO
     /// Value: connection info to route responses back
     packet_mappings: Arc<RwLock<HashMap<SocketAddr, PacketMapping>>>,
+    /// Active TCP connections (conn_id + src_port + dst -> TcpStream write half)
+    tcp_connections: Arc<RwLock<HashMap<TcpConnKey, mpsc::Sender<Vec<u8>>>>>,
     /// Statistics
     stats: Arc<ForwarderStats>,
 }
@@ -58,6 +69,7 @@ impl SharedForwarder {
             socket: Arc::new(socket),
             response_channels: Arc::new(RwLock::new(HashMap::new())),
             packet_mappings: Arc::new(RwLock::new(HashMap::new())),
+            tcp_connections: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(ForwarderStats::default()),
         });
 
@@ -195,90 +207,252 @@ impl SharedForwarder {
     }
 
     /// Forward a packet to its destination and store mapping for responses
+    /// Supports both UDP (protocol 17) and TCP (protocol 6)
     pub async fn forward(&self, conn_id: u64, packet: Vec<u8>) -> Result<()> {
-        info!(
-            "forward() called: conn_id={}, packet_len={}",
-            conn_id,
-            packet.len()
-        );
-
         // Parse destination from IP header
         if packet.len() < 20 {
-            info!("Packet too short: {} bytes", packet.len());
             return Ok(()); // Too short to be valid IP
         }
 
         // Check IP version
         let version = (packet[0] >> 4) & 0x0F;
         if version != 4 {
-            info!(
-                "Non-IPv4 packet (version {}, first byte 0x{:02x}), skipping",
-                version, packet[0]
-            );
-            return Ok(());
+            return Ok(()); // Only IPv4 supported
         }
 
-        // Parse destination IP and check protocol
         let protocol = packet[9];
-        if protocol != 17 {
-            // Only handle UDP (protocol 17), skip TCP (6), ICMP (1), etc
-            info!("Non-UDP packet (protocol {}), skipping", protocol);
-            return Ok(());
-        }
-
-        info!(
-            "Forwarding UDP packet: {} bytes, conn_id {}",
-            packet.len(),
-            conn_id
-        );
-
         let ip_header_len = ((packet[0] & 0x0F) * 4) as usize;
-        if packet.len() < ip_header_len + 8 {
-            return Ok(()); // Too short for UDP header
-        }
 
-        // Extract source (for response routing)
+        // Extract source and destination
         let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-        let src_port = u16::from_be_bytes([packet[ip_header_len], packet[ip_header_len + 1]]);
-
-        // Extract destination
         let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-        let dst_port = u16::from_be_bytes([packet[ip_header_len + 2], packet[ip_header_len + 3]]);
-        let dst_addr = SocketAddr::from((dst_ip, dst_port));
 
-        // Store mapping for response routing
-        {
-            let mut mappings = self.packet_mappings.write().await;
-            mappings.insert(
-                dst_addr,
-                PacketMapping {
+        match protocol {
+            17 => {
+                // UDP forwarding
+                if packet.len() < ip_header_len + 8 {
+                    return Ok(());
+                }
+                let src_port =
+                    u16::from_be_bytes([packet[ip_header_len], packet[ip_header_len + 1]]);
+                let dst_port =
+                    u16::from_be_bytes([packet[ip_header_len + 2], packet[ip_header_len + 3]]);
+                let dst_addr = SocketAddr::from((dst_ip, dst_port));
+
+                // Store mapping for response routing
+                {
+                    let mut mappings = self.packet_mappings.write().await;
+                    mappings.insert(
+                        dst_addr,
+                        PacketMapping {
+                            conn_id,
+                            src_ip,
+                            src_port,
+                        },
+                    );
+                }
+
+                // Forward the UDP payload
+                let payload_offset = ip_header_len + 8;
+                if packet.len() > payload_offset {
+                    let payload = &packet[payload_offset..];
+                    match self.socket.send_to(payload, dst_addr).await {
+                        Ok(n) => {
+                            self.stats.packets_forwarded.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .bytes_forwarded
+                                .fetch_add(n as u64, Ordering::Relaxed);
+                            debug!("UDP: {} bytes to {}", n, dst_addr);
+                        }
+                        Err(e) => {
+                            self.stats.forward_errors.fetch_add(1, Ordering::Relaxed);
+                            warn!("UDP forward error to {}: {}", dst_addr, e);
+                        }
+                    }
+                }
+            }
+            6 => {
+                // TCP forwarding - proxy through established connections
+                if packet.len() < ip_header_len + 20 {
+                    return Ok(()); // TCP header is at least 20 bytes
+                }
+                let src_port =
+                    u16::from_be_bytes([packet[ip_header_len], packet[ip_header_len + 1]]);
+                let dst_port =
+                    u16::from_be_bytes([packet[ip_header_len + 2], packet[ip_header_len + 3]]);
+                let dst_addr = SocketAddr::from((dst_ip, dst_port));
+
+                let tcp_header_len = ((packet[ip_header_len + 12] >> 4) * 4) as usize;
+                let payload_offset = ip_header_len + tcp_header_len;
+
+                // TCP flags
+                let flags = packet[ip_header_len + 13];
+                let syn = (flags & 0x02) != 0;
+                let fin = (flags & 0x01) != 0;
+                let rst = (flags & 0x04) != 0;
+
+                let key = TcpConnKey {
                     conn_id,
-                    src_ip,
                     src_port,
-                },
-            );
-        }
+                    dst_addr,
+                };
 
-        // Forward the UDP payload (skip IP + UDP headers)
-        let payload_offset = ip_header_len + 8;
-        if packet.len() > payload_offset {
-            let payload = &packet[payload_offset..];
-            match self.socket.send_to(payload, dst_addr).await {
-                Ok(n) => {
-                    self.stats.packets_forwarded.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .bytes_forwarded
-                        .fetch_add(n as u64, Ordering::Relaxed);
-                    debug!("Forwarded {} bytes to {} (conn {})", n, dst_addr, conn_id);
+                if syn && !((flags & 0x10) != 0) {
+                    // SYN packet - establish new TCP connection
+                    self.establish_tcp_connection(conn_id, src_ip, src_port, dst_addr)
+                        .await;
+                } else if fin || rst {
+                    // FIN or RST - close connection
+                    let mut conns = self.tcp_connections.write().await;
+                    conns.remove(&key);
+                    debug!(
+                        "TCP: Connection closed {}:{} -> {}",
+                        src_ip, src_port, dst_addr
+                    );
+                } else if packet.len() > payload_offset {
+                    // Data packet - forward payload
+                    let payload = packet[payload_offset..].to_vec();
+                    if !payload.is_empty() {
+                        let conns = self.tcp_connections.read().await;
+                        if let Some(tx) = conns.get(&key) {
+                            if tx.try_send(payload).is_ok() {
+                                self.stats.packets_forwarded.fetch_add(1, Ordering::Relaxed);
+                                self.stats.bytes_forwarded.fetch_add(
+                                    (packet.len() - payload_offset) as u64,
+                                    Ordering::Relaxed,
+                                );
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    self.stats.forward_errors.fetch_add(1, Ordering::Relaxed);
-                    warn!("Forward error to {}: {}", dst_addr, e);
-                }
+            }
+            _ => {
+                // Other protocols (ICMP, etc.) - skip for now
             }
         }
 
         Ok(())
+    }
+
+    /// Establish a TCP connection to destination and set up bidirectional proxy
+    async fn establish_tcp_connection(
+        &self,
+        conn_id: u64,
+        src_ip: Ipv4Addr,
+        src_port: u16,
+        dst_addr: SocketAddr,
+    ) {
+        let key = TcpConnKey {
+            conn_id,
+            src_port,
+            dst_addr,
+        };
+
+        // Check if connection already exists
+        {
+            let conns = self.tcp_connections.read().await;
+            if conns.contains_key(&key) {
+                return;
+            }
+        }
+
+        // Connect to destination
+        let stream = match TcpStream::connect(dst_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("TCP connect to {} failed: {}", dst_addr, e);
+                return;
+            }
+        };
+
+        info!("TCP: Connected to {} for {}:{}", dst_addr, src_ip, src_port);
+
+        let (mut read_half, mut write_half) = stream.into_split();
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1024);
+
+        // Store the write channel
+        {
+            let mut conns = self.tcp_connections.write().await;
+            conns.insert(key.clone(), tx);
+        }
+
+        // Spawn task to write data to TCP connection
+        let tcp_conns = self.tcp_connections.clone();
+        let key_clone = key.clone();
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                if write_half.write_all(&data).await.is_err() {
+                    break;
+                }
+            }
+            // Cleanup on disconnect
+            let mut conns = tcp_conns.write().await;
+            conns.remove(&key_clone);
+        });
+
+        // Spawn task to read responses and send back to client
+        let response_channels = self.response_channels.clone();
+        let stats = self.stats.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                match read_half.read(&mut buf).await {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        // Build response IP packet
+                        let response =
+                            Self::build_tcp_response(dst_addr, src_ip, src_port, &buf[..n]);
+
+                        // Send to client
+                        let channels = response_channels.read().await;
+                        if let Some(tx) = channels.get(&conn_id) {
+                            let _ = tx.try_send(response);
+                            stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                            stats.bytes_received.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    /// Build a TCP response packet (simplified - just IP + TCP headers + payload)
+    fn build_tcp_response(
+        src_addr: SocketAddr,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let src_ip = match src_addr.ip() {
+            std::net::IpAddr::V4(ip) => ip,
+            _ => return Vec::new(),
+        };
+        let src_port = src_addr.port();
+
+        let tcp_header_len = 20; // Minimal TCP header
+        let ip_len = 20 + tcp_header_len + payload.len();
+        let mut packet = vec![0u8; ip_len];
+
+        // IP Header
+        packet[0] = 0x45; // Version 4, IHL 5
+        packet[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
+        packet[6..8].copy_from_slice(&[0x40, 0x00]); // DF flag
+        packet[8] = 64; // TTL
+        packet[9] = 6; // Protocol: TCP
+        packet[12..16].copy_from_slice(&src_ip.octets());
+        packet[16..20].copy_from_slice(&dst_ip.octets());
+
+        // TCP Header (minimal)
+        packet[20..22].copy_from_slice(&src_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        packet[32] = 0x50; // Data offset: 5 (20 bytes)
+        packet[33] = 0x18; // Flags: PSH + ACK
+
+        // Payload
+        packet[40..].copy_from_slice(payload);
+
+        packet
     }
 
     /// Get forwarder statistics

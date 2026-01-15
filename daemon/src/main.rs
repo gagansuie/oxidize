@@ -349,7 +349,24 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
 
     info!("Connecting to relay: {}", server_addr);
 
-    // Create client
+    // STEP 1: Add iptables exclusion for relay server BEFORE anything else
+    // This ensures our QUIC connection won't be intercepted by NFQUEUE
+    info!(
+        "📦 Adding iptables exclusion for relay: {}",
+        server_addr.ip()
+    );
+    let _ = std::process::Command::new("iptables")
+        .args([
+            "-I",
+            "OUTPUT",
+            "-d",
+            &server_addr.ip().to_string(),
+            "-j",
+            "ACCEPT",
+        ])
+        .output();
+
+    // STEP 2: Create QUIC client
     let config = ClientConfig::default();
     let client = match RelayClient::new(server_addr, config).await {
         Ok(c) => c,
@@ -364,16 +381,29 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
 
     let metrics = client.get_metrics().clone();
 
-    // Setup NFQUEUE packet interception (requires root/CAP_NET_ADMIN)
-    // NFQUEUE is mandatory - no TUN fallback for maximum performance
+    // STEP 3: Establish QUIC connection BEFORE NFQUEUE setup
+    // This is critical - NFQUEUE intercepts even with iptables exclusions
+    let connection = match client.connect().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return DaemonResponse {
+                success: false,
+                message: format!("QUIC connection failed: {}", e),
+                data: None,
+            };
+        }
+    };
+    info!("✅ QUIC handshake complete to {}", server_addr);
+
+    // STEP 4: Now setup NFQUEUE packet interception (requires root)
     let mut queue = match create_queue() {
         Ok(q) => q,
         Err(e) => {
             error!("❌ NFQUEUE not available: {}", e);
-            error!("   NFQUEUE is required for Oxidize. Run with sudo or install daemon properly.");
+            error!("   Daemon must run as root for NFQUEUE packet interception.");
             return DaemonResponse {
                 success: false,
-                message: format!("NFQUEUE required but not available: {}. Run with sudo.", e),
+                message: format!("NFQUEUE failed: {}. Ensure daemon runs as root.", e),
                 data: None,
             };
         }
@@ -383,16 +413,14 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     let platform_clone = platform.clone();
     info!("📦 Setting up NFQUEUE: {}", platform);
 
-    // Configure queue - use defaults but add relay server to exclusions
+    // Configure queue - exclude relay server to prevent intercepting our own connection
     let mut queue_config = QueueConfig::default();
-    // Add relay port to exclusions (in case it's not already there)
     if !queue_config.exclude_ports.contains(&RELAY_PORT) {
         queue_config.exclude_ports.push(RELAY_PORT);
     }
-    // Exclude relay server IP to prevent loop
     queue_config.exclude_ips.push(server_addr.ip());
 
-    // Bind to queue
+    // Bind to queue (this adds iptables rules with exclusions)
     if let Err(e) = queue.bind(queue_config) {
         error!("Failed to bind packet queue: {}", e);
         return DaemonResponse {
@@ -464,14 +492,14 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         info!("NFQUEUE capture ended ({} packets)", packet_count);
     });
 
-    // Spawn client task with raw packet forwarding
+    // Spawn client task with pre-established connection
     let task = tokio::spawn(async move {
         info!("🚀 Starting relay client with raw packet forwarding...");
         info!("   ├─ Packet queue: {}", platform_clone);
         info!("   ├─ QUIC datagrams: enabled");
         info!("   └─ Raw packets: enabled (no batching)");
 
-        if let Err(e) = client.run_with_sender(oxtunnel_rx).await {
+        if let Err(e) = client.run_with_connection(connection, oxtunnel_rx).await {
             error!("Client error: {}", e);
         }
 

@@ -460,10 +460,10 @@ impl Default for QueueConfig {
             // - 53: DNS (critical for name resolution)
             // - 67/68: DHCP (network configuration)
             // - 123: NTP (time sync)
-            // - 443: QUIC/HTTP3 (web traffic - usually handled by apps)
-            // - 4433: Oxidize relay server
+            // - 4433: Oxidize relay server port
             // - 5353: mDNS (local discovery)
-            exclude_ports: vec![53, 67, 68, 123, 443, 4433, 5353],
+            // NOTE: Port 443 (QUIC/HTTP3) is NOT excluded - we want to tunnel it
+            exclude_ports: vec![53, 67, 68, 123, 4433, 5353],
             exclude_ips: Vec::new(),
         }
     }
@@ -990,28 +990,54 @@ pub mod linux {
 
             if !output.status.success() {
                 anyhow::bail!(
-                    "Failed to set iptables rule: {}",
+                    "Failed to set UDP iptables rule: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+
+            // Add NFQUEUE rule for outgoing TCP (tunnel ALL traffic through QUIC)
+            let output = Command::new("iptables")
+                .args([
+                    "-A",
+                    "OUTPUT",
+                    "-p",
+                    "tcp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output()?;
+
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to set TCP iptables rule: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
 
             tracing::info!(
-                "iptables NFQUEUE rules configured (queue {})",
+                "iptables NFQUEUE rules configured for UDP+TCP (queue {})",
                 config.queue_num
             );
             Ok(())
         }
 
         fn cleanup_iptables(&self) {
-            // Remove NFQUEUE rule
+            // Remove NFQUEUE rules (UDP and TCP)
             let _ = Command::new("sh")
                 .arg("-c")
                 .arg("iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 --queue-bypass 2>/dev/null || true")
                 .output();
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg("iptables -D OUTPUT -p tcp -j NFQUEUE --queue-num 0 --queue-bypass 2>/dev/null || true")
+                .output();
 
             // Remove exclusion rules we added (run multiple times to catch duplicates)
             for _ in 0..3 {
-                for port in &[53u16, 67, 68, 123, 443, 4433, 5353] {
+                for port in &[53u16, 67, 68, 123, 4433, 5353] {
                     let _ = Command::new("iptables")
                         .args([
                             "-D",
@@ -1911,7 +1937,7 @@ mod tests {
     fn test_queue_config_default() {
         let config = QueueConfig::default();
         assert_eq!(config.queue_num, 0);
-        assert_eq!(config.exclude_ports, vec![4433]);
+        assert_eq!(config.exclude_ports, vec![53, 67, 68, 123, 4433, 5353]);
     }
 
     #[test]

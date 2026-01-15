@@ -1,11 +1,6 @@
-use oxidize_common::RelayMetrics;
-use relay_client::{ClientConfig, RelayClient};
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 const API_BASE_URL: &str = "https://oxd.sh";
 
@@ -52,127 +47,51 @@ pub struct AppConfig {
     pub auto_connect: bool,
 }
 
-pub struct VpnConnection {
-    pub metrics: RelayMetrics,
-    pub server_id: String,
-    pub server_addr: SocketAddr,
-    pub connected_at: Instant,
-    pub task_handle: Option<JoinHandle<()>>,
-}
-
-#[allow(dead_code)]
+#[derive(Default)]
 pub struct AppState {
     pub config: Mutex<AppConfig>,
-    pub current_server: Mutex<Option<String>>,
-    pub vpn_connection: Arc<Mutex<Option<VpnConnection>>>,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            config: Mutex::new(AppConfig::default()),
-            current_server: Mutex::new(None),
-            vpn_connection: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-// Relay server endpoint
+// Relay server endpoint (used for ping test)
 const RELAY_HOST: &str = "relay.oxd.sh";
 const RELAY_PORT: u16 = 4433;
 
 #[tauri::command]
-pub async fn connect(
-    server_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<ConnectionStatus, String> {
+pub async fn connect(server_id: String) -> Result<ConnectionStatus, String> {
     tracing::info!("Connecting to relay via server: {}", server_id);
 
+    // Daemon is required for full traffic tunneling and IP protection
+    if !is_daemon_running().await {
+        return Err(
+            "Daemon not running. Please install the daemon first via Settings → Install Daemon. \
+             The daemon is required to tunnel all traffic and protect your IP."
+                .to_string(),
+        );
+    }
+
     // Check if already connected
-    {
-        let conn = state.vpn_connection.lock().await;
-        if conn.is_some() {
+    if let Ok(status) = daemon_get_status().await {
+        if status
+            .get("connected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Err("Already connected. Disconnect first.".to_string());
         }
     }
 
-    // Use daemon for optimized NFQUEUE-based packet interception
-    if is_daemon_running().await {
-        tracing::info!("Daemon available - using daemon connection with NFQUEUE");
-        let sid = server_id.clone();
-        daemon_connect(server_id).await?;
+    tracing::info!("Connecting via daemon with NFQUEUE packet capture");
+    daemon_connect(server_id.clone()).await?;
 
-        crate::set_connected(true);
-
-        return Ok(ConnectionStatus {
-            connected: true,
-            server: Some(sid),
-            ip: None,
-            uptime_secs: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-        });
-    }
-
-    tracing::info!("Daemon not available - using direct QUIC connection");
-
-    // Resolve Fly.io relay endpoint
-    let server_addr: SocketAddr = format!("{}:{}", RELAY_HOST, RELAY_PORT)
-        .to_socket_addrs()
-        .map_err(|e| format!("Failed to resolve relay address: {}", e))?
-        .next()
-        .ok_or_else(|| "No addresses found for relay".to_string())?;
-
-    tracing::info!("Relay endpoint: {}", server_addr);
-
-    // Create client config with defaults
-    let config = ClientConfig::default();
-
-    // Create the relay client
-    let client = RelayClient::new(server_addr, config)
-        .await
-        .map_err(|e| format!("Failed to create relay client: {}", e))?;
-
-    // Get metrics reference before moving client
-    let metrics = client.get_metrics().clone();
-
-    // Spawn background task to run the client (establishes QUIC connection, handles keepalive)
-    let task_handle = tokio::spawn(async move {
-        tracing::info!("Starting RelayClient background task...");
-        if let Err(e) = client.run().await {
-            tracing::error!("RelayClient error: {}", e);
-        }
-        tracing::info!("RelayClient background task ended");
-    });
-
-    // Store connection state with metrics and task handle
-    let vpn_conn = VpnConnection {
-        metrics,
-        server_id: server_id.clone(),
-        server_addr,
-        connected_at: Instant::now(),
-        task_handle: Some(task_handle),
-    };
-
-    {
-        let mut conn = state.vpn_connection.lock().await;
-        *conn = Some(vpn_conn);
-    }
-
-    tracing::info!(
-        "RelayClient running with full QUIC connection to {}",
-        server_addr
-    );
-
-    // Update global connected state
     crate::set_connected(true);
 
-    tracing::info!("Relay client connected to {}", server_addr);
+    // Fetch the user's new external IP (should be the relay server's IP)
+    let external_ip = get_external_ip().await.ok();
 
     Ok(ConnectionStatus {
         connected: true,
         server: Some(server_id),
-        ip: Some(server_addr.ip().to_string()),
+        ip: external_ip,
         uptime_secs: 0,
         bytes_sent: 0,
         bytes_received: 0,
@@ -180,63 +99,25 @@ pub async fn connect(
 }
 
 #[tauri::command]
-pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<ConnectionStatus, String> {
+pub async fn disconnect() -> Result<ConnectionStatus, String> {
     tracing::info!("Disconnecting...");
 
-    // Use daemon for disconnect if available
-    if is_daemon_running().await {
-        tracing::info!("Disconnecting via daemon...");
-        let response = send_daemon_command(r#"{"type":"Disconnect"}"#).await;
-        if let Ok(resp) = response {
-            let bytes_sent = resp["data"]["bytes_sent"].as_u64().unwrap_or(0);
-            let bytes_received = resp["data"]["bytes_received"].as_u64().unwrap_or(0);
-            let uptime_secs = resp["data"]["uptime_secs"].as_u64().unwrap_or(0);
-
-            crate::set_connected(false);
-            tracing::info!("Daemon disconnected");
-
-            return Ok(ConnectionStatus {
-                connected: false,
-                server: None,
-                ip: None,
-                uptime_secs,
-                bytes_sent,
-                bytes_received,
-            });
-        }
+    if !is_daemon_running().await {
+        crate::set_connected(false);
+        return Ok(ConnectionStatus {
+            connected: false,
+            server: None,
+            ip: None,
+            uptime_secs: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+        });
     }
 
-    // Get connection metrics and abort task (direct mode)
-    let (bytes_sent, bytes_received, uptime_secs) = {
-        let mut conn = state.vpn_connection.lock().await;
-        if let Some(ref mut vpn) = *conn {
-            let uptime = vpn.connected_at.elapsed().as_secs();
-            let sent = vpn
-                .metrics
-                .bytes_sent
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let received = vpn
-                .metrics
-                .bytes_received
-                .load(std::sync::atomic::Ordering::Relaxed);
-
-            // Abort the background task
-            if let Some(handle) = vpn.task_handle.take() {
-                handle.abort();
-                tracing::info!("Aborted RelayClient background task");
-            }
-
-            (sent, received, uptime)
-        } else {
-            (0, 0, 0)
-        }
-    };
-
-    // Clear the connection
-    {
-        let mut conn = state.vpn_connection.lock().await;
-        *conn = None;
-    }
+    let response = send_daemon_command(r#"{"type":"Disconnect"}"#).await?;
+    let bytes_sent = response["data"]["bytes_sent"].as_u64().unwrap_or(0);
+    let bytes_received = response["data"]["bytes_received"].as_u64().unwrap_or(0);
+    let uptime_secs = response["data"]["uptime_secs"].as_u64().unwrap_or(0);
 
     crate::set_connected(false);
     tracing::info!(
@@ -256,57 +137,46 @@ pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<ConnectionS
 }
 
 #[tauri::command]
-pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionStatus, String> {
-    let conn = state.vpn_connection.lock().await;
-
-    // Check local VPN connection first
-    if let Some(ref vpn) = *conn {
+pub async fn get_status() -> Result<ConnectionStatus, String> {
+    // Check daemon status
+    if !is_daemon_running().await {
         return Ok(ConnectionStatus {
-            connected: true,
-            server: Some(vpn.server_id.clone()),
-            ip: Some(vpn.server_addr.ip().to_string()),
-            uptime_secs: vpn.connected_at.elapsed().as_secs(),
-            bytes_sent: vpn
-                .metrics
-                .bytes_sent
-                .load(std::sync::atomic::Ordering::Relaxed),
-            bytes_received: vpn
-                .metrics
-                .bytes_received
-                .load(std::sync::atomic::Ordering::Relaxed),
+            connected: false,
+            server: None,
+            ip: None,
+            uptime_secs: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
         });
     }
 
-    // Drop the lock before async call
-    drop(conn);
+    let data = daemon_get_status().await?;
+    let connected = data
+        .get("connected")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    // If no local connection, check daemon status
-    if is_daemon_running().await {
-        if let Ok(data) = daemon_get_status().await {
-            let connected = data
-                .get("connected")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if connected {
-                return Ok(ConnectionStatus {
-                    connected: true,
-                    server: data
-                        .get("server_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    ip: None,
-                    uptime_secs: data
-                        .get("uptime_secs")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0),
-                    bytes_sent: data.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0),
-                    bytes_received: data
-                        .get("bytes_received")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0),
-                });
-            }
-        }
+    if connected {
+        // Fetch user's external IP (should be relay server's IP when connected)
+        let external_ip = get_external_ip().await.ok();
+
+        return Ok(ConnectionStatus {
+            connected: true,
+            server: data
+                .get("server_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            ip: external_ip,
+            uptime_secs: data
+                .get("uptime_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            bytes_sent: data.get("bytes_sent").and_then(|v| v.as_u64()).unwrap_or(0),
+            bytes_received: data
+                .get("bytes_received")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        });
     }
 
     Ok(ConnectionStatus {
@@ -609,6 +479,17 @@ async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(&response).map_err(|e| format!("Invalid response: {}", e))
 }
 
+/// Get the user's external/public IP address
+async fn get_external_ip() -> Result<String, String> {
+    let response = reqwest::get("https://api.ipify.org")
+        .await
+        .map_err(|e| format!("Failed to fetch IP: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read IP: {}", e))?;
+    Ok(response.trim().to_string())
+}
+
 async fn is_daemon_running() -> bool {
     #[cfg(unix)]
     {
@@ -639,35 +520,6 @@ async fn daemon_connect(server_id: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn is_daemon_available() -> Result<bool, String> {
     Ok(is_daemon_running().await)
-}
-
-/// Connect via daemon (Full Tunnel Mode)
-#[tauri::command]
-pub async fn daemon_connect_cmd(server_id: String) -> Result<String, String> {
-    if !is_daemon_running().await {
-        return Err(
-            "Daemon not running. Please enable Full Tunnel Mode in Settings first.".to_string(),
-        );
-    }
-    daemon_connect(server_id).await
-}
-
-/// Disconnect via daemon
-#[tauri::command]
-pub async fn daemon_disconnect_cmd() -> Result<String, String> {
-    if !is_daemon_running().await {
-        return Err("Daemon not running".to_string());
-    }
-
-    let response = send_daemon_command(r#"{"type":"Disconnect"}"#).await?;
-    if response["success"].as_bool().unwrap_or(false) {
-        Ok(response["message"]
-            .as_str()
-            .unwrap_or("Disconnected")
-            .to_string())
-    } else {
-        Err(response["message"].as_str().unwrap_or("Failed").to_string())
-    }
 }
 
 /// Get daemon status

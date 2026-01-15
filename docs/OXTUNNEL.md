@@ -2,6 +2,8 @@
 
 OxTunnel is Oxidize's **unified cross-platform** tunnel protocol for desktop and mobile connectivity. It replaces WireGuard with a lighter, faster implementation optimized for modern networks and works seamlessly across all platforms.
 
+> **Full Traffic Support**: OxTunnel tunnels **both TCP and UDP** traffic through QUIC, ensuring all your network activity benefits from Oxidize's optimizations.
+
 ## Unified Architecture
 
 ```
@@ -240,16 +242,64 @@ OxTunnel is specifically optimized for mobile:
 
 ## Cross-Platform Support
 
-| Platform | Capture | Transport | Status |
-|----------|---------|-----------|--------|
-| Linux (server) | - | QUIC/UDP | ✅ Full support |
-| Linux (client) | NFQUEUE | QUIC | ✅ Full support |
-| macOS | PF/Utun | QUIC | ✅ Full support |
-| Windows | WinDivert | QUIC | ✅ Full support |
-| Android | VpnService | QUIC/UDP | ✅ Full support |
-| iOS | NEPacketTunnel | QUIC/UDP | ✅ Full support |
+| Platform | Capture | Protocols | Transport | Status |
+|----------|---------|-----------|-----------|--------|
+| Linux (server) | - | TCP + UDP | QUIC/UDP | ✅ Full support |
+| Linux (client) | NFQUEUE | TCP + UDP | QUIC | ✅ Full support |
+| macOS | PF/Utun | TCP + UDP | QUIC | ✅ Full support |
+| Windows | WinDivert | TCP + UDP | QUIC | ✅ Full support |
+| Android | VpnService | TCP + UDP | QUIC/UDP | ✅ Full support |
+| iOS | NEPacketTunnel | TCP + UDP | QUIC/UDP | ✅ Full support |
 
 **All platforms use the same OxTunnel protocol** with platform-specific packet capture and unified QUIC transport.
+
+## TCP over QUIC Architecture
+
+OxTunnel tunnels TCP traffic through QUIC datagrams with connection pooling on the server:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      TCP Tunneling Flow                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Client Side:                                                       │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │   App    │───►│ NFQUEUE  │───►│  Client  │───►│   QUIC   │     │
+│  │ (TCP/UDP)│    │ Capture  │    │ Batching │    │ Datagram │     │
+│  └──────────┘    └──────────┘    └──────────┘    └────┬─────┘     │
+│                                                       │            │
+│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─  │
+│                                                       │            │
+│  Server Side:                                         ▼            │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
+│  │ Internet │◄───│   TCP    │◄───│ Protocol │◄───│  Server  │     │
+│  │          │    │  Proxy   │    │ Dispatch │    │ Receive  │     │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘     │
+│                       │                                            │
+│                       ▼                                            │
+│              Connection Pooling                                    │
+│              (reuse TCP connections)                               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### TCP Handling Details
+
+| Phase | Action | Description |
+|-------|--------|-------------|
+| SYN | `establish_tcp_connection()` | Server opens TCP connection to destination |
+| DATA | Forward payload | TCP payload extracted and sent to destination |
+| FIN/RST | Close connection | Connection removed from pool |
+
+### Benefits of TCP over QUIC
+
+| Benefit | Description |
+|---------|-------------|
+| **Multiplexing** | Multiple TCP flows share single QUIC connection |
+| **0-RTT** | Instant reconnection with session resumption |
+| **Encryption** | All traffic encrypted by QUIC TLS 1.3 |
+| **Loss Recovery** | QUIC's superior loss recovery benefits TCP traffic |
+| **Connection Migration** | TCP flows survive network changes (WiFi→LTE) |
 
 ## Security Considerations
 

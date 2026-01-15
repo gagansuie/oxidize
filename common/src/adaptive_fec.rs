@@ -2,6 +2,12 @@
 //!
 //! Dynamically adjusts FEC redundancy based on observed packet loss rate.
 //! Provides 2x improvement on lossy networks while minimizing overhead on good connections.
+//!
+//! ## Proactive FEC (ML-Powered)
+//! When integrated with the ML engine, this module can:
+//! - Accept loss predictions from LSTM model (50-100ms ahead)
+//! - Pre-emptively increase FEC redundancy BEFORE loss occurs
+//! - Reduce unnecessary FEC on stable connections
 
 use anyhow::Result;
 use reed_solomon_erasure::galois_8::ReedSolomon;
@@ -91,6 +97,14 @@ pub struct AdaptiveFec {
     adjustment_interval: Duration,
     /// Statistics
     pub stats: AdaptiveFecStats,
+    /// Proactive FEC: predicted loss probability from ML (0.0 - 1.0)
+    predicted_loss: f64,
+    /// Proactive FEC: time when prediction was last updated
+    prediction_updated: Instant,
+    /// Proactive FEC: how long predictions are valid
+    prediction_ttl: Duration,
+    /// Enable proactive FEC mode
+    proactive_mode: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,6 +115,10 @@ pub struct AdaptiveFecStats {
     pub current_loss_rate: f64,
     pub bytes_overhead: u64,
     pub recoveries: u64,
+    /// Number of times ML prediction was updated
+    pub prediction_updates: u64,
+    /// Number of proactive FEC adjustments (before loss occurred)
+    pub proactive_adjustments: u64,
 }
 
 impl AdaptiveFec {
@@ -118,7 +136,73 @@ impl AdaptiveFec {
             last_adjustment: Instant::now(),
             adjustment_interval,
             stats: AdaptiveFecStats::default(),
+            predicted_loss: 0.0,
+            prediction_updated: Instant::now(),
+            prediction_ttl: Duration::from_millis(200), // Predictions valid for 200ms
+            proactive_mode: false,
         }
+    }
+
+    /// Create with proactive FEC enabled
+    pub fn with_proactive_mode(window_size: usize, adjustment_interval: Duration) -> Self {
+        let mut fec = Self::with_config(window_size, adjustment_interval);
+        fec.proactive_mode = true;
+        fec
+    }
+
+    /// Enable or disable proactive FEC mode
+    pub fn set_proactive_mode(&mut self, enabled: bool) {
+        self.proactive_mode = enabled;
+    }
+
+    /// Update with ML-predicted loss probability
+    /// This should be called by the ML integration layer with LSTM predictions
+    /// loss_probability: 0.0 to 1.0 representing predicted loss in next 50-100ms
+    pub fn update_prediction(&mut self, loss_probability: f64) {
+        self.predicted_loss = loss_probability.clamp(0.0, 1.0);
+        self.prediction_updated = Instant::now();
+        self.stats.prediction_updates += 1;
+
+        // Immediately adjust FEC level based on prediction if proactive mode is on
+        if self.proactive_mode {
+            self.adjust_level_proactive();
+        }
+    }
+
+    /// Proactively adjust FEC level based on ML prediction
+    fn adjust_level_proactive(&mut self) {
+        // Use prediction if it's fresh, otherwise fall back to measured loss
+        let effective_loss = if self.prediction_updated.elapsed() < self.prediction_ttl {
+            // Blend prediction with measured loss (prediction weighted higher for proactive)
+            let measured = self.calculate_loss_rate();
+            // 70% prediction, 30% measured for proactive response
+            self.predicted_loss * 0.7 + measured * 0.3
+        } else {
+            self.calculate_loss_rate()
+        };
+
+        let new_level = FecLevel::from_loss_rate(effective_loss);
+
+        if new_level != self.level {
+            // Track proactive adjustments
+            if self.prediction_updated.elapsed() < self.prediction_ttl {
+                self.stats.proactive_adjustments += 1;
+            }
+            self.level = new_level;
+            self.encoder = None; // Force recreation with new shard count
+        }
+
+        self.last_adjustment = Instant::now();
+    }
+
+    /// Check if we're currently in proactive mode with valid prediction
+    pub fn is_proactive_active(&self) -> bool {
+        self.proactive_mode && self.prediction_updated.elapsed() < self.prediction_ttl
+    }
+
+    /// Get current predicted loss (for monitoring)
+    pub fn predicted_loss(&self) -> f64 {
+        self.predicted_loss
     }
 
     /// Get current FEC level
@@ -255,6 +339,12 @@ impl AdaptiveFec {
             return;
         }
 
+        // Use proactive adjustment if enabled
+        if self.proactive_mode {
+            self.adjust_level_proactive();
+            return;
+        }
+
         let loss_rate = self.calculate_loss_rate();
         self.stats.current_loss_rate = loss_rate;
 
@@ -371,5 +461,35 @@ mod tests {
 
         let decoded = fec.decode(&mut packet, &[2]).unwrap();
         assert_eq!(&decoded[..data.len()], data);
+    }
+
+    #[test]
+    fn test_proactive_fec() {
+        let mut fec = AdaptiveFec::with_proactive_mode(100, Duration::from_secs(1));
+
+        // Initially no FEC
+        assert_eq!(fec.level(), FecLevel::None);
+        assert!(fec.proactive_mode);
+
+        // Simulate ML prediction of 10% loss
+        fec.update_prediction(0.10);
+
+        // Should proactively increase FEC
+        assert!(fec.level() != FecLevel::None);
+        assert_eq!(fec.stats.prediction_updates, 1);
+        assert_eq!(fec.stats.proactive_adjustments, 1);
+    }
+
+    #[test]
+    fn test_prediction_expiry() {
+        let mut fec = AdaptiveFec::with_proactive_mode(100, Duration::from_millis(100));
+        fec.prediction_ttl = Duration::from_millis(10); // Very short TTL for testing
+
+        fec.update_prediction(0.20);
+        assert!(fec.is_proactive_active());
+
+        // Wait for prediction to expire
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(!fec.is_proactive_active());
     }
 }

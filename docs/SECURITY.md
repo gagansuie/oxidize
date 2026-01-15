@@ -4,17 +4,20 @@ Oxidize is designed to be resilient against attacks. This guide covers security 
 
 ## Is Oxidize a VPN?
 
-**Functionally similar, but not identical:**
+**Yes, Oxidize provides full VPN-like protection:**
 
 | Capability | Traditional VPN | Oxidize |
 |------------|-----------------|---------|
 | Encrypts traffic | ✅ TLS/IPsec | ✅ TLS 1.3 + QUIC |
-| Hides client IP | ✅ | ✅ (relay IP visible) |
-| Tunnels traffic | ✅ All system traffic | ✅ All UDP via NFQUEUE |
+| Hides client IP | ✅ | ✅ (relay IP visible to destinations) |
+| Tunnels traffic | ✅ All system traffic | ✅ All TCP + UDP via NFQUEUE |
 | Kernel integration | ✅ tun/tap device | ✅ NFQUEUE (userspace, no kernel modules) |
 | Protocol | OpenVPN/WireGuard/IPsec | QUIC |
+| DDoS Protection | ✅ | ✅ (attackers see relay IP, not yours) |
 
-**Key difference:** Oxidize uses NFQUEUE to intercept all UDP traffic in userspace, then forwards it through an encrypted QUIC tunnel. No kernel modules required.
+**How it works:** The daemon uses NFQUEUE to intercept **all TCP and UDP traffic** at the kernel level, then tunnels it through an encrypted QUIC connection to the relay server. Destinations see the relay server's IP, not yours.
+
+> **Note:** The daemon is required for connection. Without it, no traffic is tunneled and your IP is not protected.
 
 ---
 

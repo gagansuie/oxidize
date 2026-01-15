@@ -2,8 +2,8 @@
 set -e
 
 # Oxidize Daemon Installer for Linux
-# This script installs the oxidize-daemon with proper capabilities
-# so it can capture packets without running as root at runtime
+# This script installs the oxidize-daemon as a systemd service
+# The daemon runs as root for NFQUEUE packet interception (like WireGuard/OpenVPN)
 
 DAEMON_BIN="/usr/local/bin/oxidize-daemon"
 SERVICE_FILE="/etc/systemd/system/oxidize-daemon.service"
@@ -75,18 +75,30 @@ echo "→ Setting up iptables NFQUEUE rules..."
 mkdir -p /etc/oxidize
 cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
 #!/bin/bash
-# Oxidize NFQUEUE iptables rules
-# These are loaded at boot to enable packet capture
+# Oxidize iptables exclusion rules
+# Only sets up exclusions - daemon adds NFQUEUE rule after QUIC connects
 
-QUEUE_NUM=0
+RELAY_HOST="relay.oxd.sh"
 
-# Clear existing oxidize rules
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
+# Resolve relay IPv4 address
+RELAY_IP=$(getent ahostsv4 $RELAY_HOST | awk '{print $1}' | head -1)
 
-# Add NFQUEUE rule for outbound UDP
-iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
+# Clear old rules
+iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 
-echo "NFQUEUE rules applied (queue $QUEUE_NUM)"
+# Add exclusion for relay server
+if [ -n "$RELAY_IP" ]; then
+    iptables -D OUTPUT -d $RELAY_IP -j ACCEPT 2>/dev/null || true
+    iptables -I OUTPUT -d $RELAY_IP -j ACCEPT
+    echo "Relay exclusion: $RELAY_IP"
+fi
+
+# Add exclusions for common ports
+iptables -I OUTPUT -p udp --dport 53 -j ACCEPT   # DNS
+iptables -I OUTPUT -p udp --dport 67 -j ACCEPT   # DHCP
+iptables -I OUTPUT -p udp --dport 68 -j ACCEPT   # DHCP
+
+echo "Exclusion rules applied (NFQUEUE added by daemon after connect)"
 RULES
 chmod +x /etc/oxidize/nfqueue-rules.sh
 
@@ -99,25 +111,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=oxidize
-Group=oxidize
+User=root
+Group=root
 ExecStartPre=/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/local/bin/oxidize-daemon
-ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
+ExecStopPost=-/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
-
-# Security hardening
-NoNewPrivileges=false
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/var/run/oxidize
-
-# Required capabilities (already set via setcap, but belt-and-suspenders)
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
@@ -133,10 +134,9 @@ systemctl start oxidize-daemon
 echo ""
 echo "✅ Oxidize daemon installed and running!"
 echo ""
-echo "Privileges configured at install-time:"
-echo "  • CAP_NET_ADMIN, CAP_NET_RAW capabilities set on binary"
+echo "Configuration:"
 echo "  • NFQUEUE iptables rules auto-configured"
-echo "  • Runs as unprivileged 'oxidize' user"
+echo "  • Runs as root for full packet interception"
 echo ""
 echo "Commands:"
 echo "  systemctl status oxidize-daemon  - Check status"

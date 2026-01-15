@@ -2,6 +2,11 @@
 //!
 //! Provides packet batching, optional encryption, and OxTunnel encapsulation
 //! for the daemon's NFQUEUE pipeline. Works with both QUIC transport and raw UDP.
+//!
+//! ## Performance Optimizations:
+//! - **Adaptive batch timeout**: Adjusts based on traffic rate (500µs-2000µs)
+//! - **Traffic-aware batching**: Gaming/VoIP packets bypass batching for lowest latency
+//! - **Proactive FEC integration**: Uses ML predictions for pre-emptive redundancy
 
 use crate::oxtunnel_protocol::{
     encode_packet, flags, generate_id, CryptoEngine, HandshakeInit, PacketBatch, TunnelBufferPool,
@@ -12,7 +17,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// OxTunnel client configuration
 #[derive(Clone, Debug)]
@@ -24,6 +29,14 @@ pub struct OxTunnelConfig {
     pub encryption_key: Option<[u8; 32]>,
     pub enable_compression: bool,
     pub server_addr: SocketAddr,
+    /// Enable adaptive batch timeout based on traffic rate
+    pub enable_adaptive_timeout: bool,
+    /// Minimum batch timeout in microseconds (high traffic)
+    pub min_batch_timeout_us: u64,
+    /// Maximum batch timeout in microseconds (low traffic)
+    pub max_batch_timeout_us: u64,
+    /// Enable traffic-aware batching (bypass batching for gaming/VoIP)
+    pub enable_traffic_aware_batching: bool,
 }
 
 impl Default for OxTunnelConfig {
@@ -36,6 +49,10 @@ impl Default for OxTunnelConfig {
             encryption_key: None,
             enable_compression: false,
             server_addr: "127.0.0.1:51820".parse().unwrap(),
+            enable_adaptive_timeout: true,
+            min_batch_timeout_us: 500,  // 500µs for high traffic
+            max_batch_timeout_us: 2000, // 2ms for low traffic
+            enable_traffic_aware_batching: true,
         }
     }
 }
@@ -45,6 +62,8 @@ pub struct ClientStats {
     pub packets_sent: AtomicU64,
     pub bytes_sent: AtomicU64,
     pub batches_sent: AtomicU64,
+    pub gaming_packets_bypassed: AtomicU64,
+    pub adaptive_timeout_adjustments: AtomicU64,
 }
 
 impl ClientStats {
@@ -53,6 +72,8 @@ impl ClientStats {
             packets_sent: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
             batches_sent: AtomicU64::new(0),
+            gaming_packets_bypassed: AtomicU64::new(0),
+            adaptive_timeout_adjustments: AtomicU64::new(0),
         }
     }
 }
@@ -60,6 +81,88 @@ impl ClientStats {
 impl Default for ClientStats {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Adaptive timeout calculator based on traffic rate
+#[derive(Debug)]
+pub struct AdaptiveTimeout {
+    min_timeout_us: u64,
+    max_timeout_us: u64,
+    current_timeout_us: AtomicU64,
+    packet_count: AtomicU64,
+    window_start: Mutex<Instant>,
+    window_duration: Duration,
+}
+
+impl AdaptiveTimeout {
+    pub fn new(min_us: u64, max_us: u64) -> Self {
+        Self {
+            min_timeout_us: min_us,
+            max_timeout_us: max_us,
+            current_timeout_us: AtomicU64::new((min_us + max_us) / 2),
+            packet_count: AtomicU64::new(0),
+            window_start: Mutex::new(Instant::now()),
+            window_duration: Duration::from_millis(100), // 100ms measurement window
+        }
+    }
+
+    /// Record a packet and potentially adjust timeout
+    #[inline]
+    pub fn record_packet(&self) -> Option<u64> {
+        let count = self.packet_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Check if we should recalculate (every 100 packets or window elapsed)
+        if count.is_multiple_of(100) {
+            return self.recalculate();
+        }
+        None
+    }
+
+    /// Recalculate timeout based on current packet rate
+    fn recalculate(&self) -> Option<u64> {
+        let mut window_start = self.window_start.lock().unwrap();
+        let elapsed = window_start.elapsed();
+
+        if elapsed < self.window_duration {
+            return None;
+        }
+
+        let count = self.packet_count.swap(0, Ordering::Relaxed);
+        let pps = count as f64 / elapsed.as_secs_f64();
+        *window_start = Instant::now();
+
+        // Calculate new timeout based on packets per second
+        // High traffic (>10k pps) = min timeout
+        // Low traffic (<1k pps) = max timeout
+        let new_timeout = if pps > 10000.0 {
+            self.min_timeout_us
+        } else if pps < 1000.0 {
+            self.max_timeout_us
+        } else {
+            // Linear interpolation between min and max
+            let ratio = (pps - 1000.0) / 9000.0;
+            let range = self.max_timeout_us - self.min_timeout_us;
+            self.max_timeout_us - (ratio * range as f64) as u64
+        };
+
+        let old_timeout = self.current_timeout_us.swap(new_timeout, Ordering::Relaxed);
+
+        if old_timeout != new_timeout {
+            debug!(
+                "Adaptive timeout: {} -> {}µs (pps: {:.0})",
+                old_timeout, new_timeout, pps
+            );
+            Some(new_timeout)
+        } else {
+            None
+        }
+    }
+
+    /// Get current timeout
+    #[inline]
+    pub fn current(&self) -> Duration {
+        Duration::from_micros(self.current_timeout_us.load(Ordering::Relaxed))
     }
 }
 
@@ -85,6 +188,47 @@ impl PacketBatchState {
     }
 }
 
+/// Check if a packet is latency-sensitive based on IP header
+/// Returns true for gaming/VoIP traffic that should bypass batching
+#[inline]
+pub fn is_latency_sensitive_packet(packet: &[u8]) -> bool {
+    if packet.len() < 28 {
+        return false; // Too short for UDP header
+    }
+
+    let version = packet[0] >> 4;
+    if version != 4 {
+        return false; // Only handle IPv4 for now
+    }
+
+    let protocol = packet[9];
+    if protocol != 17 {
+        return false; // Only UDP is latency-sensitive
+    }
+
+    // Extract UDP destination port (IP header is typically 20 bytes)
+    let ihl = (packet[0] & 0x0F) as usize * 4;
+    if packet.len() < ihl + 4 {
+        return false;
+    }
+
+    let dest_port = u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]]);
+
+    // Gaming and VoIP ports
+    matches!(dest_port,
+        // Gaming ports
+        27015..=27017 |  // Source engine (Valve)
+        7777..=7779 |    // Unreal Engine
+        3074 |           // Xbox Live
+        3478..=3481 |    // PlayStation + STUN/TURN
+        5060..=5062 |    // Riot Games + SIP
+        6672..=6673 |    // EA
+        9000..=9002 |    // Various games
+        // VoIP ports
+        16384..=32767    // RTP range
+    )
+}
+
 /// Encapsulates packets using OxTunnel protocol before sending
 pub struct OxTunnelEncapsulator {
     config: OxTunnelConfig,
@@ -95,6 +239,7 @@ pub struct OxTunnelEncapsulator {
     buffer_pool: Arc<TunnelBufferPool>,
     stats: Arc<ClientStats>,
     batch: Mutex<PacketBatchState>,
+    adaptive_timeout: Option<AdaptiveTimeout>,
 }
 
 impl OxTunnelEncapsulator {
@@ -109,6 +254,15 @@ impl OxTunnelEncapsulator {
             None
         };
 
+        let adaptive_timeout = if config.enable_adaptive_timeout {
+            Some(AdaptiveTimeout::new(
+                config.min_batch_timeout_us,
+                config.max_batch_timeout_us,
+            ))
+        } else {
+            None
+        };
+
         Self {
             config,
             client_id,
@@ -117,7 +271,37 @@ impl OxTunnelEncapsulator {
             buffer_pool: Arc::new(TunnelBufferPool::new()),
             stats: Arc::new(ClientStats::new()),
             batch: Mutex::new(PacketBatchState::new()),
+            adaptive_timeout,
         }
+    }
+
+    /// Check if packet should bypass batching (gaming/VoIP)
+    #[inline]
+    pub fn should_bypass_batching(&self, packet: &[u8]) -> bool {
+        self.config.enable_traffic_aware_batching && is_latency_sensitive_packet(packet)
+    }
+
+    /// Add packet with traffic-awareness - returns (immediate_send, batch_to_send)
+    /// immediate_send: Some if this packet should be sent immediately (gaming/VoIP)
+    /// batch_to_send: Some if a batch is ready to be flushed
+    pub fn add_to_batch_traffic_aware(&self, packet: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        // Check if this is latency-sensitive traffic
+        if self.should_bypass_batching(packet) {
+            self.stats
+                .gaming_packets_bypassed
+                .fetch_add(1, Ordering::Relaxed);
+            // Send immediately without batching
+            match self.encapsulate_single(packet) {
+                Ok(encapsulated) => return (Some(encapsulated), None),
+                Err(e) => {
+                    error!("Failed to encapsulate gaming packet: {}", e);
+                    return (None, None);
+                }
+            }
+        }
+
+        // Normal batching for non-latency-sensitive traffic
+        (None, self.add_to_batch(packet))
     }
 
     #[inline]
@@ -185,11 +369,30 @@ impl OxTunnelEncapsulator {
             return None;
         }
         if let Some(first_time) = batch.first_packet_time {
-            if first_time.elapsed() > Duration::from_micros(self.config.batch_timeout_us) {
+            // Use adaptive timeout if enabled, otherwise fixed timeout
+            let timeout = self
+                .adaptive_timeout
+                .as_ref()
+                .map(|at| at.current())
+                .unwrap_or(Duration::from_micros(self.config.batch_timeout_us));
+
+            if first_time.elapsed() > timeout {
                 return self.flush_batch_locked(&mut batch);
             }
         }
         None
+    }
+
+    /// Record a packet for adaptive timeout calculation
+    #[inline]
+    pub fn record_packet_for_adaptive_timeout(&self) {
+        if let Some(ref adaptive) = self.adaptive_timeout {
+            if adaptive.record_packet().is_some() {
+                self.stats
+                    .adaptive_timeout_adjustments
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     pub fn flush_batch(&self) -> Option<Vec<u8>> {
@@ -285,6 +488,14 @@ impl OxTunnelEncapsulator {
     pub fn config(&self) -> &OxTunnelConfig {
         &self.config
     }
+
+    /// Get current adaptive timeout (if enabled)
+    pub fn current_timeout(&self) -> Duration {
+        self.adaptive_timeout
+            .as_ref()
+            .map(|at| at.current())
+            .unwrap_or(Duration::from_micros(self.config.batch_timeout_us))
+    }
 }
 
 /// High-performance OxTunnel sender that batches packets
@@ -303,12 +514,16 @@ impl OxTunnelSender {
 
     pub async fn run(&self, mut input_rx: mpsc::Receiver<Vec<u8>>) {
         info!(
-            "📦 OxTunnel sender started (batching: {}, encryption: {})",
-            self.encapsulator.config.enable_batching, self.encapsulator.config.enable_encryption
+            "📦 OxTunnel sender started (batching: {}, encryption: {}, adaptive_timeout: {}, traffic_aware: {})",
+            self.encapsulator.config.enable_batching,
+            self.encapsulator.config.enable_encryption,
+            self.encapsulator.config.enable_adaptive_timeout,
+            self.encapsulator.config.enable_traffic_aware_batching
         );
 
         let mut packet_count: u64 = 0;
         let mut batch_count: u64 = 0;
+        let mut gaming_bypass_count: u64 = 0;
         let start = Instant::now();
 
         let encap = self.encapsulator.clone();
@@ -330,10 +545,26 @@ impl OxTunnelSender {
                 Some(packet) = input_rx.recv() => {
                     packet_count += 1;
 
+                    // Record for adaptive timeout
+                    self.encapsulator.record_packet_for_adaptive_timeout();
+
                     if self.encapsulator.config.enable_batching {
-                        if let Some(batch) = self.encapsulator.add_to_batch(&packet) {
+                        // Use traffic-aware batching
+                        let (immediate, batch) = self.encapsulator.add_to_batch_traffic_aware(&packet);
+
+                        // Send immediate packet (gaming/VoIP)
+                        if let Some(data) = immediate {
+                            gaming_bypass_count += 1;
+                            if self.output_tx.send(data).await.is_err() {
+                                warn!("Output channel closed");
+                                break;
+                            }
+                        }
+
+                        // Send batch if ready
+                        if let Some(batch_data) = batch {
                             batch_count += 1;
-                            if self.output_tx.send(batch).await.is_err() {
+                            if self.output_tx.send(batch_data).await.is_err() {
                                 warn!("Output channel closed");
                                 break;
                             }
@@ -352,10 +583,15 @@ impl OxTunnelSender {
                         }
                     }
 
-                    if packet_count.is_multiple_of(10000) {
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if packet_count % 10000 == 0 {
                         let elapsed = start.elapsed().as_secs_f64();
                         let pps = packet_count as f64 / elapsed;
-                        info!("📊 OxTunnel: {} packets, {} batches, {:.0} pps", packet_count, batch_count, pps);
+                        let timeout = self.encapsulator.current_timeout();
+                        info!(
+                            "📊 OxTunnel: {} packets, {} batches, {} gaming bypass, {:.0} pps, timeout: {}µs",
+                            packet_count, batch_count, gaming_bypass_count, pps, timeout.as_micros()
+                        );
                     }
                 }
 
@@ -373,9 +609,10 @@ impl OxTunnelSender {
         let elapsed = start.elapsed();
         let stats = self.encapsulator.stats();
         info!(
-            "📊 OxTunnel sender finished: {} packets, {} batches in {:.2}s ({:.0} pps)",
+            "📊 OxTunnel sender finished: {} packets, {} batches, {} gaming bypass in {:.2}s ({:.0} pps)",
             stats.packets_sent.load(Ordering::Relaxed),
             stats.batches_sent.load(Ordering::Relaxed),
+            stats.gaming_packets_bypassed.load(Ordering::Relaxed),
             elapsed.as_secs_f64(),
             packet_count as f64 / elapsed.as_secs_f64().max(0.001)
         );
@@ -424,5 +661,65 @@ mod tests {
         let handshake = encap.create_handshake();
         assert_eq!(&handshake[0..2], &PROTOCOL_MAGIC);
         assert!(handshake[2] & flags::CONTROL != 0);
+    }
+
+    #[test]
+    fn test_adaptive_timeout() {
+        let timeout = AdaptiveTimeout::new(500, 2000);
+
+        // Initial timeout should be middle value
+        let initial = timeout.current();
+        assert!(initial.as_micros() >= 500 && initial.as_micros() <= 2000);
+
+        // Record some packets
+        for _ in 0..100 {
+            timeout.record_packet();
+        }
+    }
+
+    #[test]
+    fn test_latency_sensitive_detection() {
+        // Create a fake UDP packet to gaming port (27015 - Source engine)
+        let mut packet = vec![0u8; 28];
+        packet[0] = 0x45; // IPv4, IHL=5
+        packet[9] = 17; // UDP protocol
+                        // UDP dest port 27015 at offset 22-23 (20 byte IP header + 2 byte src port)
+        packet[22] = (27015 >> 8) as u8;
+        packet[23] = (27015 & 0xFF) as u8;
+
+        assert!(is_latency_sensitive_packet(&packet));
+
+        // Create a fake TCP packet (not latency sensitive)
+        let mut tcp_packet = vec![0u8; 40];
+        tcp_packet[0] = 0x45; // IPv4
+        tcp_packet[9] = 6; // TCP protocol
+
+        assert!(!is_latency_sensitive_packet(&tcp_packet));
+    }
+
+    #[test]
+    fn test_traffic_aware_batching() {
+        let config = OxTunnelConfig {
+            enable_batching: true,
+            enable_traffic_aware_batching: true,
+            ..Default::default()
+        };
+        let encap = OxTunnelEncapsulator::new(config);
+
+        // Gaming packet should bypass batching
+        let mut gaming_packet = vec![0u8; 64];
+        gaming_packet[0] = 0x45;
+        gaming_packet[9] = 17; // UDP
+        gaming_packet[22] = (27015 >> 8) as u8;
+        gaming_packet[23] = (27015 & 0xFF) as u8;
+
+        let (immediate, batch) = encap.add_to_batch_traffic_aware(&gaming_packet);
+        assert!(immediate.is_some()); // Gaming packet sent immediately
+        assert!(batch.is_none()); // No batch triggered
+
+        // Regular packet should be batched
+        let regular_packet = vec![0x45; 100];
+        let (immediate, _batch) = encap.add_to_batch_traffic_aware(&regular_packet);
+        assert!(immediate.is_none()); // Regular packet batched
     }
 }

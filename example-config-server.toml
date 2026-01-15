@@ -69,9 +69,9 @@ rohc_max_size = 1500
 # Anti-replay protection is built-in via rustls + QUIC connection ID binding
 enable_0rtt = true
 
-# Maximum early data size in bytes for 0-RTT (default 16KB)
-# Only used if enable_0rtt = true
-max_early_data_size = 16384
+# Maximum early data size in bytes for 0-RTT
+# QUIC requires either 0 (disabled) or 4294967295 (u32::MAX)
+max_early_data_size = 4294967295
 
 # === AI/Heuristic Engine ===
 # Enable AI-powered compression decisions using ML models
