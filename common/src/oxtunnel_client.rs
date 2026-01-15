@@ -113,7 +113,8 @@ impl AdaptiveTimeout {
         let count = self.packet_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Check if we should recalculate (every 100 packets or window elapsed)
-        if count.is_multiple_of(100) {
+        #[allow(clippy::manual_is_multiple_of)]
+        if count % 100 == 0 {
             return self.recalculate();
         }
         None

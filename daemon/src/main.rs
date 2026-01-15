@@ -469,7 +469,8 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
                     }
 
                     // Log throughput periodically
-                    if packet_count.is_multiple_of(10000) {
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if packet_count % 10000 == 0 {
                         let elapsed = start.elapsed().as_secs_f64();
                         let pps = packet_count as f64 / elapsed;
                         info!("📦 NFQUEUE: {} packets, {:.0} pps", packet_count, pps);
