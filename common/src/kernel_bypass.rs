@@ -503,6 +503,7 @@ impl PacketPool {
 
     /// Allocate a packet buffer
     #[inline]
+    #[allow(clippy::mut_from_ref)] // Safe: interior mutability via UnsafeCell + atomic free_stack
     pub fn alloc(&self) -> Option<&mut PacketBuffer> {
         if let Some(idx) = self.free_stack.pop() {
             self.stats.allocations.inc();
@@ -769,7 +770,7 @@ pub mod security {
         // For IPv4, check header length
         if ip_version == 4 {
             let ihl = (data[14] & 0x0F) as usize * 4;
-            if ihl < 20 || ihl > 60 {
+            if !(20..=60).contains(&ihl) {
                 return ValidationResult::InvalidIpHeaderLen;
             }
 
