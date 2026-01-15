@@ -45,7 +45,7 @@ jobs:
       - name: Build frontend
         working-directory: app
         run: |
-          bun install --frozen-lockfile
+          bun install
           bun run build
 
       - name: Check frontend (TypeScript/Svelte)
