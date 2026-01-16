@@ -188,39 +188,6 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install create-dmg
 
-      - name: Download WinDivert (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $WinDivertVersion = "2.2.2"
-          $WinDivertUrl = "https://github.com/basil00/WinDivert/releases/download/v$WinDivertVersion/WinDivert-$WinDivertVersion-A.zip"
-          $WinDivertZip = "$env:TEMP\WinDivert.zip"
-          $WinDivertDir = "app/src-tauri/WinDivert"
-          
-          Write-Host "Downloading WinDivert v$WinDivertVersion..."
-          Invoke-WebRequest -Uri $WinDivertUrl -OutFile $WinDivertZip -UseBasicParsing
-          
-          Write-Host "Extracting WinDivert..."
-          Expand-Archive -Path $WinDivertZip -DestinationPath "$env:TEMP\WinDivert" -Force
-          
-          # Create target directory and copy x64 files
-          New-Item -ItemType Directory -Path $WinDivertDir -Force | Out-Null
-          Copy-Item -Path "$env:TEMP\WinDivert\WinDivert-$WinDivertVersion-A\x64\*" -Destination $WinDivertDir -Force -Recurse
-          
-          Write-Host "WinDivert files:"
-          Get-ChildItem $WinDivertDir
-          
-          # Cleanup
-          Remove-Item -Path $WinDivertZip -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "$env:TEMP\WinDivert" -Recurse -Force -ErrorAction SilentlyContinue
-
-      - name: Create empty WinDivert placeholder (non-Windows)
-        if: matrix.os != 'windows-latest'
-        run: |
-          mkdir -p app/src-tauri/WinDivert
-          touch app/src-tauri/WinDivert/.gitkeep
-          echo "Placeholder for non-Windows builds"
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:

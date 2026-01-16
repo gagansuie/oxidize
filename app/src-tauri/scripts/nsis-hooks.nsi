@@ -2,19 +2,33 @@
 ; These run during NSIS installation to set up WinDivert and the daemon service
 
 !macro customInstall
-  ; Create WinDivert directory
-  DetailPrint "Installing WinDivert driver..."
+  ; Download and install WinDivert
+  DetailPrint "Downloading WinDivert driver..."
   CreateDirectory "$INSTDIR\WinDivert"
   
-  ; Copy WinDivert files from resources
-  SetOutPath "$INSTDIR\WinDivert"
-  File "${BUILD_RESOURCES_DIR}\WinDivert\WinDivert.dll"
-  File "${BUILD_RESOURCES_DIR}\WinDivert\WinDivert64.sys"
-  File "${BUILD_RESOURCES_DIR}\WinDivert\WinDivert.lib"
+  ; Download WinDivert zip
+  inetc::get /TIMEOUT=30000 "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip" "$TEMP\WinDivert.zip" /END
+  Pop $0
+  StrCmp $0 "OK" +3
+    DetailPrint "Failed to download WinDivert: $0"
+    Goto skipWinDivert
+  
+  ; Extract WinDivert
+  DetailPrint "Extracting WinDivert..."
+  nsisunz::UnzipToLog "$TEMP\WinDivert.zip" "$TEMP\WinDivert"
+  
+  ; Copy x64 files
+  CopyFiles /SILENT "$TEMP\WinDivert\WinDivert-2.2.2-A\x64\*.*" "$INSTDIR\WinDivert"
+  
+  ; Cleanup temp files
+  Delete "$TEMP\WinDivert.zip"
+  RMDir /r "$TEMP\WinDivert"
   
   ; Add WinDivert to system PATH
   DetailPrint "Adding WinDivert to PATH..."
   nsExec::ExecToLog 'setx /M PATH "$INSTDIR\WinDivert;%PATH%"'
+  
+  skipWinDivert:
   
   ; Install and start the daemon service
   DetailPrint "Installing Oxidize daemon service..."
@@ -38,7 +52,7 @@
   ; Start the service
   nsExec::ExecToLog 'sc start OxidizeDaemon'
   
-  DetailPrint "Oxidize daemon service installed with WinDivert"
+  DetailPrint "Oxidize daemon service installed"
 !macroend
 
 !macro customUnInstall

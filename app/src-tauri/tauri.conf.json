@@ -47,9 +47,7 @@
         "category": "Utility",
         "shortDescription": "AI-powered network acceleration",
         "longDescription": "Oxidize is an AI-powered network relay that learns your network patterns for optimal routing and performance.",
-        "resources": [
-            "WinDivert/*"
-        ],
+        "resources": [],
         "linux": {
             "appimage": {
                 "bundleMediaFramework": false
