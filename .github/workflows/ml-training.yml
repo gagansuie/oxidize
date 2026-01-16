@@ -82,7 +82,8 @@ jobs:
         run: |
           mkdir -p ./trained_models
           
-          SAMPLE_COUNT=$(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"rtt_us"' || echo "0")
+          SAMPLE_COUNT=$(cat training_data/*.json 2>/dev/null | tr -d '\n' | grep -o '"rtt_us"' | wc -l | tr -d ' ')
+          SAMPLE_COUNT=${SAMPLE_COUNT:-0}
           echo "Total training samples: $SAMPLE_COUNT"
           
           # Determine if we should use synthetic data
@@ -101,7 +102,6 @@ jobs:
             --lstm-epochs 100 \
             --dqn-steps 1000 \
             $SYNTHETIC_FLAG \
-            --export-onnx=false \
             --verbose
 
       - name: Prepare HF repo upload
@@ -139,7 +139,8 @@ jobs:
 
       - name: Summary
         run: |
-          SAMPLE_COUNT=$(find training_data -name '*.json' -exec cat {} \; 2>/dev/null | grep -c '"rtt_us"' || echo "0")
+          SAMPLE_COUNT=$(cat training_data/*.json 2>/dev/null | tr -d '\n' | grep -o '"rtt_us"' | wc -l | tr -d ' ')
+          SAMPLE_COUNT=${SAMPLE_COUNT:-0}
           echo "## ML Training Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Training samples aggregated**: $SAMPLE_COUNT" >> $GITHUB_STEP_SUMMARY
