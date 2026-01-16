@@ -188,7 +188,16 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: app
-        run: bun install
+        run: |
+          bun install
+          # Bun doesn't handle optional deps correctly - install platform-specific Tauri CLI binding
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            bun add -d @tauri-apps/cli-linux-x64-gnu
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            bun add -d @tauri-apps/cli-darwin-arm64 @tauri-apps/cli-darwin-x64
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            bun add -d @tauri-apps/cli-win32-x64-msvc
+          fi
 
       - name: Sync version from Cargo.toml
         shell: bash
