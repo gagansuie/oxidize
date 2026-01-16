@@ -4,6 +4,7 @@
   import ServerList from "./lib/ServerList.svelte";
   import Settings from "./lib/Settings.svelte";
   import Stats from "./lib/Stats.svelte";
+  import Analytics from "./lib/Analytics.svelte";
   import type { ConnectionStatus, AppConfig } from "./lib/types";
 
   interface Region {
@@ -22,13 +23,19 @@
     connected: false,
     server: null,
     ip: null,
+    original_ip: null,
     uptime_secs: 0,
     bytes_sent: 0,
     bytes_received: 0,
+    packets_sent: 0,
+    packets_received: 0,
+    compression_saved: 0,
+    latency_ms: null,
+    direct_latency_ms: null,
   });
 
   let connecting = $state(false);
-  let activeTab = $state<"servers" | "settings">("servers");
+  let activeTab = $state<"servers" | "stats" | "settings">("servers");
   let selectedRegionId = $state<string | null>(null);
   let selectedServerId = $state<string | null>(null);
   let selectedRegionLocation = $state<string | null>(null);
@@ -242,6 +249,20 @@
       Servers
     </button>
     <button
+      class:active={activeTab === "stats"}
+      onclick={() => (activeTab = "stats")}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
+        <path d="M18 20V10M12 20V4M6 20v-6" />
+      </svg>
+      Stats
+    </button>
+    <button
       class:active={activeTab === "settings"}
       onclick={() => (activeTab = "settings")}
     >
@@ -263,6 +284,8 @@
   <section class="content">
     {#if activeTab === "servers"}
       <ServerList onselect={handleRegionSelect} selected={selectedRegionId} />
+    {:else if activeTab === "stats"}
+      <Analytics {status} />
     {:else}
       <Settings />
     {/if}

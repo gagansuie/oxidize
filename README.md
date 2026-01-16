@@ -411,6 +411,45 @@ Or via Terminal: `xattr -cr /Applications/Oxidize.app`
 
 ---
 
+## Mobile Apps
+
+Native iOS and Android apps with the same core functionality as desktop.
+
+### Download
+
+| Platform | Store | Status |
+|----------|-------|--------|
+| **Android** | [Google Play Store](https://play.google.com/store/apps/details?id=sh.oxd.app) | Coming Soon |
+| **iOS** | [Apple App Store](https://apps.apple.com/app/oxidize/id0000000000) | Coming Soon |
+
+### Features
+- **Same OxTunnel protocol** - Identical to desktop, unified codebase
+- **VpnService (Android)** / **NEPacketTunnel (iOS)** - Native packet capture
+- **Auto-connect** - Connect on launch (configurable)
+- **Region selection** - Browse and select optimal servers
+- **Connection stats** - Real-time bandwidth and latency
+
+### Mobile-Specific Notes
+- **No daemon required** - Mobile uses native VPN APIs
+- **Battery optimized** - Efficient QUIC transport
+- **Background support** - Stays connected when app is backgrounded
+
+### Development
+
+Mobile apps are built with [Tauri](https://tauri.app/) and deploy via [Fastlane](https://fastlane.tools/):
+
+```bash
+# Android (requires Android SDK + NDK)
+cd app && npx tauri android build
+
+# iOS (requires macOS + Xcode)
+cd app && npx tauri ios init && npx tauri ios build
+```
+
+For deployment setup, see [MOBILE_DEPLOYMENT.md](docs/MOBILE_DEPLOYMENT.md).
+
+---
+
 ## Daemon Management
 
 The daemon runs **OxTunnel** - our unified protocol that captures packets via NFQUEUE and tunnels them over QUIC:

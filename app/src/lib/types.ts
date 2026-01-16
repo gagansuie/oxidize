@@ -2,9 +2,15 @@ export interface ConnectionStatus {
     connected: boolean;
     server: string | null;
     ip: string | null;
+    original_ip: string | null;
     uptime_secs: number;
     bytes_sent: number;
     bytes_received: number;
+    packets_sent: number;
+    packets_received: number;
+    compression_saved: number;
+    latency_ms: number | null;
+    direct_latency_ms: number | null;
 }
 
 export interface Server {

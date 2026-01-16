@@ -1,7 +1,12 @@
 {
     "$schema": "https://schema.tauri.app/config/2/capability",
     "identifier": "default",
-    "description": "Default capabilities for Oxidize VPN",
+    "description": "Desktop capabilities for Oxidize VPN",
+    "platforms": [
+        "linux",
+        "macOS",
+        "windows"
+    ],
     "windows": [
         "main"
     ],
@@ -13,6 +18,7 @@
         "store:default",
         "updater:default",
         "process:allow-restart",
-        "process:allow-exit"
+        "process:allow-exit",
+        "os:default"
     ]
 }

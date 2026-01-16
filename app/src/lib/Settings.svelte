@@ -1,7 +1,6 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
-    import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
-    import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
+    import { platform } from "@tauri-apps/plugin-os";
     import { relaunch } from "@tauri-apps/plugin-process";
 
     interface AppConfig {
@@ -16,10 +15,17 @@
     >("idle");
     let updateVersion = $state<string | null>(null);
     let updateProgress = $state(0);
+    let isMobile = $state(false);
+    let currentPlatform = $state("");
 
     $effect(() => {
         (async () => {
             try {
+                // Detect platform
+                currentPlatform = await platform();
+                isMobile =
+                    currentPlatform === "android" || currentPlatform === "ios";
+
                 // Load config from backend
                 const config: AppConfig = await invoke("get_config");
                 autoConnect = config.auto_connect;
@@ -27,8 +33,13 @@
                 // Get app version
                 appVersion = await invoke("get_version");
 
-                // Check autostart status
-                launchAtStartup = await isEnabled();
+                // Check autostart status (desktop only)
+                if (!isMobile) {
+                    const { isEnabled } = await import(
+                        "@tauri-apps/plugin-autostart"
+                    );
+                    launchAtStartup = await isEnabled();
+                }
             } catch (e) {
                 console.error("Failed to load settings:", e);
             }
@@ -36,7 +47,11 @@
     });
 
     async function toggleAutostart() {
+        if (isMobile) return;
         try {
+            const { enable, disable } = await import(
+                "@tauri-apps/plugin-autostart"
+            );
             if (launchAtStartup) {
                 await disable();
             } else {
@@ -57,8 +72,10 @@
     }
 
     async function checkForUpdates() {
+        if (isMobile) return;
         updateStatus = "checking";
         try {
+            const { check } = await import("@tauri-apps/plugin-updater");
             const update = await check();
             if (update) {
                 updateStatus = "available";
@@ -73,14 +90,15 @@
     }
 
     async function downloadAndInstall() {
-        if (updateStatus !== "available") return;
+        if (isMobile || updateStatus !== "available") return;
         updateStatus = "downloading";
         try {
+            const { check } = await import("@tauri-apps/plugin-updater");
             const update = await check();
             if (update) {
                 let totalLength = 0;
                 let downloadedLength = 0;
-                await update.downloadAndInstall((event: DownloadEvent) => {
+                await update.downloadAndInstall((event: any) => {
                     if (event.event === "Started") {
                         totalLength = event.data.contentLength ?? 0;
                         downloadedLength = 0;
@@ -113,20 +131,24 @@
     <div class="setting-group">
         <h3>General</h3>
 
-        <label class="setting-item">
-            <div class="setting-info">
-                <span class="setting-name">Launch at startup</span>
-                <span class="setting-desc">Start Oxidize when you log in</span>
-            </div>
-            <button
-                class="toggle"
-                class:active={launchAtStartup}
-                onclick={toggleAutostart}
-                aria-label="Toggle launch at startup"
-            >
-                <span class="toggle-slider"></span>
-            </button>
-        </label>
+        {#if !isMobile}
+            <label class="setting-item">
+                <div class="setting-info">
+                    <span class="setting-name">Launch at startup</span>
+                    <span class="setting-desc"
+                        >Start Oxidize when you log in</span
+                    >
+                </div>
+                <button
+                    class="toggle"
+                    class:active={launchAtStartup}
+                    onclick={toggleAutostart}
+                    aria-label="Toggle launch at startup"
+                >
+                    <span class="toggle-slider"></span>
+                </button>
+            </label>
+        {/if}
 
         <label class="setting-item">
             <div class="setting-info">
@@ -148,41 +170,54 @@
         </label>
     </div>
 
-    <div class="setting-group">
-        <h3>Updates</h3>
-        <div class="setting-item">
-            <div class="setting-info">
-                <span class="setting-name">App Version</span>
-                <span class="setting-desc">v{appVersion}</span>
+    {#if !isMobile}
+        <div class="setting-group">
+            <h3>Updates</h3>
+            <div class="setting-item">
+                <div class="setting-info">
+                    <span class="setting-name">App Version</span>
+                    <span class="setting-desc">v{appVersion}</span>
+                </div>
+                {#if updateStatus === "idle"}
+                    <button class="update-btn" onclick={checkForUpdates}>
+                        Check for Updates
+                    </button>
+                {:else if updateStatus === "checking"}
+                    <span class="update-status">Checking...</span>
+                {:else if updateStatus === "available"}
+                    <button
+                        class="update-btn highlight"
+                        onclick={downloadAndInstall}
+                    >
+                        Update to v{updateVersion}
+                    </button>
+                {:else if updateStatus === "downloading"}
+                    <span class="update-status"
+                        >Downloading... {updateProgress}%</span
+                    >
+                {:else if updateStatus === "ready"}
+                    <button class="update-btn highlight" onclick={restartApp}>
+                        Restart to Apply
+                    </button>
+                {:else if updateStatus === "error"}
+                    <button class="update-btn" onclick={checkForUpdates}>
+                        Retry
+                    </button>
+                {/if}
             </div>
-            {#if updateStatus === "idle"}
-                <button class="update-btn" onclick={checkForUpdates}>
-                    Check for Updates
-                </button>
-            {:else if updateStatus === "checking"}
-                <span class="update-status">Checking...</span>
-            {:else if updateStatus === "available"}
-                <button
-                    class="update-btn highlight"
-                    onclick={downloadAndInstall}
-                >
-                    Update to v{updateVersion}
-                </button>
-            {:else if updateStatus === "downloading"}
-                <span class="update-status"
-                    >Downloading... {updateProgress}%</span
-                >
-            {:else if updateStatus === "ready"}
-                <button class="update-btn highlight" onclick={restartApp}>
-                    Restart to Apply
-                </button>
-            {:else if updateStatus === "error"}
-                <button class="update-btn" onclick={checkForUpdates}>
-                    Retry
-                </button>
-            {/if}
         </div>
-    </div>
+    {:else}
+        <div class="setting-group">
+            <h3>App Info</h3>
+            <div class="setting-item">
+                <div class="setting-info">
+                    <span class="setting-name">Version</span>
+                    <span class="setting-desc">v{appVersion}</span>
+                </div>
+                <span class="platform-badge">{currentPlatform}</span>
+            </div>
+        </div>
+    {/if}
 
     <div class="about">
         <p class="links">
@@ -328,5 +363,15 @@
     .update-status {
         font-size: 0.8rem;
         color: #888;
+    }
+
+    .platform-badge {
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        background: rgba(0, 212, 170, 0.15);
+        color: #00d4aa;
+        font-size: 0.75rem;
+        font-weight: 500;
+        text-transform: capitalize;
     }
 </style>

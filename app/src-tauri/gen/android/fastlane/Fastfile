@@ -1,0 +1,40 @@
+default_platform(:android)
+
+platform :android do
+  desc "Deploy to Google Play Store (internal testing)"
+  lane :internal do
+    upload_to_play_store(
+      track: "internal",
+      aab: "../app/build/outputs/bundle/universalRelease/app-universal-release.aab",
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true
+    )
+  end
+
+  desc "Deploy to Google Play Store (beta/closed testing)"
+  lane :beta do
+    upload_to_play_store(
+      track: "beta",
+      aab: "../app/build/outputs/bundle/universalRelease/app-universal-release.aab",
+      skip_upload_apk: true
+    )
+  end
+
+  desc "Deploy to Google Play Store (production)"
+  lane :production do
+    upload_to_play_store(
+      track: "production",
+      aab: "../app/build/outputs/bundle/universalRelease/app-universal-release.aab",
+      skip_upload_apk: true
+    )
+  end
+
+  desc "Validate AAB without uploading"
+  lane :validate do
+    validate_play_store_json_key(
+      json_key: ENV["GOOGLE_PLAY_JSON_KEY_PATH"]
+    )
+  end
+end

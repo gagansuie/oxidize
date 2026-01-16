@@ -1,0 +1,188 @@
+name: Deploy to App Stores
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - android
+          - ios
+          - both
+      track:
+        description: 'Release track'
+        required: true
+        default: 'internal'
+        type: choice
+        options:
+          - internal
+          - beta
+          - production
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy-android:
+    name: Deploy to Google Play Store
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event.inputs.platform == 'android' || github.event.inputs.platform == 'both'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Android NDK
+        run: |
+          sdkmanager --install "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+
+      - name: Setup Ruby (for Fastlane)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: bun install
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-android-deploy-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Sync version from Cargo.toml
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" app/src-tauri/tauri.conf.json
+
+      - name: Build Android AAB
+        working-directory: app
+        run: bunx tauri android build --target aarch64
+
+      - name: Setup Google Play credentials
+        run: |
+          echo "${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}" > /tmp/play-store-credentials.json
+          echo "GOOGLE_PLAY_JSON_KEY_PATH=/tmp/play-store-credentials.json" >> $GITHUB_ENV
+
+      - name: Deploy to Play Store
+        working-directory: app/src-tauri/gen/android
+        run: |
+          TRACK=${{ github.event.inputs.track || 'internal' }}
+          fastlane $TRACK
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f /tmp/play-store-credentials.json
+
+  deploy-ios:
+    name: Deploy to App Store
+    runs-on: macos-latest
+    if: github.event_name == 'release' || github.event.inputs.platform == 'ios' || github.event.inputs.platform == 'both'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby (for Fastlane)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: bun install
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ios-deploy-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Sync version from Cargo.toml
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" app/src-tauri/tauri.conf.json
+
+      - name: Initialize iOS project
+        working-directory: app
+        run: bunx tauri ios init
+
+      - name: Setup App Store Connect API Key
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        run: |
+          echo "APP_STORE_CONNECT_KEY_ID=$APP_STORE_CONNECT_KEY_ID" >> $GITHUB_ENV
+          echo "APP_STORE_CONNECT_ISSUER_ID=$APP_STORE_CONNECT_ISSUER_ID" >> $GITHUB_ENV
+          echo "APP_STORE_CONNECT_KEY_CONTENT=$APP_STORE_CONNECT_KEY_CONTENT" >> $GITHUB_ENV
+
+      - name: Setup code signing (Match)
+        env:
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+        run: |
+          echo "MATCH_PASSWORD=$MATCH_PASSWORD" >> $GITHUB_ENV
+          echo "MATCH_GIT_URL=$MATCH_GIT_URL" >> $GITHUB_ENV
+          echo "MATCH_GIT_BASIC_AUTHORIZATION=$MATCH_GIT_BASIC_AUTHORIZATION" >> $GITHUB_ENV
+
+      - name: Build and sign iOS app
+        working-directory: app
+        run: fastlane ios build
+
+      - name: Deploy to TestFlight
+        working-directory: app
+        if: github.event.inputs.track != 'production'
+        run: fastlane ios testflight_upload
+
+      - name: Deploy to App Store
+        working-directory: app
+        if: github.event.inputs.track == 'production'
+        run: fastlane ios release

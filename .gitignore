@@ -34,3 +34,34 @@ production.toml
 /app/src-tauri/target/
 /app/.svelte-kit/
 /app/bun.lock
+
+# Android build outputs
+/app/src-tauri/gen/android/.gradle/
+/app/src-tauri/gen/android/app/build/
+/app/src-tauri/gen/android/build/
+/app/src-tauri/gen/android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# iOS build outputs
+/app/src-tauri/gen/apple/build/
+/app/src-tauri/gen/apple/Pods/
+/app/src-tauri/gen/apple/*.xcworkspace/xcuserdata/
+/app/src-tauri/gen/apple/*.xcodeproj/xcuserdata/
+/app/src-tauri/gen/apple/*.xcodeproj/project.xcworkspace/xcuserdata/
+*.ipa
+*.dSYM.zip
+*.app.dSYM
+
+# Fastlane
+/app/fastlane/report.xml
+/app/fastlane/Preview.html
+/app/fastlane/screenshots/
+/app/fastlane/test_output/
+/app/fastlane/README.md
+/app/src-tauri/gen/android/fastlane/report.xml
+/app/src-tauri/gen/android/fastlane/README.md
+*.mobileprovision
+*.p12

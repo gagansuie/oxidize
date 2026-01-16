@@ -1,4 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(mobile)]
+use tauri::Manager;
+#[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -17,6 +20,7 @@ pub fn set_connected(value: bool) {
     CONNECTED.store(value, Ordering::SeqCst);
 }
 
+#[cfg(desktop)]
 fn create_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let status = if is_connected() {
         "● Connected"
@@ -43,6 +47,7 @@ fn create_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu
     Menu::with_items(app, &[&status_item, &toggle, &separator, &show, &quit])
 }
 
+#[cfg(desktop)]
 pub fn setup_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
     let menu = create_tray_menu(app)?;
 
@@ -103,19 +108,30 @@ pub fn setup_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
 pub fn run() {
     tracing_subscriber::fmt::init();
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--minimized"]),
-        ))
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(commands::AppState::default())
-        .setup(|app| {
-            setup_tray(app.handle())?;
+        .plugin(tauri_plugin_os::init())
+        .manage(commands::AppState::default());
+
+    // Desktop-only plugins
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                Some(vec!["--minimized"]),
+            ))
+            .plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
+        .setup(|_app| {
+            #[cfg(desktop)]
+            setup_tray(_app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -1,0 +1,5 @@
+# Match configuration for code signing
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+type("appstore")
+app_identifier("sh.oxd.app")

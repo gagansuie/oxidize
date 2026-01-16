@@ -9,9 +9,15 @@ pub struct ConnectionStatus {
     pub connected: bool,
     pub server: Option<String>,
     pub ip: Option<String>,
+    pub original_ip: Option<String>,
     pub uptime_secs: u64,
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub compression_saved: u64,
+    pub latency_ms: Option<u32>,
+    pub direct_latency_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +56,8 @@ pub struct AppConfig {
 #[derive(Default)]
 pub struct AppState {
     pub config: Mutex<AppConfig>,
+    pub original_ip: Mutex<Option<String>>,
+    pub direct_latency_ms: Mutex<Option<u32>>,
 }
 
 // Relay server endpoint (used for ping test)
@@ -57,7 +65,10 @@ const RELAY_HOST: &str = "relay.oxd.sh";
 const RELAY_PORT: u16 = 4433;
 
 #[tauri::command]
-pub async fn connect(server_id: String) -> Result<ConnectionStatus, String> {
+pub async fn connect(
+    server_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ConnectionStatus, String> {
     tracing::info!("Connecting to relay via server: {}", server_id);
 
     // Daemon is required for full traffic tunneling and IP protection
@@ -80,6 +91,20 @@ pub async fn connect(server_id: String) -> Result<ConnectionStatus, String> {
         }
     }
 
+    // Capture original IP BEFORE connecting (for IP protection proof)
+    let original_ip = get_external_ip().await.ok();
+    {
+        let mut orig_ip = state.original_ip.lock().await;
+        *orig_ip = original_ip.clone();
+    }
+
+    // Measure direct latency BEFORE connecting (for latency comparison)
+    let direct_latency = ping_relay().await.ok();
+    {
+        let mut direct_lat = state.direct_latency_ms.lock().await;
+        *direct_lat = direct_latency;
+    }
+
     tracing::info!("Connecting via daemon with NFQUEUE packet capture");
     daemon_connect(server_id.clone()).await?;
 
@@ -88,13 +113,22 @@ pub async fn connect(server_id: String) -> Result<ConnectionStatus, String> {
     // Fetch the user's new external IP (should be the relay server's IP)
     let external_ip = get_external_ip().await.ok();
 
+    // Measure latency through relay
+    let relay_latency = ping_relay().await.ok();
+
     Ok(ConnectionStatus {
         connected: true,
         server: Some(server_id),
         ip: external_ip,
+        original_ip,
         uptime_secs: 0,
         bytes_sent: 0,
         bytes_received: 0,
+        packets_sent: 0,
+        packets_received: 0,
+        compression_saved: 0,
+        latency_ms: relay_latency,
+        direct_latency_ms: direct_latency,
     })
 }
 
@@ -108,9 +142,15 @@ pub async fn disconnect() -> Result<ConnectionStatus, String> {
             connected: false,
             server: None,
             ip: None,
+            original_ip: None,
             uptime_secs: 0,
             bytes_sent: 0,
             bytes_received: 0,
+            packets_sent: 0,
+            packets_received: 0,
+            compression_saved: 0,
+            latency_ms: None,
+            direct_latency_ms: None,
         });
     }
 
@@ -118,35 +158,51 @@ pub async fn disconnect() -> Result<ConnectionStatus, String> {
     let bytes_sent = response["data"]["bytes_sent"].as_u64().unwrap_or(0);
     let bytes_received = response["data"]["bytes_received"].as_u64().unwrap_or(0);
     let uptime_secs = response["data"]["uptime_secs"].as_u64().unwrap_or(0);
+    let packets_sent = response["data"]["packets_sent"].as_u64().unwrap_or(0);
+    let packets_received = response["data"]["packets_received"].as_u64().unwrap_or(0);
+    let compression_saved = response["data"]["compression_saved"].as_u64().unwrap_or(0);
 
     crate::set_connected(false);
     tracing::info!(
-        "Disconnected. Sent: {} bytes, Received: {} bytes",
+        "Disconnected. Sent: {} bytes, Received: {} bytes, Compression saved: {} bytes",
         bytes_sent,
-        bytes_received
+        bytes_received,
+        compression_saved
     );
 
     Ok(ConnectionStatus {
         connected: false,
         server: None,
         ip: None,
+        original_ip: None,
         uptime_secs,
         bytes_sent,
         bytes_received,
+        packets_sent,
+        packets_received,
+        compression_saved,
+        latency_ms: None,
+        direct_latency_ms: None,
     })
 }
 
 #[tauri::command]
-pub async fn get_status() -> Result<ConnectionStatus, String> {
+pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionStatus, String> {
     // Check daemon status
     if !is_daemon_running().await {
         return Ok(ConnectionStatus {
             connected: false,
             server: None,
             ip: None,
+            original_ip: None,
             uptime_secs: 0,
             bytes_sent: 0,
             bytes_received: 0,
+            packets_sent: 0,
+            packets_received: 0,
+            compression_saved: 0,
+            latency_ms: None,
+            direct_latency_ms: None,
         });
     }
 
@@ -156,9 +212,16 @@ pub async fn get_status() -> Result<ConnectionStatus, String> {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Get stored original IP and direct latency from state
+    let original_ip = state.original_ip.lock().await.clone();
+    let direct_latency_ms = *state.direct_latency_ms.lock().await;
+
     if connected {
         // Fetch user's external IP (should be relay server's IP when connected)
         let external_ip = get_external_ip().await.ok();
+
+        // Measure current relay latency
+        let relay_latency = ping_relay().await.ok();
 
         return Ok(ConnectionStatus {
             connected: true,
@@ -167,6 +230,7 @@ pub async fn get_status() -> Result<ConnectionStatus, String> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             ip: external_ip,
+            original_ip,
             uptime_secs: data
                 .get("uptime_secs")
                 .and_then(|v| v.as_u64())
@@ -176,6 +240,20 @@ pub async fn get_status() -> Result<ConnectionStatus, String> {
                 .get("bytes_received")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
+            packets_sent: data
+                .get("packets_sent")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            packets_received: data
+                .get("packets_received")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            compression_saved: data
+                .get("compression_saved")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            latency_ms: relay_latency,
+            direct_latency_ms,
         });
     }
 
@@ -183,9 +261,15 @@ pub async fn get_status() -> Result<ConnectionStatus, String> {
         connected: false,
         server: None,
         ip: None,
+        original_ip: None,
         uptime_secs: 0,
         bytes_sent: 0,
         bytes_received: 0,
+        packets_sent: 0,
+        packets_received: 0,
+        compression_saved: 0,
+        latency_ms: None,
+        direct_latency_ms: None,
     })
 }
 
@@ -405,12 +489,12 @@ pub async fn set_config(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android"), not(target_os = "ios")))]
 const DAEMON_SOCKET: &str = "/var/run/oxidize/daemon.sock";
 #[cfg(windows)]
 const DAEMON_PIPE: &str = r"\\.\pipe\oxidize-daemon";
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android"), not(target_os = "ios")))]
 async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -442,6 +526,11 @@ async fn send_daemon_command(cmd: &str) -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())?;
 
     serde_json::from_str(&response).map_err(|e| format!("Invalid response: {}", e))
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn send_daemon_command(_cmd: &str) -> Result<serde_json::Value, String> {
+    Err("Daemon not available on mobile platforms".to_string())
 }
 
 #[cfg(windows)]
@@ -491,7 +580,11 @@ async fn get_external_ip() -> Result<String, String> {
 }
 
 async fn is_daemon_running() -> bool {
-    #[cfg(unix)]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        false
+    }
+    #[cfg(all(unix, not(target_os = "android"), not(target_os = "ios")))]
     {
         std::path::Path::new(DAEMON_SOCKET).exists()
             && send_daemon_command(r#"{"type":"Ping"}"#).await.is_ok()
@@ -538,8 +631,9 @@ pub async fn daemon_get_status() -> Result<serde_json::Value, String> {
     Ok(data)
 }
 
-/// Install daemon with elevated privileges
+/// Install daemon with elevated privileges (desktop only)
 #[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn install_daemon() -> Result<String, String> {
     tracing::info!("Installing daemon...");
 
@@ -617,8 +711,19 @@ EOF
     }
 }
 
-/// Uninstall daemon
+/// Install daemon - mobile stub
 #[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn install_daemon() -> Result<String, String> {
+    Err(
+        "Daemon installation not available on mobile. VPN functionality uses system APIs."
+            .to_string(),
+    )
+}
+
+/// Uninstall daemon (desktop only)
+#[tauri::command]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn uninstall_daemon() -> Result<String, String> {
     tracing::info!("Uninstalling daemon...");
 
@@ -665,4 +770,11 @@ pub async fn uninstall_daemon() -> Result<String, String> {
         tracing::error!("Uninstall failed: {}", stderr);
         Err(format!("Uninstallation failed: {}", stderr))
     }
+}
+
+/// Uninstall daemon - mobile stub
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn uninstall_daemon() -> Result<String, String> {
+    Err("Daemon uninstallation not available on mobile.".to_string())
 }

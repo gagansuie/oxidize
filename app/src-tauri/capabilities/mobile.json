@@ -1,0 +1,21 @@
+{
+    "$schema": "https://schema.tauri.app/config/2/capability",
+    "identifier": "mobile",
+    "description": "Mobile capabilities for Oxidize VPN",
+    "platforms": [
+        "android",
+        "iOS"
+    ],
+    "windows": [
+        "main"
+    ],
+    "permissions": [
+        "core:default",
+        "shell:allow-open",
+        "notification:default",
+        "store:default",
+        "process:allow-restart",
+        "process:allow-exit",
+        "os:default"
+    ]
+}

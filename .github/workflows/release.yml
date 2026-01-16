@@ -234,7 +234,17 @@ jobs:
           echo "version=v$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Desktop app version: v$VERSION"
 
-      - name: Build Tauri app
+      - name: Build Tauri app (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          args: --target ${{ matrix.target }} --bundles deb,rpm,appimage
+
+      - name: Build Tauri app (macOS/Windows)
+        if: matrix.os != 'ubuntu-22.04'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
