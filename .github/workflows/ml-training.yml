@@ -54,12 +54,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install Hugging Face CLI
-        run: pip install "huggingface_hub[cli]"
+        run: pip install "huggingface_hub[cli]" --quiet
 
       - name: Login to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: huggingface-cli login --token $HF_TOKEN
+        run: python -m huggingface_hub.commands.huggingface_cli login --token $HF_TOKEN
 
       - name: Download training data from HF Hub
         run: |
@@ -68,7 +68,7 @@ jobs:
           
           # Download all training data uploaded by servers
           echo "Downloading training data from HF Hub..."
-          huggingface-cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
+          python -m huggingface_hub.commands.huggingface_cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
           
           if [ -d "./hf_download/training_data" ]; then
             FILE_COUNT=$(find ./hf_download/training_data -name '*.json' 2>/dev/null | wc -l)
@@ -158,8 +158,9 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          mkdir -p hf_repo
           cd hf_repo
-          huggingface-cli upload $HF_REPO . --repo-type model
+          python -m huggingface_hub.commands.huggingface_cli upload $HF_REPO . --repo-type model
 
       - name: Summary
         run: |
