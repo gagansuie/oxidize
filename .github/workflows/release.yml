@@ -233,6 +233,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
         with:
           projectPath: app
           args: --target ${{ matrix.target }} ${{ matrix.os == 'ubuntu-22.04' && '--bundles deb,rpm,appimage' || '' }}
