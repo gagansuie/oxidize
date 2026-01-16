@@ -399,6 +399,16 @@ The Oxidize desktop app provides a modern GUI for managing connections.
 | Auto-connect | Automatically connect to closest region on launch |
 | Install Daemon | Required for connection - installs system service |
 
+### macOS Security Prompt
+
+macOS may show a security warning when opening unsigned apps:
+
+> "Oxidize.app cannot be opened because the developer cannot be verified"
+
+**Workaround:** Right-click the app → Select "Open" → Click "Open" in the dialog.
+
+Or via Terminal: `xattr -cr /Applications/Oxidize.app`
+
 ---
 
 ## Daemon Management
@@ -453,12 +463,12 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 ## Documentation
 
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
-- [TCP_TUNNELING.md](docs/TCP_TUNNELING.md) - TCP over QUIC tunneling architecture
-- [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning driven engine deep dive (LSTM, DQN, UCB1)
-- [INSTALL.md](docs/INSTALL.md) - Desktop & mobile installation guide
-- [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
+- [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (LSTM, DQN, UCB1)
 - [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io + Vultr)
-- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - 100x kernel bypass optimizations
+- [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
+- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - 100+ Gbps kernel bypass optimizations
+- [OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md) - Performance tuning guide
+- [ZERO-DOWNTIME.md](docs/ZERO-DOWNTIME.md) - Zero-downtime deployment
 
 ## Testing
 

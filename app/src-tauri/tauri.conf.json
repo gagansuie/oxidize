@@ -58,7 +58,10 @@
                 }
             },
             "deb": {
-                "depends": ["libcap2-bin", "iptables"],
+                "depends": [
+                    "libcap2-bin",
+                    "iptables"
+                ],
                 "files": {
                     "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
                 },
@@ -66,7 +69,10 @@
                 "preRemoveScript": "scripts/preremove.sh"
             },
             "rpm": {
-                "depends": ["libcap", "iptables"],
+                "depends": [
+                    "libcap",
+                    "iptables"
+                ],
                 "files": {
                     "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
                 },
@@ -97,6 +103,12 @@
     "plugins": {
         "shell": {
             "open": true
+        },
+        "updater": {
+            "endpoints": [
+                "https://github.com/gagansuie/oxidize/releases/latest/download/latest.json"
+            ],
+            "pubkey": ""
         }
     }
 }

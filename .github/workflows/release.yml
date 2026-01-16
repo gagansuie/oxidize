@@ -169,7 +169,7 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
 
       - name: Install macOS dependencies
         if: startsWith(matrix.os, 'macos')
@@ -327,6 +327,41 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Generate latest.json for Tauri updater
+        if: steps.check_tag.outputs.should_release == 'true'
+        run: |
+          VERSION=${{ steps.get_version.outputs.version }}
+          VERSION_NUM=${VERSION#v}
+          REPO="gagansuie/oxidize"
+          
+          cat > artifacts/latest.json << EOF
+          {
+            "version": "$VERSION_NUM",
+            "notes": "See release notes at https://github.com/$REPO/releases/tag/$VERSION",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "linux-x86_64": {
+                "url": "https://github.com/$REPO/releases/download/$VERSION/oxidize-desktop-$VERSION-linux-x86_64.AppImage",
+                "signature": ""
+              },
+              "darwin-x86_64": {
+                "url": "https://github.com/$REPO/releases/download/$VERSION/oxidize-desktop-$VERSION-macos-x86_64.dmg",
+                "signature": ""
+              },
+              "darwin-aarch64": {
+                "url": "https://github.com/$REPO/releases/download/$VERSION/oxidize-desktop-$VERSION-macos-aarch64.dmg",
+                "signature": ""
+              },
+              "windows-x86_64": {
+                "url": "https://github.com/$REPO/releases/download/$VERSION/oxidize-desktop-$VERSION-windows-x86_64-setup.exe",
+                "signature": ""
+              }
+            }
+          }
+          EOF
+          echo "📝 Generated latest.json for Tauri updater"
+          cat artifacts/latest.json
 
       - name: Create Release
         if: steps.check_tag.outputs.should_release == 'true'

@@ -1,6 +1,8 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+    import { check } from "@tauri-apps/plugin-updater";
+    import { relaunch } from "@tauri-apps/plugin-process";
 
     interface AppConfig {
         auto_connect: boolean;
@@ -9,6 +11,11 @@
     let autoConnect = $state(false);
     let launchAtStartup = $state(false);
     let appVersion = $state("0.0.0");
+    let updateStatus = $state<
+        "idle" | "checking" | "available" | "downloading" | "ready" | "error"
+    >("idle");
+    let updateVersion = $state<string | null>(null);
+    let updateProgress = $state(0);
 
     $effect(() => {
         (async () => {
@@ -47,6 +54,61 @@
                 auto_connect: autoConnect,
             },
         });
+    }
+
+    async function checkForUpdates() {
+        updateStatus = "checking";
+        try {
+            const update = await check();
+            if (update) {
+                updateStatus = "available";
+                updateVersion = update.version;
+            } else {
+                updateStatus = "idle";
+            }
+        } catch (e) {
+            console.error("Update check failed:", e);
+            updateStatus = "error";
+        }
+    }
+
+    async function downloadAndInstall() {
+        if (updateStatus !== "available") return;
+        updateStatus = "downloading";
+        try {
+            const update = await check();
+            if (update) {
+                await update.downloadAndInstall(
+                    (event: {
+                        event: string;
+                        data: { contentLength?: number; chunkLength?: number };
+                    }) => {
+                        if (
+                            event.event === "Started" &&
+                            event.data.contentLength
+                        ) {
+                            updateProgress = 0;
+                        } else if (event.event === "Progress") {
+                            updateProgress = Math.round(
+                                ((event.data.chunkLength || 0) /
+                                    (event.data.contentLength || 1)) *
+                                    100,
+                            );
+                        } else if (event.event === "Finished") {
+                            updateStatus = "ready";
+                        }
+                    },
+                );
+                updateStatus = "ready";
+            }
+        } catch (e) {
+            console.error("Update download failed:", e);
+            updateStatus = "error";
+        }
+    }
+
+    async function restartApp() {
+        await relaunch();
     }
 </script>
 
@@ -89,8 +151,43 @@
         </label>
     </div>
 
+    <div class="setting-group">
+        <h3>Updates</h3>
+        <div class="setting-item">
+            <div class="setting-info">
+                <span class="setting-name">App Version</span>
+                <span class="setting-desc">v{appVersion}</span>
+            </div>
+            {#if updateStatus === "idle"}
+                <button class="update-btn" onclick={checkForUpdates}>
+                    Check for Updates
+                </button>
+            {:else if updateStatus === "checking"}
+                <span class="update-status">Checking...</span>
+            {:else if updateStatus === "available"}
+                <button
+                    class="update-btn highlight"
+                    onclick={downloadAndInstall}
+                >
+                    Update to v{updateVersion}
+                </button>
+            {:else if updateStatus === "downloading"}
+                <span class="update-status"
+                    >Downloading... {updateProgress}%</span
+                >
+            {:else if updateStatus === "ready"}
+                <button class="update-btn highlight" onclick={restartApp}>
+                    Restart to Apply
+                </button>
+            {:else if updateStatus === "error"}
+                <button class="update-btn" onclick={checkForUpdates}>
+                    Retry
+                </button>
+            {/if}
+        </div>
+    </div>
+
     <div class="about">
-        <p>Oxidize v{appVersion}</p>
         <p class="links">
             <a href="https://github.com/gagansuie/oxidize" target="_blank"
                 >GitHub</a
@@ -205,5 +302,34 @@
 
     .links a:hover {
         text-decoration: underline;
+    }
+
+    .update-btn {
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        border: none;
+        background: rgba(255, 255, 255, 0.1);
+        color: #e0e0e0;
+        font-size: 0.8rem;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .update-btn:hover {
+        background: rgba(255, 255, 255, 0.15);
+    }
+
+    .update-btn.highlight {
+        background: #00d4aa;
+        color: #0f0f1a;
+    }
+
+    .update-btn.highlight:hover {
+        background: #00b894;
+    }
+
+    .update-status {
+        font-size: 0.8rem;
+        color: #888;
     }
 </style>

@@ -15,7 +15,9 @@
         "@tauri-apps/plugin-autostart": "^2.0.0",
         "@tauri-apps/plugin-notification": "^2.0.0",
         "@tauri-apps/plugin-shell": "^2.0.0",
-        "@tauri-apps/plugin-store": "^2.0.0"
+        "@tauri-apps/plugin-store": "^2.0.0",
+        "@tauri-apps/plugin-updater": "^2.0.0",
+        "@tauri-apps/plugin-process": "^2.0.0"
     },
     "devDependencies": {
         "@sveltejs/vite-plugin-svelte": "^4.0.0",
