@@ -44,20 +44,20 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Setup Android NDK
         run: |
-          sdkmanager --install "ndk;27.0.12077973"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> $GITHUB_ENV
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
 
       - name: Setup Ruby (for Fastlane)
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2'
+          ruby-version: '3.3'
           bundler-cache: true
 
       - name: Install Fastlane
@@ -126,7 +126,7 @@ jobs:
       - name: Setup Ruby (for Fastlane)
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2'
+          ruby-version: '3.3'
           bundler-cache: true
 
       - name: Install Fastlane

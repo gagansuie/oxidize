@@ -53,7 +53,7 @@ jobs:
       - name: Setup Python (for HF CLI)
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install Hugging Face CLI
         run: pip install huggingface_hub --quiet
