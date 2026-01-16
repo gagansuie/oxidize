@@ -108,6 +108,12 @@ uninstall_linux() {
     echo -e "${YELLOW}Removing system user...${NC}"
     userdel oxidize 2>/dev/null || true
 
+    echo -e "${YELLOW}Removing desktop entries...${NC}"
+    rm -f /usr/share/applications/Oxidize.desktop
+    rm -f /usr/share/applications/oxidize.desktop
+    rm -f "$REAL_HOME/.local/share/applications/Oxidize.desktop"
+    rm -f "$REAL_HOME/.local/share/applications/oxidize.desktop"
+
     systemctl daemon-reload 2>/dev/null || true
 }
 
@@ -262,6 +268,7 @@ print_success() {
     echo "  • Binaries from /usr/local/bin"
     echo "  • Systemd/launchd services"
     echo "  • Configuration from /etc/oxidize"
+    echo "  • Desktop entries (app menu)"
     echo "  • User app data"
     echo "  • iptables NFQUEUE rules"
     echo "  • System user 'oxidize'"

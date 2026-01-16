@@ -321,46 +321,23 @@ print_success() {
     echo "  sudo oxidize-client -s $SERVER_ADDR --speedtest  # Run speed test"
     echo ""
     echo -e "${BLUE}Uninstall:${NC}"
-    echo "  sudo $0 uninstall"
+    echo "  curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash"
     echo ""
     echo -e "${GREEN}Your traffic is now optimized! 🚀${NC}"
     echo ""
 }
 
-uninstall() {
-    echo -e "${YELLOW}Uninstalling Oxidize...${NC}"
-    
-    # Stop service
-    systemctl stop oxidize 2>/dev/null || true
-    systemctl disable oxidize 2>/dev/null || true
-    
-    # Remove files
-    rm -f "$INSTALL_DIR/$BINARY_NAME"
-    rm -f "$SERVICE_DIR/oxidize.service"
-    rm -rf "$SERVICE_DIR/oxidize.service.d"
-    rm -rf "$CONFIG_DIR"
-    
-    # NFQUEUE rules are auto-cleaned by daemon on unbind
-    # No manual firewall cleanup needed
-    
-    # macOS
-    launchctl unload /Library/LaunchDaemons/com.oxidize.client.plist 2>/dev/null || true
-    rm -f /Library/LaunchDaemons/com.oxidize.client.plist
-    rm -f /var/log/oxidize.log
-    rm -f /var/log/oxidize.error.log
-    
-    systemctl daemon-reload 2>/dev/null || true
-    
-    echo -e "${GREEN}Uninstallation complete${NC}"
-}
 
 # Main
 main() {
     print_banner
     
     if [ "$1" == "uninstall" ]; then
-        check_root
-        uninstall
+        echo -e "${YELLOW}Use the dedicated uninstall script:${NC}"
+        echo "  curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash"
+        echo ""
+        echo "Or if you have the repo locally:"
+        echo "  sudo ./scripts/uninstall.sh"
         exit 0
     fi
     

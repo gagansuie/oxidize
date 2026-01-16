@@ -77,16 +77,18 @@ jobs:
             echo "⚠️ sccache unavailable, building without cache"
           fi
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Fresh dependency resolution
+        run: rm -f Cargo.lock && cargo generate-lockfile
 
       - name: Build daemon (required by Tauri)
         run: cargo build --release --package oxidize-daemon

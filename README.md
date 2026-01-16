@@ -593,6 +593,7 @@ sudo ./scripts/uninstall.sh --repo /path/to/oxidize   # Also clean local builds
 | **Binaries** | `/usr/local/bin/oxidize-*` | Same | `%ProgramFiles%\Oxidize\` |
 | **Services** | systemd units | launchd plist | Windows service |
 | **Config** | `/etc/oxidize/` | Same | `%APPDATA%\Oxidize\` |
+| **Desktop entries** | `.desktop` files | N/A | Start menu shortcuts |
 | **App data** | `~/.local/share/com.oxidize.app` | `~/Library/Application Support/` | `%LOCALAPPDATA%\com.oxidize.app` |
 | **Firewall** | iptables NFQUEUE | PF rules | Firewall rule + WinDivert |
 | **Local builds** | `target/`, `node_modules/`, `gen/` | Same | Same |

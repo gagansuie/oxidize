@@ -66,16 +66,26 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-cargo-registry-
+
+      - name: Fresh dependency resolution
+        run: rm -f Cargo.lock && cargo generate-lockfile
+
+      - name: Clean stale artifacts (ensure fresh version)
+        shell: bash
+        run: |
+          # Remove any cached binaries to ensure version is recompiled
+          rm -rf target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
+          rm -rf target/${{ matrix.target }}/release/.fingerprint/oxidize-* 2>/dev/null || true
+          rm -rf target/${{ matrix.target }}/release/.fingerprint/relay-* 2>/dev/null || true
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }} --package relay-client
@@ -188,16 +198,18 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install create-dmg
 
-      - name: Cache cargo
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-
+            ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-registry-
+
+      - name: Fresh dependency resolution
+        run: rm -f Cargo.lock && cargo generate-lockfile
 
       - name: Install frontend dependencies
         working-directory: app
@@ -220,6 +232,14 @@ jobs:
           echo "Syncing version $VERSION to tauri.conf.json"
           sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" app/src-tauri/tauri.conf.json
           rm -f app/src-tauri/tauri.conf.json.bak
+
+      - name: Clean stale artifacts (ensure fresh version)
+        shell: bash
+        run: |
+          # Remove any cached binaries to ensure version is recompiled
+          rm -rf target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
+          rm -rf target/${{ matrix.target }}/release/.fingerprint/oxidize-* 2>/dev/null || true
+          rm -rf target/${{ matrix.target }}/release/bundle 2>/dev/null || true
 
       - name: Build oxidize-daemon
         shell: bash
