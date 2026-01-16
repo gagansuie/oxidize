@@ -77,6 +77,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-cargo-registry-
 
       - name: Fresh dependency resolution
+        shell: bash
         run: rm -f Cargo.lock && cargo generate-lockfile
 
       - name: Clean stale artifacts (ensure fresh version)
@@ -209,6 +210,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-registry-
 
       - name: Fresh dependency resolution
+        shell: bash
         run: rm -f Cargo.lock && cargo generate-lockfile
 
       - name: Install frontend dependencies
