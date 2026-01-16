@@ -1,7 +1,7 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
-    import { check } from "@tauri-apps/plugin-updater";
+    import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
     import { relaunch } from "@tauri-apps/plugin-process";
 
     interface AppConfig {
@@ -78,27 +78,24 @@
         try {
             const update = await check();
             if (update) {
-                await update.downloadAndInstall(
-                    (event: {
-                        event: string;
-                        data: { contentLength?: number; chunkLength?: number };
-                    }) => {
-                        if (
-                            event.event === "Started" &&
-                            event.data.contentLength
-                        ) {
-                            updateProgress = 0;
-                        } else if (event.event === "Progress") {
+                let totalLength = 0;
+                let downloadedLength = 0;
+                await update.downloadAndInstall((event: DownloadEvent) => {
+                    if (event.event === "Started") {
+                        totalLength = event.data.contentLength ?? 0;
+                        downloadedLength = 0;
+                        updateProgress = 0;
+                    } else if (event.event === "Progress") {
+                        downloadedLength += event.data.chunkLength;
+                        if (totalLength > 0) {
                             updateProgress = Math.round(
-                                ((event.data.chunkLength || 0) /
-                                    (event.data.contentLength || 1)) *
-                                    100,
+                                (downloadedLength / totalLength) * 100,
                             );
-                        } else if (event.event === "Finished") {
-                            updateStatus = "ready";
                         }
-                    },
-                );
+                    } else if (event.event === "Finished") {
+                        updateStatus = "ready";
+                    }
+                });
                 updateStatus = "ready";
             }
         } catch (e) {
