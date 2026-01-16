@@ -48,36 +48,23 @@
         "shortDescription": "AI-powered network acceleration",
         "longDescription": "Oxidize is an AI-powered network relay that learns your network patterns for optimal routing and performance.",
         "resources": [
-            "../../target/release/oxidize-daemon*"
+            "WinDivert/*"
         ],
         "linux": {
             "appimage": {
-                "bundleMediaFramework": false,
-                "files": {
-                    "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
-                }
+                "bundleMediaFramework": false
             },
             "deb": {
                 "depends": [
                     "libcap2-bin",
                     "iptables"
-                ],
-                "files": {
-                    "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
-                },
-                "postInstallScript": "scripts/postinstall.sh",
-                "preRemoveScript": "scripts/preremove.sh"
+                ]
             },
             "rpm": {
                 "depends": [
                     "libcap",
                     "iptables"
-                ],
-                "files": {
-                    "/usr/bin/oxidize-daemon": "../../target/release/oxidize-daemon"
-                },
-                "postInstallScript": "scripts/postinstall.sh",
-                "preRemoveScript": "scripts/preremove.sh"
+                ]
             }
         },
         "macOS": {
