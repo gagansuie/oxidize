@@ -475,6 +475,16 @@ impl LstmLossPredictor {
             model_loaded: self.has_model(),
         }
     }
+
+    /// Get collected training data and clear the buffer
+    pub fn drain_training_data(&mut self) -> Vec<LossSample> {
+        std::mem::take(&mut self.training_data)
+    }
+
+    /// Get training data count without draining
+    pub fn training_data_count(&self) -> usize {
+        self.training_data.len()
+    }
 }
 
 impl LossPredictor for LstmLossPredictor {
@@ -984,6 +994,16 @@ impl DrlCongestionController {
     /// Set exploration rate
     pub fn set_epsilon(&mut self, epsilon: f32) {
         self.epsilon = epsilon.clamp(0.0, 1.0);
+    }
+
+    /// Get collected experiences and clear the buffer
+    pub fn drain_experiences(&mut self) -> Vec<DrlExperience> {
+        self.experience_buffer.drain(..).collect()
+    }
+
+    /// Get experience count without draining
+    pub fn experience_count(&self) -> usize {
+        self.experience_buffer.len()
     }
 }
 

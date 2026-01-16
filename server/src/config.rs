@@ -66,6 +66,14 @@ pub struct Config {
     #[serde(default = "default_enable_ai_engine")]
     pub enable_ai_engine: bool,
 
+    /// Enable training data collection and upload to HF Hub
+    #[serde(default = "default_enable_ml_training_upload")]
+    pub enable_ml_training_upload: bool,
+
+    /// Interval in seconds between training data uploads (default: 1 hour)
+    #[serde(default = "default_ml_upload_interval")]
+    pub ml_upload_interval_secs: u64,
+
     // === 0-RTT Session Resumption ===
     /// Enable 0-RTT session resumption for faster reconnects
     /// WARNING: 0-RTT is vulnerable to replay attacks. Only enable if you understand the risks.
@@ -134,6 +142,14 @@ fn default_enable_ai_engine() -> bool {
     true
 }
 
+fn default_enable_ml_training_upload() -> bool {
+    true
+}
+
+fn default_ml_upload_interval() -> u64 {
+    3600 // 1 hour
+}
+
 fn default_enable_0rtt() -> bool {
     true // Enabled - requires max_early_data_size = 0 or u32::MAX
 }
@@ -170,6 +186,8 @@ impl Default for Config {
             edge_cache_size: 64 * 1024 * 1024,
             edge_cache_entries: 10000,
             enable_ai_engine: true,
+            enable_ml_training_upload: true,
+            ml_upload_interval_secs: 3600,
             enable_0rtt: true,
             max_early_data_size: u32::MAX, // QUIC requires 0 or u32::MAX
         }

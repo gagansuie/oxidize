@@ -278,65 +278,72 @@ impl RelayServer {
             }
         });
 
-        // Periodic ML training data upload to HF Hub (every hour)
-        let ml_upload = self.ml_engine.clone();
-        let hub_upload = self.model_hub.clone();
-        tokio::spawn(async move {
-            // Wait 10 minutes before first upload to collect some data
-            tokio::time::sleep(Duration::from_secs(600)).await;
+        // Periodic ML training data upload to HF Hub (configurable interval)
+        if self.config.enable_ml_training_upload {
+            let ml_upload = self.ml_engine.clone();
+            let hub_upload = self.model_hub.clone();
+            let upload_interval = self.config.ml_upload_interval_secs;
+            info!(
+                "📊 ML training data upload enabled (interval: {}s)",
+                upload_interval
+            );
+            tokio::spawn(async move {
+                // Wait 10 minutes before first upload to collect some data
+                tokio::time::sleep(Duration::from_secs(600)).await;
 
-            let mut interval = tokio::time::interval(Duration::from_secs(3600)); // 1 hour
-            loop {
-                interval.tick().await;
+                let mut interval = tokio::time::interval(Duration::from_secs(upload_interval));
+                loop {
+                    interval.tick().await;
 
-                // Export training data to temp directory
-                let export_dir = "/tmp/oxidize_training_export";
-                if let Err(e) = std::fs::create_dir_all(export_dir) {
-                    warn!("Failed to create export dir: {}", e);
-                    continue;
-                }
-
-                {
-                    let engine = ml_upload.read().await;
-                    if let Err(e) = engine.export_training_data(export_dir) {
-                        warn!("Failed to export training data: {}", e);
+                    // Export training data to temp directory
+                    let export_dir = "/tmp/oxidize_training_export";
+                    if let Err(e) = std::fs::create_dir_all(export_dir) {
+                        warn!("Failed to create export dir: {}", e);
                         continue;
                     }
+
+                    {
+                        let engine = ml_upload.read().await;
+                        if let Err(e) = engine.export_training_data(export_dir) {
+                            warn!("Failed to export training data: {}", e);
+                            continue;
+                        }
+                    }
+
+                    // Read exported files and upload
+                    let loss_path = format!("{}/loss_samples.json", export_dir);
+                    let drl_path = format!("{}/drl_experiences.json", export_dir);
+
+                    let loss_samples: Vec<oxidize_common::ml_models::LossSample> =
+                        std::fs::read_to_string(&loss_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+
+                    let drl_experiences: Vec<oxidize_common::ml_models::DrlExperience> =
+                        std::fs::read_to_string(&drl_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+
+                    if loss_samples.is_empty() && drl_experiences.is_empty() {
+                        debug!("No training data to upload yet");
+                        continue;
+                    }
+
+                    info!(
+                        "📤 Uploading training data: {} loss samples, {} DRL experiences",
+                        loss_samples.len(),
+                        drl_experiences.len()
+                    );
+
+                    match hub_upload.upload_training_data(&loss_samples, &drl_experiences) {
+                        Ok(()) => info!("✅ Training data uploaded to HF Hub"),
+                        Err(e) => warn!("Failed to upload training data: {}", e),
+                    }
                 }
-
-                // Read exported files and upload
-                let loss_path = format!("{}/loss_samples.json", export_dir);
-                let drl_path = format!("{}/drl_experiences.json", export_dir);
-
-                let loss_samples: Vec<oxidize_common::ml_models::LossSample> =
-                    std::fs::read_to_string(&loss_path)
-                        .ok()
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_default();
-
-                let drl_experiences: Vec<oxidize_common::ml_models::DrlExperience> =
-                    std::fs::read_to_string(&drl_path)
-                        .ok()
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_default();
-
-                if loss_samples.is_empty() && drl_experiences.is_empty() {
-                    debug!("No training data to upload yet");
-                    continue;
-                }
-
-                info!(
-                    "📤 Uploading training data: {} loss samples, {} DRL experiences",
-                    loss_samples.len(),
-                    drl_experiences.len()
-                );
-
-                match hub_upload.upload_training_data(&loss_samples, &drl_experiences) {
-                    Ok(()) => info!("✅ Training data uploaded to HF Hub"),
-                    Err(e) => warn!("Failed to upload training data: {}", e),
-                }
-            }
-        });
+            });
+        }
 
         while let Some(incoming) = self.endpoint.accept().await {
             let connections = self.connections.clone();

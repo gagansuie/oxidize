@@ -132,7 +132,7 @@ impl Default for HubConfig {
             cache_dir: PathBuf::from("/tmp/oxidize_models"),
             token: std::env::var("HF_TOKEN").ok(),
             sync_interval: Duration::from_secs(3600), // 1 hour
-            upload_training_data: false,              // Opt-in
+            upload_training_data: true,               // Enabled by default
             server_id: generate_server_id(),
         }
     }
