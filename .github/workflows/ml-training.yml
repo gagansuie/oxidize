@@ -54,21 +54,18 @@ jobs:
           python-version: '3.11'
 
       - name: Install Hugging Face CLI
-        run: pip install "huggingface_hub[cli]" --quiet
+        run: pip install huggingface_hub --quiet
 
       - name: Login to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python -m huggingface_hub.commands.huggingface_cli login --token $HF_TOKEN
+        run: python scripts/hf_sync.py login
 
       - name: Download training data from HF Hub
         run: |
           mkdir -p training_data
           mkdir -p training_data_archive
-          
-          # Download all training data uploaded by servers
-          echo "Downloading training data from HF Hub..."
-          python -m huggingface_hub.commands.huggingface_cli download $HF_REPO --include "training_data/*.json" --local-dir ./hf_download || true
+          python scripts/hf_sync.py download
           
           if [ -d "./hf_download/training_data" ]; then
             FILE_COUNT=$(find ./hf_download/training_data -name '*.json' 2>/dev/null | wc -l)
@@ -78,26 +75,7 @@ jobs:
 
       - name: Aggregate training data
         run: |
-          echo "Aggregating loss samples..."
-          python3 -c "
-          import json, glob
-          loss_samples, drl_experiences = [], []
-          for f in glob.glob('training_data/*loss*.json') + glob.glob('training_data/training-*.json'):
-              try:
-                  data = json.load(open(f))
-                  if isinstance(data, list): loss_samples.extend(data)
-                  elif isinstance(data, dict) and 'loss_samples' in data: loss_samples.extend(data['loss_samples'])
-              except Exception as e: print(f'Warning: Could not parse {f}: {e}')
-          for f in glob.glob('training_data/*drl*.json') + glob.glob('training_data/*experience*.json') + glob.glob('training_data/training-*.json'):
-              try:
-                  data = json.load(open(f))
-                  if isinstance(data, list) and len(data) > 0 and 'state' in str(data[0]): drl_experiences.extend(data)
-                  elif isinstance(data, dict) and 'drl_experiences' in data: drl_experiences.extend(data['drl_experiences'])
-              except Exception as e: print(f'Warning: Could not parse {f}: {e}')
-          print(f'Aggregated {len(loss_samples)} loss samples, {len(drl_experiences)} DRL experiences')
-          if loss_samples: json.dump(loss_samples, open('training_data/loss_samples.json', 'w'))
-          if drl_experiences: json.dump(drl_experiences, open('training_data/drl_experiences.json', 'w'))
-          "
+          python scripts/hf_sync.py aggregate
           echo "Training samples ready: $(find training_data -name '*.json' | wc -l) files"
 
       - name: Train models
@@ -157,10 +135,7 @@ jobs:
       - name: Push models to HF Hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          mkdir -p hf_repo
-          cd hf_repo
-          python -m huggingface_hub.commands.huggingface_cli upload $HF_REPO . --repo-type model
+        run: python scripts/hf_sync.py upload
 
       - name: Summary
         run: |
