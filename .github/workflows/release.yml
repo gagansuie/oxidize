@@ -26,8 +26,8 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             suffix: ''
-          # macOS
-          - os: macos-latest
+          # macOS (use native runners to avoid cross-compilation issues)
+          - os: macos-13
             target: x86_64-apple-darwin
             suffix: ''
           - os: macos-latest
@@ -125,11 +125,11 @@ jobs:
           - os: ubuntu-22.04
             platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
-          # macOS Intel
-          - os: macos-latest
+          # macOS Intel (use native runner)
+          - os: macos-13
             platform: macos-x86_64
             target: x86_64-apple-darwin
-          # macOS Apple Silicon
+          # macOS Apple Silicon (use latest ARM64 runner)
           - os: macos-latest
             platform: macos-aarch64
             target: aarch64-apple-darwin
@@ -198,31 +198,16 @@ jobs:
           sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" app/src-tauri/tauri.conf.json
           rm -f app/src-tauri/tauri.conf.json.bak
 
-      - name: Build oxidize-daemon (Linux)
-        if: matrix.os == 'ubuntu-22.04'
-        run: |
-          cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
-          mkdir -p target/release
-          cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
-
-      - name: Build oxidize-daemon (macOS)
-        if: startsWith(matrix.os, 'macos')
-        run: |
-          cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
-          mkdir -p target/release
-          cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
-        env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
-
-      - name: Build oxidize-daemon (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Build oxidize-daemon
         shell: bash
         run: |
           cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
           mkdir -p target/release
-          cp target/${{ matrix.target }}/release/oxidize-daemon.exe target/release/oxidize-daemon.exe
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.target }}/release/oxidize-daemon.exe target/release/oxidize-daemon.exe
+          else
+            cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
+          fi
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
@@ -234,23 +219,13 @@ jobs:
           echo "version=v$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Desktop app version: v$VERSION"
 
-      - name: Build Tauri app (Linux)
-        if: matrix.os == 'ubuntu-22.04'
+      - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          args: --target ${{ matrix.target }} --bundles deb,rpm,appimage
-
-      - name: Build Tauri app (macOS/Windows)
-        if: matrix.os != 'ubuntu-22.04'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: app
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} ${{ matrix.os == 'ubuntu-22.04' && '--bundles deb,rpm,appimage' || '' }}
 
       - name: Prepare release artifacts (Linux)
         if: matrix.os == 'ubuntu-22.04'

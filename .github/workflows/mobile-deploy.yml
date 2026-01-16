@@ -26,6 +26,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_IGNORE_ERRORS: "1"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   deploy-android:
@@ -72,6 +75,10 @@ jobs:
         with:
           targets: aarch64-linux-android
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -80,6 +87,8 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-android-deploy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-android-deploy-
 
       - name: Sync version from Cargo.toml
         run: |
@@ -107,7 +116,7 @@ jobs:
 
   deploy-ios:
     name: Deploy to App Store
-    runs-on: macos-latest
+    runs-on: macos-14
     if: github.event_name == 'release' || github.event.inputs.platform == 'ios' || github.event.inputs.platform == 'both'
     
     steps:
@@ -135,6 +144,10 @@ jobs:
         with:
           targets: aarch64-apple-ios
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -143,6 +156,8 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-ios-deploy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ios-deploy-
 
       - name: Sync version from Cargo.toml
         run: |

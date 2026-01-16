@@ -44,6 +44,8 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-ml-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ml-
 
       - name: Build ML training binary
         run: cargo build --release -p oxidize-common --bin oxidize-train --features ai
