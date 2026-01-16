@@ -254,12 +254,6 @@ The installer handles everything: downloads binary, configures service, and star
 
 > **Review the script:** [install.sh](install.sh)
 
-### Uninstall
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- uninstall
-```
-
 ### Build from Source
 
 ```bash
@@ -514,6 +508,47 @@ cargo bench --package oxidize-common
 ║ Concurrent Users:    1,000,000+ per instance                   ║
 ╚════════════════════════════════════════════════════════════════╝
 ```
+
+## Uninstall
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash
+```
+
+### Windows (PowerShell as Admin)
+
+```powershell
+irm https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall-windows.ps1 | iex
+```
+
+### Options
+
+```bash
+# Linux/macOS
+sudo ./scripts/uninstall.sh --repo /path/to/oxidize   # Also clean local builds
+./scripts/uninstall.sh --local-only                   # Only clean builds (no sudo)
+```
+
+```powershell
+# Windows
+.\scripts\uninstall-windows.ps1 -Repo C:\path\to\oxidize   # Also clean local builds
+.\scripts\uninstall-windows.ps1 -LocalOnly                 # Only clean builds
+```
+
+### What Gets Removed
+
+| Component | Linux | macOS | Windows |
+|-----------|-------|-------|---------|
+| **Binaries** | `/usr/local/bin/oxidize-*` | Same | `%ProgramFiles%\Oxidize\` |
+| **Services** | systemd units | launchd plist | Windows service |
+| **Config** | `/etc/oxidize/` | Same | `%APPDATA%\Oxidize\` |
+| **App data** | `~/.local/share/com.oxidize.app` | `~/Library/Application Support/` | `%LOCALAPPDATA%\com.oxidize.app` |
+| **Firewall** | iptables NFQUEUE | PF rules | Firewall rule + WinDivert |
+| **Local builds** | `target/`, `node_modules/`, `gen/` | Same | Same |
+
+> **Review the scripts:** [uninstall.sh](scripts/uninstall.sh) · [uninstall-windows.ps1](scripts/uninstall-windows.ps1)
 
 ## License
 
