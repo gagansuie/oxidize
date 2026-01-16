@@ -27,7 +27,7 @@ jobs:
             target: x86_64-unknown-linux-musl
             suffix: ''
           # macOS (use native runners to avoid cross-compilation issues)
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             suffix: ''
           - os: macos-latest
@@ -126,7 +126,7 @@ jobs:
             platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
           # macOS Intel (use native runner)
-          - os: macos-13
+          - os: macos-15-intel
             platform: macos-x86_64
             target: x86_64-apple-darwin
           # macOS Apple Silicon (use latest ARM64 runner)
@@ -188,15 +188,16 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: app
+        shell: bash
         run: |
           bun install
-          # Bun doesn't handle optional deps correctly - install platform-specific Tauri CLI binding
+          # Bun doesn't handle optional deps correctly - install platform-specific bindings
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            bun add -d @tauri-apps/cli-linux-x64-gnu
+            bun add -d @tauri-apps/cli-linux-x64-gnu @rollup/rollup-linux-x64-gnu
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            bun add -d @tauri-apps/cli-darwin-arm64 @tauri-apps/cli-darwin-x64
+            bun add -d @tauri-apps/cli-darwin-arm64 @tauri-apps/cli-darwin-x64 @rollup/rollup-darwin-arm64 @rollup/rollup-darwin-x64
           elif [[ "${{ runner.os }}" == "Windows" ]]; then
-            bun add -d @tauri-apps/cli-win32-x64-msvc
+            bun add -d @tauri-apps/cli-win32-x64-msvc @rollup/rollup-win32-x64-msvc
           fi
 
       - name: Sync version from Cargo.toml
