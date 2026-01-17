@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦀 Oxidize
+# Oxidize
 
 ### Open Source Deep Learning Driven Network Acceleration
 
