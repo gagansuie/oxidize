@@ -159,10 +159,11 @@ jobs:
       - name: Clean main binaries (force version rebuild)
         shell: bash
         run: |
-          # Remove only the main binaries and bundles to force rebuild with correct version
+          # Remove binaries, bundles, and Tauri build artifacts (contains embedded frontend)
           # Dependencies stay cached
           rm -f target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
           rm -rf target/${{ matrix.target }}/release/bundle 2>/dev/null || true
+          rm -rf target/${{ matrix.target }}/release/build/oxidize-app-* 2>/dev/null || true
 
       - name: Install frontend dependencies
         working-directory: app
