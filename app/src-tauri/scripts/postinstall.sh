@@ -51,7 +51,7 @@ iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
 RULES
     chmod +x "$CONFIG_DIR/nfqueue-rules.sh"
 
-    # Create systemd service
+    # Create systemd service (runs as root for NFQUEUE/iptables access)
     cat > "$SERVICE_FILE" << 'EOF'
 [Unit]
 Description=Oxidize Network Relay Daemon
@@ -60,21 +60,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=oxidize
-Group=oxidize
 ExecStartPre=/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/bin/oxidize-daemon
 ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
-NoNewPrivileges=false
-ProtectSystem=strict
-ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/run/oxidize
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

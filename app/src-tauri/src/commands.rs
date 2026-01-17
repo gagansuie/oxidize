@@ -651,72 +651,97 @@ pub async fn daemon_get_status() -> Result<serde_json::Value, String> {
     Ok(data)
 }
 
-/// Install daemon with elevated privileges (desktop only)
-#[tauri::command]
+/// Find the daemon binary path
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
-    tracing::info!("Installing daemon...");
-
-    // Find the daemon binary - check sidecar/resource paths first, then fallback
-    let mut daemon_path: Option<String> = None;
-
+fn find_daemon_binary(app: &tauri::AppHandle) -> Result<String, String> {
     // Try to find bundled daemon in resource directory (for installed app)
     if let Ok(resource_dir) = app.path().resource_dir() {
-        let sidecar_path = resource_dir.join("oxidize-daemon");
+        #[cfg(windows)]
+        let daemon_name = "oxidize-daemon.exe";
+        #[cfg(not(windows))]
+        let daemon_name = "oxidize-daemon";
+
+        let sidecar_path = resource_dir.join(daemon_name);
         if sidecar_path.exists() {
-            daemon_path = Some(sidecar_path.to_string_lossy().to_string());
             tracing::info!("Found daemon at resource path: {:?}", sidecar_path);
+            return Ok(sidecar_path.to_string_lossy().to_string());
         }
     }
 
     // Fallback to development/system paths
-    if daemon_path.is_none() {
-        let fallback_paths = [
-            "../../../target/release/oxidize-daemon",
-            "../../target/release/oxidize-daemon",
-            "/usr/bin/oxidize-daemon",
-            "/usr/local/bin/oxidize-daemon",
-        ];
+    #[cfg(windows)]
+    let fallback_paths = [
+        r"..\..\..\target\release\oxidize-daemon.exe",
+        r"..\..\target\release\oxidize-daemon.exe",
+    ];
 
-        for path in fallback_paths {
-            let full_path = std::path::Path::new(path);
-            if full_path.exists() {
-                daemon_path = Some(
-                    full_path
-                        .canonicalize()
-                        .map_err(|e| e.to_string())?
-                        .to_string_lossy()
-                        .to_string(),
-                );
-                tracing::info!("Found daemon at fallback path: {}", path);
-                break;
-            }
+    #[cfg(not(windows))]
+    let fallback_paths = [
+        "../../../target/release/oxidize-daemon",
+        "../../target/release/oxidize-daemon",
+        "/usr/bin/oxidize-daemon",
+        "/usr/local/bin/oxidize-daemon",
+    ];
+
+    for path in fallback_paths {
+        let full_path = std::path::Path::new(path);
+        if full_path.exists() {
+            let canonical = full_path
+                .canonicalize()
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .to_string();
+            tracing::info!("Found daemon at fallback path: {}", path);
+            return Ok(canonical);
         }
     }
 
-    let daemon_bin = daemon_path.ok_or_else(|| {
+    Err(
         "Daemon binary not found. The app may not have been installed correctly. Please reinstall."
-            .to_string()
-    })?;
+            .to_string(),
+    )
+}
 
+/// Install daemon with elevated privileges (Linux)
+#[tauri::command]
+#[cfg(target_os = "linux")]
+pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
+    tracing::info!("Installing daemon (Linux)...");
+    let daemon_bin = find_daemon_binary(&app)?;
     tracing::info!("Found daemon at: {}", daemon_bin);
 
-    // Use pkexec to install and start the daemon
     let install_script = format!(
         r#"
+        set -e
         mkdir -p /var/run/oxidize
+        mkdir -p /etc/oxidize
         cp "{}" /usr/local/bin/oxidize-daemon
         chmod 755 /usr/local/bin/oxidize-daemon
+        
+        cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
+#!/bin/bash
+QUEUE_NUM=0
+iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
+iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
+RULES
+        chmod +x /etc/oxidize/nfqueue-rules.sh
+        
         cat > /etc/systemd/system/oxidize-daemon.service << 'EOF'
 [Unit]
 Description=Oxidize Network Relay Daemon
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre=/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/local/bin/oxidize-daemon
+ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 Restart=on-failure
 RestartSec=5
+Environment=RUST_LOG=info
+PrivateTmp=true
+ReadWritePaths=/var/run/oxidize
 
 [Install]
 WantedBy=multi-user.target
@@ -732,6 +757,130 @@ EOF
         .arg("bash")
         .arg("-c")
         .arg(&install_script)
+        .output()
+        .map_err(|e| format!("Failed to run installer: {}", e))?;
+
+    if output.status.success() {
+        tracing::info!("Daemon installed successfully");
+        Ok("Daemon installed and started".to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!("Install failed: {}", stderr);
+        Err(format!("Installation failed: {}", stderr))
+    }
+}
+
+/// Install daemon with elevated privileges (macOS)
+#[tauri::command]
+#[cfg(target_os = "macos")]
+pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
+    tracing::info!("Installing daemon (macOS)...");
+    let daemon_bin = find_daemon_binary(&app)?;
+    tracing::info!("Found daemon at: {}", daemon_bin);
+
+    let install_script = format!(
+        r#"
+        mkdir -p /var/run/oxidize
+        cp "{}" /usr/local/bin/oxidize-daemon
+        chmod +x /usr/local/bin/oxidize-daemon
+        
+        cat > /Library/LaunchDaemons/com.oxidize.daemon.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.oxidize.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/oxidize-daemon</string>
+    </array>
+    <key>UserName</key>
+    <string>root</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/oxidize-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/oxidize-daemon.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>
+EOF
+        
+        launchctl unload /Library/LaunchDaemons/com.oxidize.daemon.plist 2>/dev/null || true
+        launchctl load /Library/LaunchDaemons/com.oxidize.daemon.plist
+        "#,
+        daemon_bin
+    );
+
+    // Use osascript to run with admin privileges
+    let escaped_script = install_script.replace('"', r#"\""#).replace('\n', " ");
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(format!(
+            r#"do shell script "{}" with administrator privileges"#,
+            escaped_script
+        ))
+        .output()
+        .map_err(|e| format!("Failed to run installer: {}", e))?;
+
+    if output.status.success() {
+        tracing::info!("Daemon installed successfully");
+        Ok("Daemon installed and started".to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!("Install failed: {}", stderr);
+        Err(format!("Installation failed: {}", stderr))
+    }
+}
+
+/// Install daemon with elevated privileges (Windows)
+#[tauri::command]
+#[cfg(target_os = "windows")]
+pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
+    tracing::info!("Installing daemon (Windows)...");
+    let daemon_bin = find_daemon_binary(&app)?;
+    tracing::info!("Found daemon at: {}", daemon_bin);
+
+    let install_script = format!(
+        r#"
+        $ErrorActionPreference = "Stop"
+        
+        Stop-Service -Name "OxidizeDaemon" -Force -ErrorAction SilentlyContinue
+        sc.exe delete OxidizeDaemon 2>$null
+        Start-Sleep -Seconds 1
+        
+        $targetDir = "$env:ProgramFiles\Oxidize"
+        New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+        Copy-Item "{}" -Destination "$targetDir\oxidize-daemon.exe" -Force
+        
+        sc.exe create OxidizeDaemon binPath= "$targetDir\oxidize-daemon.exe" DisplayName= "Oxidize Network Relay Daemon" start= auto obj= LocalSystem
+        sc.exe failure OxidizeDaemon reset= 86400 actions= restart/5000/restart/10000/restart/30000
+        sc.exe description OxidizeDaemon "Oxidize network relay daemon for traffic tunneling"
+        
+        netsh advfirewall firewall delete rule name="Oxidize Daemon" 2>$null
+        netsh advfirewall firewall add rule name="Oxidize Daemon" dir=out action=allow program="$targetDir\oxidize-daemon.exe"
+        netsh advfirewall firewall add rule name="Oxidize Daemon In" dir=in action=allow program="$targetDir\oxidize-daemon.exe"
+        
+        Start-Service -Name "OxidizeDaemon"
+        "#,
+        daemon_bin.replace('\\', "\\\\")
+    );
+
+    let escaped_script = install_script.replace('\'', "''");
+    let output = std::process::Command::new("powershell")
+        .arg("-Command")
+        .arg(format!(
+            "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command', '{}'",
+            escaped_script
+        ))
         .output()
         .map_err(|e| format!("Failed to run installer: {}", e))?;
 

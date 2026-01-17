@@ -61,27 +61,36 @@ pub fn install_daemon() -> Result<()> {
         r#"
         set -e
         mkdir -p /var/run/oxidize
+        mkdir -p /etc/oxidize
         cp "{}" /usr/local/bin/oxidize-daemon
         chmod +x /usr/local/bin/oxidize-daemon
         
-        # Set capabilities for packet capture
-        if command -v setcap &> /dev/null; then
-            setcap 'cap_net_admin,cap_net_raw+eip' /usr/local/bin/oxidize-daemon 2>/dev/null || true
-        fi
+        # Create iptables rules script for NFQUEUE
+        cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
+#!/bin/bash
+QUEUE_NUM=0
+iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
+iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
+RULES
+        chmod +x /etc/oxidize/nfqueue-rules.sh
         
-        # Create systemd service
+        # Create systemd service (runs as root for NFQUEUE/iptables)
         cat > /etc/systemd/system/oxidize-daemon.service << 'EOF'
 [Unit]
 Description=Oxidize Network Relay Daemon
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStartPre=/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/local/bin/oxidize-daemon
+ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+PrivateTmp=true
+ReadWritePaths=/var/run/oxidize
 
 [Install]
 WantedBy=multi-user.target
@@ -123,7 +132,7 @@ pub fn install_daemon() -> Result<()> {
         cp "{}" /usr/local/bin/oxidize-daemon
         chmod +x /usr/local/bin/oxidize-daemon
         
-        # Create launchd plist
+        # Create launchd plist (runs as root for packet capture)
         cat > /Library/LaunchDaemons/com.oxidize.daemon.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -135,6 +144,8 @@ pub fn install_daemon() -> Result<()> {
     <array>
         <string>/usr/local/bin/oxidize-daemon</string>
     </array>
+    <key>UserName</key>
+    <string>root</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -143,6 +154,11 @@ pub fn install_daemon() -> Result<()> {
     <string>/var/log/oxidize-daemon.log</string>
     <key>StandardErrorPath</key>
     <string>/var/log/oxidize-daemon.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
 </dict>
 </plist>
 EOF
@@ -179,7 +195,7 @@ pub fn install_daemon() -> Result<()> {
 
     info!("Installing daemon from: {}", daemon_bin);
 
-    // Copy to Program Files and create service
+    // Copy to Program Files and create service (runs as LocalSystem for admin privileges)
     let install_script = format!(
         r#"
         $ErrorActionPreference = "Stop"
@@ -187,19 +203,22 @@ pub fn install_daemon() -> Result<()> {
         # Stop and remove existing service
         Stop-Service -Name "OxidizeDaemon" -Force -ErrorAction SilentlyContinue
         sc.exe delete OxidizeDaemon 2>$null
+        Start-Sleep -Seconds 1
         
         # Copy daemon to Program Files
         $targetDir = "$env:ProgramFiles\Oxidize"
         New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
         Copy-Item "{}" -Destination "$targetDir\oxidize-daemon.exe" -Force
         
-        # Create Windows service
-        sc.exe create OxidizeDaemon binPath= "$targetDir\oxidize-daemon.exe" DisplayName= "Oxidize Network Relay Daemon" start= auto
+        # Create Windows service (runs as LocalSystem for WinDivert access)
+        sc.exe create OxidizeDaemon binPath= "$targetDir\oxidize-daemon.exe" DisplayName= "Oxidize Network Relay Daemon" start= auto obj= LocalSystem
         sc.exe failure OxidizeDaemon reset= 86400 actions= restart/5000/restart/10000/restart/30000
+        sc.exe description OxidizeDaemon "Oxidize network relay daemon for traffic tunneling"
         
-        # Add firewall rule
+        # Add firewall rules (both inbound and outbound)
         netsh advfirewall firewall delete rule name="Oxidize Daemon" 2>$null
         netsh advfirewall firewall add rule name="Oxidize Daemon" dir=out action=allow program="$targetDir\oxidize-daemon.exe"
+        netsh advfirewall firewall add rule name="Oxidize Daemon In" dir=in action=allow program="$targetDir\oxidize-daemon.exe"
         
         # Start service
         Start-Service -Name "OxidizeDaemon"
