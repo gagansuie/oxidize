@@ -1,0 +1,57 @@
+name: 'Setup Rust Environment'
+description: 'Install Rust toolchain, sccache, and configure caching'
+
+inputs:
+  target:
+    description: 'Rust target triple'
+    required: true
+  cache-prefix:
+    description: 'Cache key prefix for different job types'
+    required: false
+    default: 'default'
+
+outputs:
+  sccache-enabled:
+    description: 'Whether sccache is working'
+    value: ${{ steps.sccache-check.outputs.sccache_works }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ inputs.target }}
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.9
+      continue-on-error: true
+
+    - name: Verify sccache or disable
+      id: sccache-check
+      shell: bash
+      run: |
+        if sccache --version 2>/dev/null && sccache --start-server 2>/dev/null; then
+          echo "sccache_works=true" >> $GITHUB_OUTPUT
+        else
+          echo "sccache_works=false" >> $GITHUB_OUTPUT
+          echo "⚠️ sccache unavailable, building without cache"
+        fi
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-${{ inputs.target }}-${{ inputs.cache-prefix }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.target }}-${{ inputs.cache-prefix }}-cargo-registry-
+
+    - name: Cache target directory
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-${{ inputs.target }}-${{ inputs.cache-prefix }}-target-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.target }}-${{ inputs.cache-prefix }}-target-

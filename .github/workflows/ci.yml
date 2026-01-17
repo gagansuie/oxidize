@@ -87,12 +87,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Fresh dependency resolution
-        shell: bash
-        run: rm -f Cargo.lock && cargo generate-lockfile
-
       - name: Build daemon (required by Tauri)
-        run: cargo build --release --package oxidize-daemon
+        run: |
+          cargo build --release --package oxidize-daemon
+          # Copy to Tauri sidecar location
+          mkdir -p app/src-tauri/binaries
+          cp target/release/oxidize-daemon app/src-tauri/binaries/oxidize-daemon-x86_64-unknown-linux-gnu
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 

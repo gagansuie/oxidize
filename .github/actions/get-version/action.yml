@@ -1,0 +1,22 @@
+name: 'Get Version'
+description: 'Extract version from Cargo.toml'
+
+outputs:
+  version:
+    description: 'Version with v prefix (e.g., v1.2.3)'
+    value: ${{ steps.version.outputs.version }}
+  version-bare:
+    description: 'Version without prefix (e.g., 1.2.3)'
+    value: ${{ steps.version.outputs.version_bare }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Get version from Cargo.toml
+      id: version
+      shell: bash
+      run: |
+        VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        echo "version=v$VERSION" >> $GITHUB_OUTPUT
+        echo "version_bare=$VERSION" >> $GITHUB_OUTPUT
+        echo "📦 Version: v$VERSION"
