@@ -72,21 +72,25 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-registry-
 
-      - name: Fresh dependency resolution
-        shell: bash
-        run: rm -f Cargo.lock && cargo generate-lockfile
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-target-
 
-      - name: Clean stale artifacts (ensure fresh version)
+      - name: Clean main binaries (force version rebuild)
         shell: bash
         run: |
-          # Remove any cached binaries to ensure version is recompiled
-          rm -rf target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
-          rm -rf target/${{ matrix.target }}/release/.fingerprint/oxidize-* 2>/dev/null || true
-          rm -rf target/${{ matrix.target }}/release/.fingerprint/relay-* 2>/dev/null || true
+          # Remove only the main binaries to force rebuild with correct version
+          # Dependencies stay cached
+          rm -f target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
+          rm -f target/${{ matrix.target }}/release/relay-* 2>/dev/null || true
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }} --package relay-client
@@ -205,13 +209,25 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-desktop-cargo-registry-
 
-      - name: Fresh dependency resolution
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-desktop-target-
+
+      - name: Clean main binaries (force version rebuild)
         shell: bash
-        run: rm -f Cargo.lock && cargo generate-lockfile
+        run: |
+          # Remove only the main binaries and bundles to force rebuild with correct version
+          # Dependencies stay cached
+          rm -f target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
+          rm -rf target/${{ matrix.target }}/release/bundle 2>/dev/null || true
 
       - name: Install frontend dependencies
         working-directory: app
@@ -235,24 +251,19 @@ jobs:
           sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" app/src-tauri/tauri.conf.json
           rm -f app/src-tauri/tauri.conf.json.bak
 
-      - name: Clean stale artifacts (ensure fresh version)
-        shell: bash
-        run: |
-          # Remove any cached binaries to ensure version is recompiled
-          rm -rf target/${{ matrix.target }}/release/oxidize-* 2>/dev/null || true
-          rm -rf target/${{ matrix.target }}/release/.fingerprint/oxidize-* 2>/dev/null || true
-          rm -rf target/${{ matrix.target }}/release/bundle 2>/dev/null || true
-
       - name: Build oxidize-daemon
         shell: bash
         run: |
           cargo build --release --target ${{ matrix.target }} --package oxidize-daemon
-          mkdir -p target/release
+          
+          # Copy to Tauri sidecar location (binaries/oxidize-daemon-{target-triple})
+          mkdir -p app/src-tauri/binaries
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/oxidize-daemon.exe target/release/oxidize-daemon.exe
+            cp target/${{ matrix.target }}/release/oxidize-daemon.exe app/src-tauri/binaries/oxidize-daemon-${{ matrix.target }}.exe
           else
-            cp target/${{ matrix.target }}/release/oxidize-daemon target/release/oxidize-daemon
+            cp target/${{ matrix.target }}/release/oxidize-daemon app/src-tauri/binaries/oxidize-daemon-${{ matrix.target }}
           fi
+          echo "✅ Daemon binary copied to sidecar location for ${{ matrix.target }}"
         env:
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 

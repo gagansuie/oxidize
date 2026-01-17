@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, ToSocketAddrs};
+use tauri::Manager;
 use tokio::sync::Mutex;
 
 const API_BASE_URL: &str = "https://oxd.sh";
@@ -634,34 +635,48 @@ pub async fn daemon_get_status() -> Result<serde_json::Value, String> {
 /// Install daemon with elevated privileges (desktop only)
 #[tauri::command]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub async fn install_daemon() -> Result<String, String> {
+pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
     tracing::info!("Installing daemon...");
 
-    // Find the daemon binary
-    let daemon_paths = [
-        "../../../target/release/oxidize-daemon",
-        "../../target/release/oxidize-daemon",
-        "/usr/bin/oxidize-daemon",
-        "/usr/local/bin/oxidize-daemon",
-    ];
-
+    // Find the daemon binary - check sidecar/resource paths first, then fallback
     let mut daemon_path: Option<String> = None;
-    for path in daemon_paths {
-        let full_path = std::path::Path::new(path);
-        if full_path.exists() {
-            daemon_path = Some(
-                full_path
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            break;
+
+    // Try to find bundled daemon in resource directory (for installed app)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let sidecar_path = resource_dir.join("oxidize-daemon");
+        if sidecar_path.exists() {
+            daemon_path = Some(sidecar_path.to_string_lossy().to_string());
+            tracing::info!("Found daemon at resource path: {:?}", sidecar_path);
+        }
+    }
+
+    // Fallback to development/system paths
+    if daemon_path.is_none() {
+        let fallback_paths = [
+            "../../../target/release/oxidize-daemon",
+            "../../target/release/oxidize-daemon",
+            "/usr/bin/oxidize-daemon",
+            "/usr/local/bin/oxidize-daemon",
+        ];
+
+        for path in fallback_paths {
+            let full_path = std::path::Path::new(path);
+            if full_path.exists() {
+                daemon_path = Some(
+                    full_path
+                        .canonicalize()
+                        .map_err(|e| e.to_string())?
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                tracing::info!("Found daemon at fallback path: {}", path);
+                break;
+            }
         }
     }
 
     let daemon_bin = daemon_path.ok_or_else(|| {
-        "Daemon binary not found. Please build with: cargo build --release -p oxidize-daemon"
+        "Daemon binary not found. The app may not have been installed correctly. Please reinstall."
             .to_string()
     })?;
 

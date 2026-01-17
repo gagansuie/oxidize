@@ -41,6 +41,7 @@
   let selectedRegionLocation = $state<string | null>(null);
   let connectedRegionLocation = $state<string | null>(null);
   let autoConnectAttempted = $state(false);
+  let errorMessage = $state<string | null>(null);
 
   async function autoConnect() {
     if (autoConnectAttempted || connecting || status.connected) return;
@@ -129,6 +130,7 @@
   async function toggleConnection() {
     if (connecting) return;
     connecting = true;
+    errorMessage = null;
 
     try {
       if (status.connected) {
@@ -137,7 +139,7 @@
       } else {
         // Use selected server (best server from selected region)
         if (!selectedServerId) {
-          console.error("No server selected");
+          errorMessage = "Please select a server first";
           return;
         }
         status = await invoke("connect", { serverId: selectedServerId });
@@ -146,6 +148,8 @@
       }
     } catch (e) {
       console.error("Connection error:", e);
+      errorMessage =
+        typeof e === "string" ? e : (e as Error).message || "Connection failed";
     } finally {
       connecting = false;
     }
@@ -205,7 +209,9 @@
     </button>
 
     <div class="connection-info">
-      {#if status.connected}
+      {#if errorMessage}
+        <p class="error">{errorMessage}</p>
+      {:else if status.connected}
         {#if status.ip}
           <p class="ip">Your IP: <strong>{status.ip}</strong></p>
         {/if}
@@ -446,6 +452,14 @@
 
   .connection-info strong {
     color: #00d4aa;
+  }
+
+  .connection-info .error {
+    color: #ff6b6b;
+    background: rgba(255, 100, 100, 0.1);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
   }
 
   .tabs {

@@ -6,7 +6,7 @@ __pycache__/
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# Cargo.lock is committed for reproducible builds (this is a binary project)
 
 # IDE
 .vscode/
@@ -32,6 +32,7 @@ production.toml
 /app/node_modules/
 /app/dist/
 /app/src-tauri/target/
+/app/src-tauri/binaries/
 /app/.svelte-kit/
 /app/bun.lock
 
@@ -65,3 +66,5 @@ production.toml
 /app/src-tauri/gen/android/fastlane/README.md
 *.mobileprovision
 *.p12
+
+/app/package-lock.json
