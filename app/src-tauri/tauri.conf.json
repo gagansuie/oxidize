@@ -59,13 +59,17 @@
                 "depends": [
                     "libcap2-bin",
                     "iptables"
-                ]
+                ],
+                "postInstallScript": "scripts/postinstall.sh",
+                "preRemoveScript": "scripts/preremove.sh"
             },
             "rpm": {
                 "depends": [
                     "libcap",
                     "iptables"
-                ]
+                ],
+                "postInstallScript": "scripts/postinstall.sh",
+                "preRemoveScript": "scripts/preremove.sh"
             }
         },
         "macOS": {

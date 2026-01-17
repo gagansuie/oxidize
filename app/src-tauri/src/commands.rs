@@ -68,17 +68,36 @@ const RELAY_PORT: u16 = 4433;
 #[tauri::command]
 pub async fn connect(
     server_id: String,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<ConnectionStatus, String> {
     tracing::info!("Connecting to relay via server: {}", server_id);
 
     // Daemon is required for full traffic tunneling and IP protection
+    // Auto-install if not running (handles macOS DMG, AppImage, and fresh installs)
     if !is_daemon_running().await {
-        return Err(
-            "Daemon not running. Please install the daemon first via Settings → Install Daemon. \
-             The daemon is required to tunnel all traffic and protect your IP."
-                .to_string(),
-        );
+        tracing::info!("Daemon not running, attempting auto-install...");
+        match install_daemon(app.clone()).await {
+            Ok(msg) => {
+                tracing::info!("Daemon installed: {}", msg);
+                // Give daemon time to start
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                // Verify it's now running
+                if !is_daemon_running().await {
+                    return Err(
+                        "Daemon installed but failed to start. Please check system logs or try restarting the app."
+                            .to_string(),
+                    );
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to install daemon: {}. You may need to manually install via Settings → Install Daemon.",
+                    e
+                ));
+            }
+        }
     }
 
     // Check if already connected

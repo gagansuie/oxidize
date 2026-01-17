@@ -7,6 +7,7 @@ use tracing::info;
 
 mod client;
 mod config;
+mod daemon;
 mod dns_cache;
 mod speedtest;
 
@@ -110,6 +111,11 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+
+    // Ensure daemon is running (auto-install if needed)
+    daemon::ensure_daemon_running()
+        .await
+        .context("Failed to start daemon. The daemon is required to tunnel traffic.")?;
 
     info!("🔗 Connecting to relay server: {}", server_addr);
     info!(

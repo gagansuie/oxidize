@@ -9,6 +9,8 @@ DAEMON_BIN="/usr/bin/oxidize-daemon"
 SERVICE_FILE="/etc/systemd/system/oxidize-daemon.service"
 RUN_DIR="/var/run/oxidize"
 CONFIG_DIR="/etc/oxidize"
+# Tauri installs the app here, sidecar binaries are in the same directory
+APP_DIR="/usr/lib/oxidize"
 
 echo "Setting up Oxidize daemon..."
 
@@ -23,6 +25,15 @@ if ! id -u oxidize &>/dev/null; then
     useradd --system --no-create-home --shell /usr/sbin/nologin oxidize 2>/dev/null || true
 fi
 chown oxidize:oxidize "$RUN_DIR" 2>/dev/null || true
+
+# Find and copy the bundled daemon sidecar to /usr/bin
+SIDECAR_DAEMON=$(find "$APP_DIR" -name "oxidize-daemon*" -type f 2>/dev/null | head -1)
+if [ -n "$SIDECAR_DAEMON" ] && [ -f "$SIDECAR_DAEMON" ]; then
+    echo "Found bundled daemon at: $SIDECAR_DAEMON"
+    cp "$SIDECAR_DAEMON" "$DAEMON_BIN"
+    chmod +x "$DAEMON_BIN"
+    echo "Copied daemon to $DAEMON_BIN"
+fi
 
 # Install systemd service if daemon binary exists
 if [ -f "$DAEMON_BIN" ]; then

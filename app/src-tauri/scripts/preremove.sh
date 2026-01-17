@@ -26,6 +26,9 @@ iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 rm -f "/etc/systemd/system/$SERVICE_NAME.service"
 systemctl daemon-reload || true
 
+# Remove daemon binary
+rm -f "/usr/bin/oxidize-daemon"
+
 # Remove config directory
 rm -rf "$CONFIG_DIR"
 

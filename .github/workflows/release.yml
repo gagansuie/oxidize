@@ -62,7 +62,7 @@ jobs:
           rm -f target/${{ matrix.target }}/release/relay-* 2>/dev/null || true
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} --package relay-client
+        run: cargo build --release --target ${{ matrix.target }} --package relay-client --package oxidize-daemon
         env:
           RUSTC_WRAPPER: ${{ steps.setup-rust.outputs.sccache-enabled == 'true' && 'sccache' || '' }}
 
@@ -76,8 +76,9 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p release
           
-          # Client only (server is deployed to Fly.io)
+          # Client and daemon binaries
           cp target/${{ matrix.target }}/release/oxidize-client${{ matrix.suffix }} release/
+          cp target/${{ matrix.target }}/release/oxidize-daemon${{ matrix.suffix }} release/
           
           # Create archives
           cd release
@@ -196,6 +197,8 @@ jobs:
           mkdir -p app/src-tauri/binaries
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             cp target/${{ matrix.target }}/release/oxidize-daemon.exe app/src-tauri/binaries/oxidize-daemon-${{ matrix.target }}.exe
+            # Also copy without target triple for NSIS hooks
+            cp target/${{ matrix.target }}/release/oxidize-daemon.exe app/src-tauri/binaries/oxidize-daemon.exe
           else
             cp target/${{ matrix.target }}/release/oxidize-daemon app/src-tauri/binaries/oxidize-daemon-${{ matrix.target }}
           fi
