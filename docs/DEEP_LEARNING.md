@@ -356,10 +356,14 @@ println!("Path selector: {:?}", stats.path_selector);
 - [x] **Automatic model download** - Servers fetch latest models on startup
 - [x] **End-to-end automation** - No manual intervention required
 
-## Future Improvements
+## Advanced ML Features (Implemented)
 
-- [ ] Online learning (update models in real-time from live traffic)
-- [ ] Federated learning (privacy-preserving aggregation across servers)
-- [ ] Transformer-based loss predictor (replace LSTM)
-- [ ] Multi-agent RL for congestion control
-- [ ] A/B testing framework for model deployment
+All five advanced ML features have been implemented in the `advanced_ml` module:
+
+- [x] **Online learning** - Real-time model updates from live traffic (`RealtimeOnlineLearner`)
+- [x] **Federated learning** - Privacy-preserving aggregation with differential privacy (`FederatedCoordinator`)
+- [x] **Transformer-based loss predictor** - Multi-head attention replaces LSTM (`TransformerPredictor`)
+- [x] **Multi-agent RL** - Distributed congestion control with inter-agent communication (`MultiAgentCoordinator`)
+- [x] **A/B testing framework** - Statistical significance testing for model deployment (`ABTestingFramework`)
+
+See [ADVANCED_ML.md](ADVANCED_ML.md) for detailed documentation.

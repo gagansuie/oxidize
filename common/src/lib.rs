@@ -1,5 +1,6 @@
 pub mod adaptive_fec;
 
+pub mod advanced_ml;
 pub mod ai_engine;
 pub mod benchmark;
 pub mod compression;

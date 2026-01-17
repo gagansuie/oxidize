@@ -161,6 +161,15 @@ Self-improving network optimization using neural networks:
 | 2 | Compression Oracle | MLP classifier (entropy-aware) | 20-40% faster compression decisions |
 | 2 | Path Selector | UCB1 + contextual bandit | Learns optimal path per traffic type |
 
+**Advanced ML Features (Scale-Ready):**
+| Feature | Purpose | Latency Impact | When Needed |
+|---------|---------|----------------|-------------|
+| **Federated Learning** | Privacy-preserving aggregation with DP | Async | Multi-server |
+| **Multi-agent RL** | Distributed congestion control | ~50µs/action | Multi-flow |
+| **A/B Testing** | Statistical model deployment experiments | ~1µs | Always |
+
+See [ADVANCED_ML.md](docs/ADVANCED_ML.md) for detailed documentation.
+
 **Gaming Ports (QUIC Datagrams):**
 | Platform | Ports |
 |----------|-------|
@@ -503,6 +512,7 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (LSTM, DQN, UCB1)
+- [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
 - [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io + Vultr)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
 - [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - 100+ Gbps kernel bypass optimizations

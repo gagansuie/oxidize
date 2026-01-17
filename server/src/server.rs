@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::cache::DataCache;
 use crate::config::Config;
@@ -353,6 +353,8 @@ impl RelayServer {
             let security = self.security.clone();
             let forwarder = self.forwarder.clone();
 
+            let ml_engine = self.ml_engine.clone();
+
             tokio::spawn(async move {
                 // Get remote address before awaiting connection
                 let remote_addr = incoming.remote_address();
@@ -391,6 +393,7 @@ impl RelayServer {
                             config,
                             cache,
                             forwarder,
+                            ml_engine,
                         )
                         .await
                         {
@@ -472,6 +475,7 @@ impl RelayServer {
                         let security = self.security.clone();
                         let forwarder = self.forwarder.clone();
                         let conn_tracker = tracker.clone_tracker();
+                        let ml_engine = self.ml_engine.clone();
 
                         tokio::spawn(async move {
                             // Register this connection for tracking
@@ -511,6 +515,7 @@ impl RelayServer {
                                         config,
                                         cache,
                                         forwarder,
+                                        ml_engine,
                                     )
                                     .await
                                     {
@@ -550,14 +555,22 @@ impl RelayServer {
         config: Config,
         cache: Arc<DataCache>,
         forwarder: Arc<SharedForwarder>,
+        ml_engine: Arc<RwLock<MlEngine>>,
     ) -> Result<()> {
         // === MASQUE-INSPIRED: Spawn datagram handler for real-time traffic ===
         let datagram_connection = connection.clone();
         let datagram_forwarder = forwarder.clone();
         let datagram_metrics = metrics.clone();
+        let datagram_ml = ml_engine.clone();
 
         let datagram_handle = tokio::spawn(async move {
-            Self::handle_datagrams(datagram_connection, datagram_forwarder, datagram_metrics).await;
+            Self::handle_datagrams(
+                datagram_connection,
+                datagram_forwarder,
+                datagram_metrics,
+                datagram_ml,
+            )
+            .await;
         });
 
         // Handle stream-based traffic (reliable)
@@ -602,10 +615,12 @@ impl RelayServer {
 
     /// Handle QUIC datagrams for real-time traffic (gaming, VoIP)
     /// This bypasses stream ordering for ultra-low latency
+    /// ML engine is used for FEC decisions and network telemetry
     async fn handle_datagrams(
         connection: Connection,
         forwarder: Arc<SharedForwarder>,
         metrics: RelayMetrics,
+        ml_engine: Arc<RwLock<MlEngine>>,
     ) {
         // Use a fixed connection ID for datagram responses (based on connection hash)
         let datagram_conn_id = connection.stable_id() as u64;
@@ -631,26 +646,74 @@ impl RelayServer {
             }
         });
 
+        // Track RTT for ML telemetry
+        let mut last_rtt_us: u64 = 50_000; // Default 50ms
+        let mut packet_count: u64 = 0;
+        let mut loss_count: u64 = 0;
+
         loop {
             match connection.read_datagram().await {
                 Ok(datagram) => {
-                    info!("Datagram received: {} bytes", datagram.len());
+                    packet_count += 1;
+                    trace!("Datagram received: {} bytes", datagram.len());
                     metrics.record_received(datagram.len() as u64);
 
                     // Parse minimal header: connection_id (8) + sequence (8) + payload
                     if datagram.len() < 16 {
-                        info!("Datagram too small ({}), skipping", datagram.len());
+                        trace!("Datagram too small ({}), skipping", datagram.len());
                         continue;
+                    }
+
+                    // Update ML engine with network telemetry (non-blocking)
+                    // This runs heuristics by default, ML when models are loaded
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if packet_count % 100 == 0 {
+                        // Sample every 100 packets to reduce overhead
+                        if let Ok(mut engine) = ml_engine.try_write() {
+                            let features = oxidize_common::ai_engine::NetworkFeatures {
+                                rtt_us: last_rtt_us,
+                                rtt_var_us: last_rtt_us / 10,
+                                bandwidth_bps: (datagram.len() as u64 * 8 * 1000)
+                                    / last_rtt_us.max(1),
+                                loss_rate: if packet_count > 0 {
+                                    loss_count as f32 / packet_count as f32
+                                } else {
+                                    0.0
+                                },
+                                loss_trend: 0.0,
+                                inflight: 10,
+                                cwnd: 65535,
+                                time_since_loss_ms: 1000,
+                                buffer_occupancy: 0.3,
+                                recent_retx: loss_count as u32,
+                            };
+                            engine.update(&features, 0.0, 0);
+
+                            // Get FEC decision (uses heuristics or ML depending on mode)
+                            let fec = engine.fec_decision(&features);
+                            if fec.inject_fec && fec.redundancy_ratio > 0.0 {
+                                trace!(
+                                    "ML FEC decision: inject with {:.1}% redundancy",
+                                    fec.redundancy_ratio * 100.0
+                                );
+                            }
+                        }
+                    }
+
+                    // Update RTT estimate from connection stats
+                    if let Some(stats) = connection.stats().path.rtt.as_nanos().checked_div(1000) {
+                        last_rtt_us = stats as u64;
                     }
 
                     // Use the datagram_conn_id for response routing (ignore client's conn_id)
                     // Sequence is bytes 8-16 (unused for now, could track for stats)
                     let payload = &datagram[16..];
-                    info!("Forwarding payload: {} bytes", payload.len());
+                    trace!("Forwarding payload: {} bytes", payload.len());
 
                     // Forward directly to destination - no framing overhead
                     if let Err(e) = forwarder.forward(datagram_conn_id, payload.to_vec()).await {
-                        info!("Datagram forward error: {}", e);
+                        trace!("Datagram forward error: {}", e);
+                        loss_count += 1;
                     }
                 }
                 Err(quinn::ConnectionError::ApplicationClosed(_)) => {
