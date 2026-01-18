@@ -562,18 +562,28 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
-    let (bytes_sent, bytes_received) = if let Some(ref metrics) = state_guard.metrics {
-        (
-            metrics
-                .bytes_sent
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .bytes_received
-                .load(std::sync::atomic::Ordering::Relaxed),
-        )
-    } else {
-        (0, 0)
-    };
+    let (bytes_sent, bytes_received, packets_sent, packets_received, compression_saved) =
+        if let Some(ref metrics) = state_guard.metrics {
+            (
+                metrics
+                    .bytes_sent
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .bytes_received
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .packets_sent
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .packets_received
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .compression_saved
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        };
 
     state_guard.connected = false;
     state_guard.server_id = None;
@@ -581,8 +591,8 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     state_guard.connected_at = None;
 
     info!(
-        "Disconnected. Uptime: {}s, Sent: {}, Received: {}",
-        uptime, bytes_sent, bytes_received
+        "Disconnected. Uptime: {}s, Sent: {}, Received: {}, Packets: {}/{}",
+        uptime, bytes_sent, bytes_received, packets_sent, packets_received
     );
 
     DaemonResponse {
@@ -592,6 +602,9 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             "uptime_secs": uptime,
             "bytes_sent": bytes_sent,
             "bytes_received": bytes_received,
+            "packets_sent": packets_sent,
+            "packets_received": packets_received,
+            "compression_saved": compression_saved,
         })),
     }
 }
@@ -599,18 +612,28 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
 async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     let state_guard = state.lock().await;
 
-    let (bytes_sent, bytes_received) = if let Some(ref metrics) = state_guard.metrics {
-        (
-            metrics
-                .bytes_sent
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .bytes_received
-                .load(std::sync::atomic::Ordering::Relaxed),
-        )
-    } else {
-        (0, 0)
-    };
+    let (bytes_sent, bytes_received, packets_sent, packets_received, compression_saved) =
+        if let Some(ref metrics) = state_guard.metrics {
+            (
+                metrics
+                    .bytes_sent
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .bytes_received
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .packets_sent
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .packets_received
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                metrics
+                    .compression_saved
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        };
 
     let uptime = state_guard
         .connected_at
@@ -631,6 +654,9 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             "uptime_secs": uptime,
             "bytes_sent": bytes_sent,
             "bytes_received": bytes_received,
+            "packets_sent": packets_sent,
+            "packets_received": packets_received,
+            "compression_saved": compression_saved,
         })),
     }
 }

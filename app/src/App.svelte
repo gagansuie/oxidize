@@ -42,6 +42,8 @@
   let connectedRegionLocation = $state<string | null>(null);
   let autoConnectAttempted = $state(false);
   let errorMessage = $state<string | null>(null);
+  let initializing = $state(true);
+  let initError = $state<string | null>(null);
 
   async function autoConnect() {
     if (autoConnectAttempted || connecting || status.connected) return;
@@ -94,36 +96,65 @@
   $effect(() => {
     let unlisten: UnlistenFn | undefined;
     let pollInterval: ReturnType<typeof setInterval> | undefined;
+    let retryTimeout: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
 
-    (async () => {
-      status = await invoke("get_status");
+    async function initialize(retryCount = 0) {
+      if (cancelled) return;
 
-      // If already connected on startup, sync selection
-      if (status.connected && status.server) {
-        try {
-          const regions: Region[] = await invoke("get_regions");
-          await syncSelectionWithConnection(regions);
-        } catch (e) {
-          console.error("Failed to sync selection:", e);
-        }
-      } else {
-        // Try auto-connect if not already connected
-        await autoConnect();
-      }
+      try {
+        initializing = true;
+        initError = null;
 
-      unlisten = await listen("connection-changed", (event) => {
-        status.connected = event.payload as boolean;
-      });
-
-      // Poll for status updates
-      pollInterval = setInterval(async () => {
         status = await invoke("get_status");
-      }, 1000);
-    })();
+
+        // If already connected on startup, sync selection
+        if (status.connected && status.server) {
+          try {
+            const regions: Region[] = await invoke("get_regions");
+            await syncSelectionWithConnection(regions);
+          } catch (e) {
+            console.error("Failed to sync selection:", e);
+          }
+        } else {
+          // Try auto-connect if not already connected
+          await autoConnect();
+        }
+
+        unlisten = await listen("connection-changed", (event) => {
+          status.connected = event.payload as boolean;
+        });
+
+        // Poll for status updates
+        pollInterval = setInterval(async () => {
+          try {
+            status = await invoke("get_status");
+          } catch (e) {
+            console.error("Status poll failed:", e);
+          }
+        }, 1000);
+
+        initializing = false;
+      } catch (e) {
+        console.error(`Initialization failed (attempt ${retryCount + 1}):`, e);
+
+        if (cancelled) return;
+
+        // Retry with exponential backoff (max 5 seconds)
+        const delay = Math.min(1000 * Math.pow(1.5, retryCount), 5000);
+        initError = `Connecting to service... (retry in ${Math.round(delay / 1000)}s)`;
+
+        retryTimeout = setTimeout(() => initialize(retryCount + 1), delay);
+      }
+    }
+
+    initialize();
 
     return () => {
+      cancelled = true;
       unlisten?.();
       if (pollInterval) clearInterval(pollInterval);
+      if (retryTimeout) clearTimeout(retryTimeout);
     };
   });
 
@@ -166,139 +197,204 @@
   }
 </script>
 
-<main class="app">
-  <header class="header">
-    <div class="logo">
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      </svg>
-      <span>Oxidize</span>
-    </div>
-    <div class="status-badge" class:connected={status.connected}>
-      <span class="dot"></span>
-      {status.connected ? "Connected" : "Disconnected"}
-    </div>
-  </header>
-
-  <section class="connection-panel">
-    <button
-      class="connect-btn"
-      class:connected={status.connected}
-      class:connecting
-      disabled={connecting || (!status.connected && !selectedServerId)}
-      onclick={toggleConnection}
-    >
-      <div class="btn-inner">
-        {#if connecting}
-          <div class="spinner"></div>
-        {:else if status.connected}
-          <svg viewBox="0 0 24 24" fill="currentColor">
-            <path d="M6 4h4v16H6zM14 4h4v16h-4z" />
-          </svg>
-        {:else}
-          <svg viewBox="0 0 24 24" fill="currentColor">
-            <path d="M8 5v14l11-7z" />
-          </svg>
-        {/if}
+{#if initializing}
+  <main class="app initializing">
+    <div class="init-screen">
+      <div class="logo">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+        <span>Oxidize</span>
       </div>
-    </button>
-
-    <div class="connection-info">
-      {#if errorMessage}
-        <p class="error">{errorMessage}</p>
-      {:else if status.connected}
-        {#if status.ip}
-          <p class="ip">Your IP: <strong>{status.ip}</strong></p>
-        {/if}
-        <p class="server">
-          Connected to: <strong
-            >{connectedRegionLocation ||
-              selectedRegionLocation ||
-              "Unknown"}</strong
-          >
-        </p>
-      {:else if selectedRegionLocation}
-        <p class="ready">
-          Ready to connect to <strong>{selectedRegionLocation}</strong>
-        </p>
+      <div class="init-spinner"></div>
+      {#if initError}
+        <p class="init-message">{initError}</p>
       {:else}
-        <p class="select-prompt">Select a region to connect</p>
+        <p class="init-message">Starting up...</p>
       {/if}
     </div>
-  </section>
+  </main>
+{:else}
+  <main class="app">
+    <header class="header">
+      <div class="logo">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+        <span>Oxidize</span>
+      </div>
+      <div class="status-badge" class:connected={status.connected}>
+        <span class="dot"></span>
+        {status.connected ? "Connected" : "Disconnected"}
+      </div>
+    </header>
 
-  {#if status.connected}
-    <Stats {status} />
-  {/if}
+    <section class="connection-panel">
+      <button
+        class="connect-btn"
+        class:connected={status.connected}
+        class:connecting
+        disabled={connecting || (!status.connected && !selectedServerId)}
+        onclick={toggleConnection}
+      >
+        <div class="btn-inner">
+          {#if connecting}
+            <div class="spinner"></div>
+          {:else if status.connected}
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 4h4v16H6zM14 4h4v16h-4z" />
+            </svg>
+          {:else}
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          {/if}
+        </div>
+      </button>
 
-  <nav class="tabs">
-    <button
-      class:active={activeTab === "servers"}
-      onclick={() => (activeTab = "servers")}
-    >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <circle cx="12" cy="12" r="10" />
-        <path
-          d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"
-        />
-      </svg>
-      Servers
-    </button>
-    <button
-      class:active={activeTab === "stats"}
-      onclick={() => (activeTab = "stats")}
-    >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <path d="M18 20V10M12 20V4M6 20v-6" />
-      </svg>
-      Stats
-    </button>
-    <button
-      class:active={activeTab === "settings"}
-      onclick={() => (activeTab = "settings")}
-    >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <path
-          d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
-        />
-        <circle cx="12" cy="12" r="3" />
-      </svg>
-      Settings
-    </button>
-  </nav>
+      <div class="connection-info">
+        {#if errorMessage}
+          <p class="error">{errorMessage}</p>
+        {:else if status.connected}
+          {#if status.ip}
+            <p class="ip">Protected IP: <strong>{status.ip}</strong></p>
+          {/if}
+          <p class="server">
+            Connected to: <strong
+              >{connectedRegionLocation ||
+                selectedRegionLocation ||
+                "Unknown"}</strong
+            >
+          </p>
+        {:else if selectedRegionLocation}
+          <p class="ready">
+            Ready to connect to <strong>{selectedRegionLocation}</strong>
+          </p>
+        {:else}
+          <p class="select-prompt">Select a region to connect</p>
+        {/if}
+      </div>
+    </section>
 
-  <section class="content">
-    {#if activeTab === "servers"}
-      <ServerList onselect={handleRegionSelect} selected={selectedRegionId} />
-    {:else if activeTab === "stats"}
-      <Analytics {status} />
-    {:else}
-      <Settings />
+    {#if status.connected}
+      <Stats {status} />
     {/if}
-  </section>
-</main>
+
+    <nav class="tabs">
+      <button
+        class:active={activeTab === "servers"}
+        onclick={() => (activeTab = "servers")}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path
+            d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"
+          />
+        </svg>
+        Servers
+      </button>
+      <button
+        class:active={activeTab === "stats"}
+        onclick={() => (activeTab = "stats")}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M18 20V10M12 20V4M6 20v-6" />
+        </svg>
+        Stats
+      </button>
+      <button
+        class:active={activeTab === "settings"}
+        onclick={() => (activeTab = "settings")}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path
+            d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"
+          />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+        Settings
+      </button>
+    </nav>
+
+    <section class="content">
+      {#if activeTab === "servers"}
+        <ServerList onselect={handleRegionSelect} selected={selectedRegionId} />
+      {:else if activeTab === "stats"}
+        <Analytics {status} />
+      {:else}
+        <Settings />
+      {/if}
+    </section>
+  </main>
+{/if}
 
 <style>
+  .initializing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .init-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.5rem;
+    text-align: center;
+  }
+
+  .init-screen .logo {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 2rem;
+    font-weight: 700;
+    color: #00d4aa;
+  }
+
+  .init-screen .logo svg {
+    width: 36px;
+    height: 36px;
+  }
+
+  .init-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #2a2a4a;
+    border-top-color: #00d4aa;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  .init-message {
+    color: #888;
+    font-size: 0.9rem;
+  }
   :global(*) {
     margin: 0;
     padding: 0;

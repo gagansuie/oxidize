@@ -328,7 +328,7 @@
         </div>
 
         <!-- IP Protection Status -->
-        {#if status.original_ip && status.ip}
+        {#if status.ip}
             <div class="section">
                 <h3 class="section-title">
                     <svg
@@ -342,23 +342,6 @@
                     IP Protection
                 </h3>
                 <div class="ip-status">
-                    <div class="ip-row">
-                        <span class="ip-label">Your Real IP</span>
-                        <span class="ip-value original"
-                            >{status.original_ip}</span
-                        >
-                        <span class="ip-tag hidden">Hidden</span>
-                    </div>
-                    <div class="ip-arrow">
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                        >
-                            <path d="M12 5v14M19 12l-7 7-7-7" />
-                        </svg>
-                    </div>
                     <div class="ip-row">
                         <span class="ip-label">Visible IP</span>
                         <span class="ip-value protected">{status.ip}</span>
@@ -374,7 +357,7 @@
     .analytics {
         display: flex;
         flex-direction: column;
-        gap: 1rem;
+        gap: 1.5rem;
     }
 
     .not-connected {
@@ -407,7 +390,7 @@
     .section {
         background: rgba(255, 255, 255, 0.03);
         border-radius: 12px;
-        padding: 1rem;
+        padding: 1.25rem;
     }
 
     .section-title {
@@ -673,11 +656,6 @@
         font-size: 0.85rem;
     }
 
-    .ip-value.original {
-        color: #666;
-        text-decoration: line-through;
-    }
-
     .ip-value.protected {
         color: #00d4aa;
     }
@@ -690,22 +668,8 @@
         font-weight: 600;
     }
 
-    .ip-tag.hidden {
-        background: rgba(255, 107, 107, 0.2);
-        color: #ff6b6b;
-    }
-
     .ip-tag.protected {
         background: rgba(0, 212, 170, 0.2);
         color: #00d4aa;
-    }
-
-    .ip-arrow {
-        color: #00d4aa;
-    }
-
-    .ip-arrow svg {
-        width: 20px;
-        height: 20px;
     }
 </style>

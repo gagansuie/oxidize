@@ -28,6 +28,7 @@
     let searchQuery = $state("");
     let liveLatency = $state<number | null>(null);
     let loading = $state(true);
+    let loadError = $state<string | null>(null);
 
     let filteredRegions = $derived(
         regions.filter(
@@ -39,27 +40,55 @@
 
     $effect(() => {
         let interval: ReturnType<typeof setInterval> | undefined;
+        let retryTimeout: ReturnType<typeof setTimeout> | undefined;
+        let cancelled = false;
 
-        (async () => {
-            loading = true;
-            regions = await invoke("get_regions");
-            loading = false;
+        async function loadRegions(retryCount = 0) {
+            if (cancelled) return;
 
-            // Measure live latency immediately and then every 5 seconds
-            const measureLatency = async () => {
-                try {
-                    liveLatency = await invoke("ping_relay");
-                } catch (e) {
-                    console.error("Failed to ping relay:", e);
-                }
-            };
+            try {
+                loading = true;
+                loadError = null;
+                regions = await invoke("get_regions");
+                loading = false;
 
-            measureLatency();
-            interval = setInterval(measureLatency, 5000);
-        })();
+                // Measure live latency immediately and then every 5 seconds
+                const measureLatency = async () => {
+                    try {
+                        liveLatency = await invoke("ping_relay");
+                    } catch (e) {
+                        console.error("Failed to ping relay:", e);
+                    }
+                };
+
+                measureLatency();
+                interval = setInterval(measureLatency, 5000);
+            } catch (e) {
+                console.error(
+                    `Failed to load regions (attempt ${retryCount + 1}):`,
+                    e,
+                );
+
+                if (cancelled) return;
+
+                // Retry with exponential backoff (max 5 seconds)
+                const delay = Math.min(1000 * Math.pow(1.5, retryCount), 5000);
+                loadError = `Failed to load regions. Retrying...`;
+                loading = false;
+
+                retryTimeout = setTimeout(
+                    () => loadRegions(retryCount + 1),
+                    delay,
+                );
+            }
+        }
+
+        loadRegions();
 
         return () => {
+            cancelled = true;
             if (interval) clearInterval(interval);
+            if (retryTimeout) clearTimeout(retryTimeout);
         };
     });
 
@@ -126,6 +155,19 @@
                     </div>
                 </div>
             {/each}
+        {:else if loadError}
+            <div class="error-state">
+                <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                >
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 8v4M12 16h.01" />
+                </svg>
+                <p>{loadError}</p>
+            </div>
         {:else if filteredRegions.length === 0}
             <div class="empty-state">No regions found</div>
         {:else}
@@ -227,6 +269,26 @@
         text-align: center;
         color: #666;
         padding: 2rem;
+        font-size: 0.9rem;
+    }
+
+    .error-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+        text-align: center;
+        color: #888;
+        padding: 2rem;
+    }
+
+    .error-state svg {
+        width: 32px;
+        height: 32px;
+        color: #ffd93d;
+    }
+
+    .error-state p {
         font-size: 0.9rem;
     }
 
