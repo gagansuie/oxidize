@@ -32,6 +32,11 @@
     compression_saved: 0,
     latency_ms: null,
     direct_latency_ms: null,
+    fec_recovered: 0,
+    fec_sent: 0,
+    loss_predictions: 0,
+    congestion_adjustments: 0,
+    path_switches: 0,
   });
 
   let connecting = $state(false);

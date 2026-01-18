@@ -314,7 +314,7 @@
                 >
                     <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
                 </svg>
-                Your Benefits Over Time
+                Usage
             </h3>
             <div class="summary-cards">
                 <div class="summary-card">
