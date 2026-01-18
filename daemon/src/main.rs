@@ -612,28 +612,53 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
 async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     let state_guard = state.lock().await;
 
-    let (bytes_sent, bytes_received, packets_sent, packets_received, compression_saved) =
-        if let Some(ref metrics) = state_guard.metrics {
-            (
-                metrics
-                    .bytes_sent
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .bytes_received
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .packets_sent
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .packets_received
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .compression_saved
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
-        } else {
-            (0, 0, 0, 0, 0)
-        };
+    let (
+        bytes_sent,
+        bytes_received,
+        packets_sent,
+        packets_received,
+        compression_saved,
+        fec_recovered,
+        fec_sent,
+        loss_predictions,
+        congestion_adjustments,
+        path_switches,
+    ) = if let Some(ref metrics) = state_guard.metrics {
+        (
+            metrics
+                .bytes_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .bytes_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .packets_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .packets_received
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .compression_saved
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .fec_packets_recovered
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .fec_packets_sent
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .loss_predictions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .congestion_adjustments
+                .load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .path_switches
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    } else {
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    };
 
     let uptime = state_guard
         .connected_at
@@ -657,6 +682,11 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             "packets_sent": packets_sent,
             "packets_received": packets_received,
             "compression_saved": compression_saved,
+            "fec_recovered": fec_recovered,
+            "fec_sent": fec_sent,
+            "loss_predictions": loss_predictions,
+            "congestion_adjustments": congestion_adjustments,
+            "path_switches": path_switches,
         })),
     }
 }

@@ -14,6 +14,8 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::metrics::RelayMetrics;
+
 /// Loss rate thresholds for FEC level adjustment
 const LOW_LOSS_THRESHOLD: f64 = 0.01; // 1% loss - minimal FEC
 const MED_LOSS_THRESHOLD: f64 = 0.05; // 5% loss - moderate FEC
@@ -302,6 +304,17 @@ impl AdaptiveFec {
     /// Record a successful recovery
     pub fn record_recovery(&mut self) {
         self.stats.recoveries += 1;
+    }
+
+    /// Record a successful recovery with metrics reporting
+    pub fn record_recovery_with_metrics(&mut self, metrics: &RelayMetrics) {
+        self.stats.recoveries += 1;
+        metrics.record_fec_recovered(1);
+    }
+
+    /// Record FEC packets sent with metrics reporting  
+    pub fn record_fec_sent_with_metrics(&self, count: u64, metrics: &RelayMetrics) {
+        metrics.record_fec_sent(count);
     }
 
     /// Calculate current loss rate

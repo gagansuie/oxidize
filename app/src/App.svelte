@@ -266,9 +266,9 @@
         {#if errorMessage}
           <p class="error">{errorMessage}</p>
         {:else if status.connected}
-          {#if status.original_ip}
+          {#if status.ip}
             <p class="ip">
-              Protected IP: <strong>{status.original_ip}</strong>
+              Protected IP: <strong>{status.ip}</strong>
             </p>
           {/if}
           <p class="server">

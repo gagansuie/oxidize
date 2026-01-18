@@ -11,6 +11,12 @@ export interface ConnectionStatus {
     compression_saved: number;
     latency_ms: number | null;
     direct_latency_ms: number | null;
+    // ML metrics from backend
+    fec_recovered: number;
+    fec_sent: number;
+    loss_predictions: number;
+    congestion_adjustments: number;
+    path_switches: number;
 }
 
 export interface Server {

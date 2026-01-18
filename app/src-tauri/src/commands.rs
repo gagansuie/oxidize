@@ -19,6 +19,12 @@ pub struct ConnectionStatus {
     pub compression_saved: u64,
     pub latency_ms: Option<u32>,
     pub direct_latency_ms: Option<u32>,
+    // ML metrics from backend
+    pub fec_recovered: u64,
+    pub fec_sent: u64,
+    pub loss_predictions: u64,
+    pub congestion_adjustments: u64,
+    pub path_switches: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +155,11 @@ pub async fn connect(
         compression_saved: 0,
         latency_ms: relay_latency,
         direct_latency_ms: direct_latency,
+        fec_recovered: 0,
+        fec_sent: 0,
+        loss_predictions: 0,
+        congestion_adjustments: 0,
+        path_switches: 0,
     })
 }
 
@@ -171,6 +182,11 @@ pub async fn disconnect() -> Result<ConnectionStatus, String> {
             compression_saved: 0,
             latency_ms: None,
             direct_latency_ms: None,
+            fec_recovered: 0,
+            fec_sent: 0,
+            loss_predictions: 0,
+            congestion_adjustments: 0,
+            path_switches: 0,
         });
     }
 
@@ -203,6 +219,13 @@ pub async fn disconnect() -> Result<ConnectionStatus, String> {
         compression_saved,
         latency_ms: None,
         direct_latency_ms: None,
+        fec_recovered: response["data"]["fec_recovered"].as_u64().unwrap_or(0),
+        fec_sent: response["data"]["fec_sent"].as_u64().unwrap_or(0),
+        loss_predictions: response["data"]["loss_predictions"].as_u64().unwrap_or(0),
+        congestion_adjustments: response["data"]["congestion_adjustments"]
+            .as_u64()
+            .unwrap_or(0),
+        path_switches: response["data"]["path_switches"].as_u64().unwrap_or(0),
     })
 }
 
@@ -223,6 +246,11 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
             compression_saved: 0,
             latency_ms: None,
             direct_latency_ms: None,
+            fec_recovered: 0,
+            fec_sent: 0,
+            loss_predictions: 0,
+            congestion_adjustments: 0,
+            path_switches: 0,
         });
     }
 
@@ -274,6 +302,23 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
                 .unwrap_or(0),
             latency_ms: relay_latency,
             direct_latency_ms,
+            fec_recovered: data
+                .get("fec_recovered")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            fec_sent: data.get("fec_sent").and_then(|v| v.as_u64()).unwrap_or(0),
+            loss_predictions: data
+                .get("loss_predictions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            congestion_adjustments: data
+                .get("congestion_adjustments")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            path_switches: data
+                .get("path_switches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
         });
     }
 
@@ -290,6 +335,11 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
         compression_saved: 0,
         latency_ms: None,
         direct_latency_ms: None,
+        fec_recovered: 0,
+        fec_sent: 0,
+        loss_predictions: 0,
+        congestion_adjustments: 0,
+        path_switches: 0,
     })
 }
 
@@ -599,21 +649,16 @@ async fn get_external_ip() -> Result<String, String> {
     Ok(response.trim().to_string())
 }
 
-/// Get the relay server's external IP address
+/// Get the relay server's external IPv4 address
 async fn get_server_ip() -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct IpResponse {
-        ip: String,
-    }
+    // Resolve relay hostname to IPv4 address directly
+    let ipv4_addr = format!("{}:0", RELAY_HOST)
+        .to_socket_addrs()
+        .map_err(|e| format!("Failed to resolve relay host: {}", e))?
+        .find(|addr| addr.is_ipv4())
+        .ok_or_else(|| "No IPv4 address found for relay".to_string())?;
 
-    let url = format!("http://{}:{}/ip", RELAY_HOST, 9090);
-    let response: IpResponse = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Failed to fetch server IP: {}", e))?
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse server IP: {}", e))?;
-    Ok(response.ip)
+    Ok(ipv4_addr.ip().to_string())
 }
 
 async fn is_daemon_running() -> bool {

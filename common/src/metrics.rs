@@ -18,6 +18,12 @@ pub struct RelayMetrics {
     pub total_encode_time_us: Arc<AtomicU64>,
     pub total_decode_time_us: Arc<AtomicU64>,
     pub latency_samples: Arc<AtomicU64>,
+    // ML metrics
+    pub fec_packets_recovered: Arc<AtomicU64>,
+    pub fec_packets_sent: Arc<AtomicU64>,
+    pub loss_predictions: Arc<AtomicU64>,
+    pub congestion_adjustments: Arc<AtomicU64>,
+    pub path_switches: Arc<AtomicU64>,
 }
 
 impl Default for RelayMetrics {
@@ -42,6 +48,12 @@ impl RelayMetrics {
             total_encode_time_us: Arc::new(AtomicU64::new(0)),
             total_decode_time_us: Arc::new(AtomicU64::new(0)),
             latency_samples: Arc::new(AtomicU64::new(0)),
+            // ML metrics
+            fec_packets_recovered: Arc::new(AtomicU64::new(0)),
+            fec_packets_sent: Arc::new(AtomicU64::new(0)),
+            loss_predictions: Arc::new(AtomicU64::new(0)),
+            congestion_adjustments: Arc::new(AtomicU64::new(0)),
+            path_switches: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -66,6 +78,28 @@ impl RelayMetrics {
 
     pub fn record_compression_saved(&self, bytes: u64) {
         self.compression_saved.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    // ML metric recording methods
+    pub fn record_fec_recovered(&self, packets: u64) {
+        self.fec_packets_recovered
+            .fetch_add(packets, Ordering::Relaxed);
+    }
+
+    pub fn record_fec_sent(&self, packets: u64) {
+        self.fec_packets_sent.fetch_add(packets, Ordering::Relaxed);
+    }
+
+    pub fn record_loss_prediction(&self) {
+        self.loss_predictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_congestion_adjustment(&self) {
+        self.congestion_adjustments.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_path_switch(&self) {
+        self.path_switches.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record processing latency for a single packet
@@ -130,6 +164,12 @@ impl RelayMetrics {
                 0.0
             },
             latency_samples: samples,
+            // ML metrics
+            fec_packets_recovered: self.fec_packets_recovered.load(Ordering::Relaxed),
+            fec_packets_sent: self.fec_packets_sent.load(Ordering::Relaxed),
+            loss_predictions: self.loss_predictions.load(Ordering::Relaxed),
+            congestion_adjustments: self.congestion_adjustments.load(Ordering::Relaxed),
+            path_switches: self.path_switches.load(Ordering::Relaxed),
         }
     }
 }
@@ -150,6 +190,12 @@ pub struct Stats {
     pub avg_encode_latency_us: f64,
     pub avg_decode_latency_us: f64,
     pub latency_samples: u64,
+    // ML metrics
+    pub fec_packets_recovered: u64,
+    pub fec_packets_sent: u64,
+    pub loss_predictions: u64,
+    pub congestion_adjustments: u64,
+    pub path_switches: u64,
 }
 
 impl Stats {

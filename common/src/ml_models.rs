@@ -1448,10 +1448,38 @@ impl MlEngine {
         self.loss_predictor.predict(features, &[])
     }
 
+    /// Get FEC decision and record to metrics
+    pub fn fec_decision_with_metrics(
+        &self,
+        features: &NetworkFeatures,
+        metrics: &crate::metrics::RelayMetrics,
+    ) -> FecDecision {
+        let decision = self.loss_predictor.predict(features, &[]);
+        // Record that a loss prediction was made
+        if decision.loss_probability > 0.0 {
+            metrics.record_loss_prediction();
+        }
+        decision
+    }
+
     /// Get congestion control action
     pub fn congestion_action(&mut self) -> (DrlAction, u32) {
         let action = self.congestion_controller.select_action();
         let cwnd = self.congestion_controller.apply_action(action);
+        (action, cwnd)
+    }
+
+    /// Get congestion control action and record to metrics
+    pub fn congestion_action_with_metrics(
+        &mut self,
+        metrics: &crate::metrics::RelayMetrics,
+    ) -> (DrlAction, u32) {
+        let action = self.congestion_controller.select_action();
+        let cwnd = self.congestion_controller.apply_action(action);
+        // Record congestion adjustment if action is not Maintain
+        if action != DrlAction::Maintain {
+            metrics.record_congestion_adjustment();
+        }
         (action, cwnd)
     }
 
@@ -1520,6 +1548,21 @@ impl MlEngine {
     /// Select best path for traffic type
     pub fn select_path(&mut self, traffic: TrafficContext) -> PathId {
         self.path_selector.select_path(traffic)
+    }
+
+    /// Select best path for traffic type and record to metrics if path changed
+    pub fn select_path_with_metrics(
+        &mut self,
+        traffic: TrafficContext,
+        last_path: PathId,
+        metrics: &crate::metrics::RelayMetrics,
+    ) -> PathId {
+        let new_path = self.path_selector.select_path(traffic);
+        // Record path switch if path changed
+        if new_path != last_path {
+            metrics.record_path_switch();
+        }
+        new_path
     }
 
     /// Update path metrics

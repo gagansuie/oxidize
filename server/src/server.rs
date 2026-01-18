@@ -690,7 +690,8 @@ impl RelayServer {
                             engine.update(&features, 0.0, 0);
 
                             // Get FEC decision (uses heuristics or ML depending on mode)
-                            let fec = engine.fec_decision(&features);
+                            // Records loss predictions to metrics for frontend display
+                            let fec = engine.fec_decision_with_metrics(&features, &metrics);
                             if fec.inject_fec && fec.redundancy_ratio > 0.0 {
                                 trace!(
                                     "ML FEC decision: inject with {:.1}% redundancy",
