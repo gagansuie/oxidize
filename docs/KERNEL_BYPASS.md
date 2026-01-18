@@ -291,6 +291,5 @@ for (allocs, frees, failures) in runtime.pool_stats() {
 
 ## See Also
 
-- [DEPLOY.md](DEPLOY.md) - Deployment guide (Fly.io + Vultr)
 - [OXTUNNEL.md](OXTUNNEL.md) - OxTunnel protocol specification
 - [SECURITY.md](SECURITY.md) - Security hardening

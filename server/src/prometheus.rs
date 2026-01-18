@@ -220,6 +220,18 @@ impl PrometheusMetrics {
                     .body(Body::from(r#"{"status":"healthy","ready":true}"#))
                     .unwrap())
             }
+            "/ip" => {
+                // Return server's external IP for client display
+                // On Fly.io, FLY_PUBLIC_IP contains the instance's public IPv4
+                let ip = std::env::var("FLY_PUBLIC_IP").unwrap_or_else(|_| "unknown".to_string());
+                let json = format!(r#"{{"ip":"{}"}}"#, ip);
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Body::from(json))
+                    .unwrap())
+            }
             "/metrics" | "/" => {
                 // Prometheus metrics endpoint
                 let encoder = TextEncoder::new();

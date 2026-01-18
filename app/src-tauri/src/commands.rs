@@ -130,8 +130,8 @@ pub async fn connect(
 
     crate::set_connected(true);
 
-    // Fetch the user's new external IP (should be the relay server's IP)
-    let external_ip = get_external_ip().await.ok();
+    // Fetch the relay server's external IP (this is what UDP traffic appears as)
+    let server_ip = get_server_ip().await.ok();
 
     // Measure latency through relay
     let relay_latency = ping_relay().await.ok();
@@ -139,7 +139,7 @@ pub async fn connect(
     Ok(ConnectionStatus {
         connected: true,
         server: Some(server_id),
-        ip: external_ip,
+        ip: server_ip,
         original_ip,
         uptime_secs: 0,
         bytes_sent: 0,
@@ -237,8 +237,8 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
     let direct_latency_ms = *state.direct_latency_ms.lock().await;
 
     if connected {
-        // Fetch user's external IP (should be relay server's IP when connected)
-        let external_ip = get_external_ip().await.ok();
+        // Fetch the relay server's external IP (this is what UDP traffic appears as)
+        let server_ip = get_server_ip().await.ok();
 
         // Measure current relay latency
         let relay_latency = ping_relay().await.ok();
@@ -249,7 +249,7 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
                 .get("server_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            ip: external_ip,
+            ip: server_ip,
             original_ip,
             uptime_secs: data
                 .get("uptime_secs")
@@ -597,6 +597,23 @@ async fn get_external_ip() -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to read IP: {}", e))?;
     Ok(response.trim().to_string())
+}
+
+/// Get the relay server's external IP address
+async fn get_server_ip() -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct IpResponse {
+        ip: String,
+    }
+
+    let url = format!("http://{}:{}/ip", RELAY_HOST, 9090);
+    let response: IpResponse = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("Failed to fetch server IP: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse server IP: {}", e))?;
+    Ok(response.ip)
 }
 
 async fn is_daemon_running() -> bool {

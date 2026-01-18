@@ -377,20 +377,37 @@ impl RelayClient {
             tokio::select! {
                 // Receive packets from the channel (from NFQUEUE)
                 Some(packet) = packet_rx.recv() => {
+                    // Apply compression if enabled and packet is large enough
+                    let (payload, compressed_flag) = if self.config.enable_compression
+                        && packet.len() >= self.config.compression_threshold
+                    {
+                        match compress_data(&packet) {
+                            Ok(compressed) if compressed.len() < packet.len() => {
+                                let saved = packet.len() - compressed.len();
+                                self.metrics.record_compression_saved(saved as u64);
+                                (compressed, 1u8)
+                            }
+                            _ => (packet.clone(), 0u8),
+                        }
+                    } else {
+                        (packet.clone(), 0u8)
+                    };
+
                     // Send via QUIC datagram for low latency
-                    // Add 16-byte header: connection_id (8) + sequence (8)
+                    // Add 17-byte header: connection_id (8) + sequence (8) + compressed (1)
                     let sequence = SEQUENCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let mut datagram = Vec::with_capacity(16 + packet.len());
+                    let mut datagram = Vec::with_capacity(17 + payload.len());
                     datagram.extend_from_slice(&self.connection_id.to_le_bytes());
                     datagram.extend_from_slice(&sequence.to_le_bytes());
-                    datagram.extend_from_slice(&packet);
+                    datagram.push(compressed_flag);
+                    datagram.extend_from_slice(&payload);
 
                     if let Some(max_size) = connection.max_datagram_size() {
                         if datagram.len() <= max_size {
                             match connection.send_datagram(datagram.into()) {
                                 Ok(_) => {
                                     forwarded_count += 1;
-                                    self.metrics.record_sent(packet.len() as u64);
+                                    self.metrics.record_sent(payload.len() as u64);
                                 }
                                 Err(e) => {
                                     failed_count += 1;

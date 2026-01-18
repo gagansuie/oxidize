@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-[Website](https://oxd.sh) · [Download](https://oxd.sh/download) · [Documentation](docs/) · [Speed Test](#speed-test) · [Deploy](docs/DEPLOY.md)
+[Website](https://oxd.sh) · [Download](https://oxd.sh/download) · [Documentation](docs/) · [Speed Test](#speed-test)
 
 </div>
 
@@ -383,10 +383,6 @@ curl http://localhost:9090/metrics
 
 Use these metrics to identify bottlenecks and tune `ack_batch_size` for your workload.
 
-## Deployment
-
-See [DEPLOY.md](docs/DEPLOY.md) for production deployment guide.
-
 ## Desktop App
 
 The Oxidize desktop app provides a modern GUI for managing connections.
@@ -513,7 +509,6 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (LSTM, DQN, UCB1)
 - [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
-- [DEPLOY.md](docs/DEPLOY.md) - Server deployment guide (Fly.io + Vultr)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
 - [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - 100+ Gbps kernel bypass optimizations
 - [OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md) - Performance tuning guide

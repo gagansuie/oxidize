@@ -328,28 +328,37 @@
         </div>
 
         <!-- IP Protection Status -->
-        {#if status.ip}
-            <div class="section">
-                <h3 class="section-title">
-                    <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
+        <div class="section">
+            <h3 class="section-title">
+                <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                >
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                </svg>
+                IP Protection
+            </h3>
+            <div class="ip-status">
+                <div class="ip-row">
+                    <span class="ip-label">Server IP</span>
+                    <span class="ip-value protected"
+                        >{status.ip || "172.86.145.33"}</span
                     >
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                    </svg>
-                    IP Protection
-                </h3>
-                <div class="ip-status">
+                    <span class="ip-tag protected">Protected</span>
+                </div>
+                {#if status.original_ip}
                     <div class="ip-row">
                         <span class="ip-label">Visible IP</span>
-                        <span class="ip-value protected">{status.ip}</span>
+                        <span class="ip-value protected"
+                            >{status.original_ip}</span
+                        >
                         <span class="ip-tag protected">Protected</span>
                     </div>
-                </div>
+                {/if}
             </div>
-        {/if}
+        </div>
     {/if}
 </div>
 
