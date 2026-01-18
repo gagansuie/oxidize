@@ -159,7 +159,8 @@ impl RelayClient {
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
 
-        // Enable BBR congestion control for better throughput
+        // Use Quinn's native BBR congestion control
+        // Note: Our BBRv4 is for kernel bypass mode only (can't access Quinn's RttEstimator)
         transport_config
             .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
@@ -337,13 +338,7 @@ impl RelayClient {
                 .map(|ip| SocketAddr::new(ip, 0))
                 .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
             let path_id = PathId::new(local_addr, self.server_addr);
-            let metrics = PathMetrics {
-                rtt_ms: 50.0,
-                bandwidth: 100_000_000,
-                loss_rate: 0.0,
-                jitter_ms: 5.0,
-                ..Default::default()
-            };
+            let metrics = PathMetrics::new(50.0, 100_000_000, 0.0, 5.0);
             mp.add_path(path_id, metrics);
             info!("🔀 Primary path registered with multipath scheduler");
         }
@@ -490,13 +485,7 @@ impl RelayClient {
                 .map(|ip| SocketAddr::new(ip, 0))
                 .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
             let path_id = PathId::new(local_addr, self.server_addr);
-            let metrics = PathMetrics {
-                rtt_ms: 50.0, // Initial estimate
-                bandwidth: 100_000_000,
-                loss_rate: 0.0,
-                jitter_ms: 5.0,
-                ..Default::default()
-            };
+            let metrics = PathMetrics::new(50.0, 100_000_000, 0.0, 5.0);
             mp.add_path(path_id, metrics);
             info!("🔀 Primary path registered with multipath scheduler");
         }

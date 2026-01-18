@@ -42,6 +42,208 @@ use ring::rand::{SecureRandom, SystemRandom};
 use tokio::sync::RwLock;
 
 // ============================================================================
+// Entropy Detection for Smart Compression
+// ============================================================================
+
+/// Entropy estimator for detecting already-compressed/encrypted data
+/// High entropy data should skip compression (wastes CPU, may increase size)
+pub struct EntropyEstimator {
+    /// Threshold above which data is considered high-entropy (0.0 - 1.0)
+    /// Default: 0.9 (90% of max entropy)
+    threshold: f64,
+}
+
+impl EntropyEstimator {
+    pub const DEFAULT_THRESHOLD: f64 = 0.9;
+
+    pub fn new() -> Self {
+        Self {
+            threshold: Self::DEFAULT_THRESHOLD,
+        }
+    }
+
+    pub fn with_threshold(threshold: f64) -> Self {
+        Self {
+            threshold: threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Fast entropy estimation using byte frequency analysis
+    /// Returns normalized entropy (0.0 = no entropy, 1.0 = max entropy)
+    /// Uses sampling for large buffers to maintain performance
+    #[inline]
+    pub fn estimate(&self, data: &[u8]) -> f64 {
+        if data.is_empty() {
+            return 0.0;
+        }
+
+        // Sample for large buffers (check first 1KB + last 512B)
+        let sample_size = 1536;
+        let sample: &[u8] = if data.len() > sample_size * 2 {
+            // For large data, sample beginning and end
+            &data[..sample_size.min(data.len())]
+        } else {
+            data
+        };
+
+        // Count byte frequencies
+        let mut freq = [0u32; 256];
+        for &byte in sample {
+            freq[byte as usize] += 1;
+        }
+
+        // Calculate Shannon entropy
+        let len = sample.len() as f64;
+        let mut entropy = 0.0f64;
+
+        for &count in &freq {
+            if count > 0 {
+                let p = count as f64 / len;
+                entropy -= p * p.log2();
+            }
+        }
+
+        // Normalize to 0-1 range (max entropy for 256 symbols is 8 bits)
+        entropy / 8.0
+    }
+
+    /// Check if data should skip compression (high entropy = already compressed/encrypted)
+    #[inline]
+    pub fn should_skip_compression(&self, data: &[u8]) -> bool {
+        // Skip small payloads (compression overhead not worth it)
+        if data.len() < 64 {
+            return true;
+        }
+
+        self.estimate(data) >= self.threshold
+    }
+
+    /// Quick heuristic check for common compressed/encrypted formats
+    /// Much faster than full entropy calculation
+    #[inline]
+    pub fn quick_skip_check(&self, data: &[u8]) -> bool {
+        if data.len() < 4 {
+            return true;
+        }
+
+        // Check magic bytes for common compressed formats
+        let magic = &data[..4.min(data.len())];
+
+        // Gzip
+        if magic.len() >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+            return true;
+        }
+
+        // Zlib
+        if magic.len() >= 2
+            && (magic[0] == 0x78
+                && (magic[1] == 0x01 || magic[1] == 0x5e || magic[1] == 0x9c || magic[1] == 0xda))
+        {
+            return true;
+        }
+
+        // PNG
+        if magic.len() >= 4
+            && magic[0] == 0x89
+            && magic[1] == 0x50
+            && magic[2] == 0x4e
+            && magic[3] == 0x47
+        {
+            return true;
+        }
+
+        // JPEG
+        if magic.len() >= 2 && magic[0] == 0xff && magic[1] == 0xd8 {
+            return true;
+        }
+
+        // ZIP/DOCX/JAR
+        if magic.len() >= 4
+            && magic[0] == 0x50
+            && magic[1] == 0x4b
+            && magic[2] == 0x03
+            && magic[3] == 0x04
+        {
+            return true;
+        }
+
+        // RAR
+        if magic.len() >= 4
+            && magic[0] == 0x52
+            && magic[1] == 0x61
+            && magic[2] == 0x72
+            && magic[3] == 0x21
+        {
+            return true;
+        }
+
+        // 7z
+        if magic.len() >= 2 && magic[0] == 0x37 && magic[1] == 0x7a {
+            return true;
+        }
+
+        // Brotli
+        if magic.len() >= 1 && (magic[0] & 0x0f) == 0x0b {
+            return true;
+        }
+
+        // LZ4 frame
+        if magic.len() >= 4
+            && magic[0] == 0x04
+            && magic[1] == 0x22
+            && magic[2] == 0x4d
+            && magic[3] == 0x18
+        {
+            return true;
+        }
+
+        // Zstd
+        if magic.len() >= 4
+            && magic[0] == 0x28
+            && magic[1] == 0xb5
+            && magic[2] == 0x2f
+            && magic[3] == 0xfd
+        {
+            return true;
+        }
+
+        false
+    }
+
+    /// Combined check: quick magic byte check + entropy estimation if needed
+    #[inline]
+    pub fn should_compress(&self, data: &[u8]) -> bool {
+        // Fast path: check magic bytes
+        if self.quick_skip_check(data) {
+            return false;
+        }
+
+        // Slow path: estimate entropy
+        !self.should_skip_compression(data)
+    }
+}
+
+impl Default for EntropyEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Global entropy estimator instance for convenience
+static ENTROPY_ESTIMATOR: std::sync::OnceLock<EntropyEstimator> = std::sync::OnceLock::new();
+
+/// Get or initialize the global entropy estimator
+pub fn entropy_estimator() -> &'static EntropyEstimator {
+    ENTROPY_ESTIMATOR.get_or_init(EntropyEstimator::new)
+}
+
+/// Convenience function: check if data should be compressed
+#[inline]
+pub fn should_compress(data: &[u8]) -> bool {
+    entropy_estimator().should_compress(data)
+}
+
+// ============================================================================
 // Protocol Constants
 // ============================================================================
 

@@ -121,11 +121,18 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
 - **Smart Traffic Detection** - Auto-detects gaming/VoIP ports for optimal routing
 
 ### 🧠 Smart Traffic Management
-- **BBRv3 Congestion Control** - Adaptive bandwidth probing with gaming mode
+- **BBRv4 Congestion Control** - 10x CPU efficiency over traditional implementations
+  - Fixed-point arithmetic (no f64 in hot paths)
+  - Cache-line aligned structures (64-byte alignment)
+  - Batch ACK processing (64 ACKs at once)
+  - Lock-free atomics (zero mutex overhead)
+  - Gaming mode (low latency) and throughput mode (bulk transfer)
 - **HTTP/3 Priority Scheduler** - Real-time traffic prioritization
 - **Traffic Classification** - Auto-detects gaming/streaming/VoIP for optimal handling
 - **Smart Split-Tunneling** - Gaming tunneled for optimization, streaming bypassed for clean IP
 - **Edge Caching** - LRU cache for static content at relay points
+
+> BBRv4 is used for kernel bypass mode. Normal QUIC uses Quinn's native BBR. See [BBRV4.md](docs/BBRV4.md).
 
 ### 🧠 Deep Learning Driven Engine (Pure Rust)
 Self-improving network optimization using neural networks:
@@ -296,8 +303,8 @@ rate_limit_per_ip = 100
 enable_rohc = true
 rohc_max_size = 1400
 
-# Congestion control (bbr, bbr_v2, bbr_v3, cubic, gaming)
-congestion_algorithm = "bbr_v3"
+# Congestion control (bbr, bbr_v4, cubic, gaming)
+congestion_algorithm = "bbr_v4"
 
 # Priority scheduling
 enable_priority_scheduler = true
@@ -507,6 +514,7 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 ## Documentation
 
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
+- [BBRV4.md](docs/BBRV4.md) - BBRv4 congestion control (10x CPU efficiency)
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (LSTM, DQN, UCB1)
 - [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection

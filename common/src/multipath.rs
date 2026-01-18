@@ -8,7 +8,80 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-/// Path quality metrics
+/// EMA (Exponential Moving Average) estimator for path metrics
+/// Provides faster response to network changes than rolling window
+#[derive(Debug, Clone)]
+pub struct EmaEstimator {
+    /// Current smoothed value
+    value: f64,
+    /// Smoothing factor (0.0 - 1.0, higher = more weight to recent samples)
+    alpha: f64,
+    /// Whether we have at least one sample
+    initialized: bool,
+}
+
+impl EmaEstimator {
+    /// Create with default alpha (0.3 - balanced responsiveness)
+    pub fn new() -> Self {
+        Self::with_alpha(0.3)
+    }
+
+    /// Create with custom alpha
+    /// - Higher alpha (0.5-0.9): Faster response, more noise
+    /// - Lower alpha (0.1-0.3): Smoother, slower response
+    pub fn with_alpha(alpha: f64) -> Self {
+        Self {
+            value: 0.0,
+            alpha: alpha.clamp(0.01, 0.99),
+            initialized: false,
+        }
+    }
+
+    /// Create for fast response (gaming/realtime)
+    pub fn fast() -> Self {
+        Self::with_alpha(0.5)
+    }
+
+    /// Create for stable estimation (bulk transfers)
+    pub fn stable() -> Self {
+        Self::with_alpha(0.15)
+    }
+
+    /// Update with a new sample
+    pub fn update(&mut self, sample: f64) {
+        if !self.initialized {
+            self.value = sample;
+            self.initialized = true;
+        } else {
+            // EMA formula: new_value = alpha * sample + (1 - alpha) * old_value
+            self.value = self.alpha * sample + (1.0 - self.alpha) * self.value;
+        }
+    }
+
+    /// Get current estimated value
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// Check if initialized
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Reset the estimator
+    pub fn reset(&mut self) {
+        self.value = 0.0;
+        self.initialized = false;
+    }
+}
+
+impl Default for EmaEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Path quality metrics with EMA estimation
 #[derive(Debug, Clone)]
 pub struct PathMetrics {
     /// Round-trip time in milliseconds
@@ -25,6 +98,14 @@ pub struct PathMetrics {
     pub packets_sent: u64,
     /// Packets received on this path
     pub packets_received: u64,
+    /// EMA estimator for RTT
+    rtt_ema: EmaEstimator,
+    /// EMA estimator for loss rate
+    loss_ema: EmaEstimator,
+    /// EMA estimator for bandwidth
+    bw_ema: EmaEstimator,
+    /// EMA estimator for jitter
+    jitter_ema: EmaEstimator,
 }
 
 impl Default for PathMetrics {
@@ -37,12 +118,109 @@ impl Default for PathMetrics {
             last_updated: Instant::now(),
             packets_sent: 0,
             packets_received: 0,
+            rtt_ema: EmaEstimator::new(),
+            loss_ema: EmaEstimator::new(),
+            bw_ema: EmaEstimator::new(),
+            jitter_ema: EmaEstimator::new(),
         }
     }
 }
 
 impl PathMetrics {
+    /// Create with specific initial values
+    pub fn new(rtt_ms: f64, bandwidth: u64, loss_rate: f64, jitter_ms: f64) -> Self {
+        PathMetrics {
+            rtt_ms,
+            loss_rate,
+            bandwidth,
+            jitter_ms,
+            last_updated: Instant::now(),
+            packets_sent: 0,
+            packets_received: 0,
+            rtt_ema: EmaEstimator::new(),
+            loss_ema: EmaEstimator::new(),
+            bw_ema: EmaEstimator::new(),
+            jitter_ema: EmaEstimator::new(),
+        }
+    }
+
+    /// Create with fast EMA for gaming/realtime traffic
+    pub fn for_gaming() -> Self {
+        PathMetrics {
+            rtt_ema: EmaEstimator::fast(),
+            loss_ema: EmaEstimator::fast(),
+            bw_ema: EmaEstimator::fast(),
+            jitter_ema: EmaEstimator::fast(),
+            ..Default::default()
+        }
+    }
+
+    /// Create with stable EMA for bulk transfers
+    pub fn for_bulk() -> Self {
+        PathMetrics {
+            rtt_ema: EmaEstimator::stable(),
+            loss_ema: EmaEstimator::stable(),
+            bw_ema: EmaEstimator::stable(),
+            jitter_ema: EmaEstimator::stable(),
+            ..Default::default()
+        }
+    }
+
+    /// Update RTT with EMA smoothing
+    pub fn update_rtt(&mut self, rtt_ms: f64) {
+        self.rtt_ema.update(rtt_ms);
+        self.rtt_ms = self.rtt_ema.value();
+        self.last_updated = Instant::now();
+    }
+
+    /// Update loss rate with EMA smoothing
+    pub fn update_loss(&mut self, loss_rate: f64) {
+        self.loss_ema.update(loss_rate);
+        self.loss_rate = self.loss_ema.value();
+        self.last_updated = Instant::now();
+    }
+
+    /// Update bandwidth with EMA smoothing
+    pub fn update_bandwidth(&mut self, bandwidth: u64) {
+        self.bw_ema.update(bandwidth as f64);
+        self.bandwidth = self.bw_ema.value() as u64;
+        self.last_updated = Instant::now();
+    }
+
+    /// Update jitter with EMA smoothing
+    pub fn update_jitter(&mut self, jitter_ms: f64) {
+        self.jitter_ema.update(jitter_ms);
+        self.jitter_ms = self.jitter_ema.value();
+        self.last_updated = Instant::now();
+    }
+
+    /// Update all metrics at once with EMA smoothing
+    pub fn update_all(&mut self, rtt_ms: f64, loss_rate: f64, bandwidth: u64, jitter_ms: f64) {
+        self.update_rtt(rtt_ms);
+        self.update_loss(loss_rate);
+        self.update_bandwidth(bandwidth);
+        self.update_jitter(jitter_ms);
+    }
+
+    /// Record a sent packet
+    pub fn record_sent(&mut self) {
+        self.packets_sent += 1;
+    }
+
+    /// Record a received packet with RTT
+    pub fn record_received(&mut self, rtt_ms: f64) {
+        self.packets_received += 1;
+        self.update_rtt(rtt_ms);
+
+        // Update loss rate based on packet counts
+        if self.packets_sent > 0 {
+            let actual_loss = 1.0 - (self.packets_received as f64 / self.packets_sent as f64);
+            self.update_loss(actual_loss.max(0.0));
+        }
+    }
+
     /// Calculate path score (higher is better)
+    /// Uses EMA-smoothed values for stable scoring
     pub fn score(&self) -> f64 {
         // Weight factors
         const RTT_WEIGHT: f64 = 0.3;
@@ -62,9 +240,32 @@ impl PathMetrics {
             + JITTER_WEIGHT * jitter_score
     }
 
+    /// Calculate score optimized for gaming (prioritize low latency and jitter)
+    pub fn gaming_score(&self) -> f64 {
+        const RTT_WEIGHT: f64 = 0.4;
+        const LOSS_WEIGHT: f64 = 0.2;
+        const BW_WEIGHT: f64 = 0.1;
+        const JITTER_WEIGHT: f64 = 0.3;
+
+        let rtt_score = 1.0 / (1.0 + self.rtt_ms / 50.0); // Stricter RTT scoring
+        let loss_score = 1.0 - self.loss_rate;
+        let bw_score = (self.bandwidth as f64 / 1_000_000.0).min(1.0); // 1MB/s is enough for gaming
+        let jitter_score = 1.0 / (1.0 + self.jitter_ms / 20.0); // Stricter jitter scoring
+
+        RTT_WEIGHT * rtt_score
+            + LOSS_WEIGHT * loss_score
+            + BW_WEIGHT * bw_score
+            + JITTER_WEIGHT * jitter_score
+    }
+
     /// Check if path is healthy
     pub fn is_healthy(&self) -> bool {
         self.loss_rate < 0.5 && self.rtt_ms < 1000.0
+    }
+
+    /// Check if path is suitable for gaming
+    pub fn is_gaming_quality(&self) -> bool {
+        self.loss_rate < 0.02 && self.rtt_ms < 100.0 && self.jitter_ms < 20.0
     }
 
     /// Check if metrics are stale

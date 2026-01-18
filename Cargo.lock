@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-app"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "anyhow",
  "oxidize-common",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-common"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3912,6 +3912,7 @@ dependencies = [
  "lz4_flex",
  "ndarray",
  "nix 0.27.1",
+ "quinn",
  "rand 0.8.5",
  "rayon",
  "reed-solomon-erasure",
@@ -3929,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-daemon"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "anyhow",
  "oxidize-common",
@@ -4916,7 +4917,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "relay-client"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4938,7 +4939,7 @@ dependencies = [
 
 [[package]]
 name = "relay-server"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "anyhow",
  "bytes",

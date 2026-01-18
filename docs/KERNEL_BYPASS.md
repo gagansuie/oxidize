@@ -244,13 +244,86 @@ cargo build --release --features kernel-bypass
 sudo ./target/release/oxidize-server --listen 0.0.0.0:4433
 ```
 
+## Bare Metal Provider Comparison
+
+For DPDK/kernel bypass, you need bare metal with direct NIC access. Here's how the top providers compare:
+
+### Vultr vs OVHcloud
+
+| Factor | Vultr | OVHcloud | Winner |
+|--------|-------|----------|--------|
+| **Entry Price** | ~$120/mo | ~$62/mo (Rise) | **OVHcloud** |
+| **Network Speed** | 10-25 Gbps standard | 1-10 Gbps | **Vultr** |
+| **Bandwidth** | 5-25 TB included | **Unlimited** (excl. APAC) | **OVHcloud** |
+| **Global Locations** | 32 cities, 19 countries | ~30 DCs (US, EU, APAC) | **Vultr** |
+| **DDoS Protection** | Basic included | Robust included | **OVHcloud** |
+| **Provisioning** | Instant (minutes) | Minutes-hours | **Vultr** |
+| **DPDK NICs** | Intel (i350, x520, x710) | Intel/Mellanox on Scale+ | Tie |
+
+### Recommendation
+
+| Priority | Choose | Why |
+|----------|--------|-----|
+| **Best Performance** | Vultr | 25 Gbps NICs, AMD EPYC, faster provisioning |
+| **Budget/Pre-Profit** | OVHcloud | 50% cheaper, unlimited bandwidth, startup credits |
+| **Global Scale** | Vultr | More edge locations worldwide |
+| **Heavy Egress** | OVHcloud | Unlimited bandwidth saves on data transfer |
+
+### Vultr Bare Metal Options for DPDK
+
+| Config | Price | Specs | Use Case |
+|--------|-------|-------|----------|
+| AMD EPYC 4245P | ~$185/mo | 6c/12t, 32GB, **25 Gbps** | Entry DPDK |
+| AMD EPYC 4345P | ~$250/mo | 8c/16t, 128GB, **25 Gbps** | Production |
+| AMD EPYC 7443P | ~$350/mo | 24c/48t, 256GB, **25 Gbps** | High-traffic |
+
+### OVHcloud Options for DPDK
+
+| Config | Price | Specs | Use Case |
+|--------|-------|-------|----------|
+| Rise-1 | ~$62/mo | 4c, 32GB, 1 Gbps | Testing/Dev |
+| Advance-1 | ~$93/mo | 8c, 64GB, 1-5 Gbps | Small production |
+| Scale-a3 | ~$513/mo | 32c, 256GB, 10 Gbps | Enterprise |
+
+### Startup Programs (Free Credits)
+
+If pre-profit, apply for startup credits to avoid infrastructure costs:
+
+| Program | Credits | Best For |
+|---------|---------|----------|
+| **OVHcloud Startup** | Up to $12,000 | Networking projects |
+| **Microsoft Founders Hub** | $1,000-$5,000 | Quick approval |
+| **Equinix Metal Startup** | Varies | Premium bare metal |
+
+### Hardware Requirements Checklist
+
+Before choosing a provider, verify:
+
+- [ ] **VT-d / IOMMU** - Required for DPDK NIC passthrough
+- [ ] **Compatible NICs** - Intel i350/x520/x540/x710 or Mellanox ConnectX-4/5/6
+- [ ] **Hugepages Support** - 2MB or 1GB huge pages in BIOS
+- [ ] **No Hypervisor Layer** - True bare metal, not "dedicated" VMs
+
+### Phased Deployment Strategy
+
+```
+Phase 1 (0-300 users):     Fly.io Standard Mode ($15-30/mo)
+                           └── Validate demand before infrastructure spend
+
+Phase 2 (300-1000 users):  Single DPDK node ($65-185/mo)
+                           └── Hetzner/OVH for testing, Vultr for production
+
+Phase 3 (1000+ users):     Global DPDK deployment
+                           └── Use startup credits or revenue-funded bare metal
+```
+
 ## Feature Integration
 
 All Oxidize features work on top of kernel bypass:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  BBRv3 + ROHC + LZ4 + FEC + Deep Learning (ML)     │  ← All features enabled
+│  BBRv4 + ROHC + LZ4 + FEC + Deep Learning (ML)     │  ← All features enabled
 ├─────────────────────────────────────────────────────┤
 │  Ultra Kernel Bypass Runtime (100x optimized)      │  ← Custom implementation
 ├─────────────────────────────────────────────────────┤

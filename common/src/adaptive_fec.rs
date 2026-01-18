@@ -16,6 +16,44 @@ use std::time::{Duration, Instant};
 
 use crate::metrics::RelayMetrics;
 
+/// Burst interleaving depth for spreading FEC across time
+/// Higher depth = better burst loss protection, but more latency
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterleavingDepth {
+    /// No interleaving (default, lowest latency)
+    None,
+    /// Light interleaving (2 packet depth)
+    Light,
+    /// Medium interleaving (4 packet depth)
+    Medium,
+    /// Deep interleaving (8 packet depth, best burst protection)
+    Deep,
+}
+
+impl InterleavingDepth {
+    pub fn depth(&self) -> usize {
+        match self {
+            InterleavingDepth::None => 1,
+            InterleavingDepth::Light => 2,
+            InterleavingDepth::Medium => 4,
+            InterleavingDepth::Deep => 8,
+        }
+    }
+
+    /// Select interleaving depth based on observed burst loss characteristics
+    pub fn from_burst_length(avg_burst_length: usize) -> Self {
+        if avg_burst_length <= 1 {
+            InterleavingDepth::None
+        } else if avg_burst_length <= 2 {
+            InterleavingDepth::Light
+        } else if avg_burst_length <= 4 {
+            InterleavingDepth::Medium
+        } else {
+            InterleavingDepth::Deep
+        }
+    }
+}
+
 /// Loss rate thresholds for FEC level adjustment
 const LOW_LOSS_THRESHOLD: f64 = 0.01; // 1% loss - minimal FEC
 const MED_LOSS_THRESHOLD: f64 = 0.05; // 5% loss - moderate FEC
@@ -107,6 +145,16 @@ pub struct AdaptiveFec {
     prediction_ttl: Duration,
     /// Enable proactive FEC mode
     proactive_mode: bool,
+    /// Burst interleaving configuration
+    interleaving: InterleavingDepth,
+    /// Interleaving buffer for spreading packets
+    interleave_buffer: VecDeque<EncodedPacket>,
+    /// Burst loss tracker: consecutive losses
+    consecutive_losses: usize,
+    /// Maximum burst length observed
+    max_burst_length: usize,
+    /// Average burst length (EMA)
+    avg_burst_length: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,6 +169,8 @@ pub struct AdaptiveFecStats {
     pub prediction_updates: u64,
     /// Number of proactive FEC adjustments (before loss occurred)
     pub proactive_adjustments: u64,
+    /// Number of burst recoveries (interleaving helped)
+    pub burst_recoveries: u64,
 }
 
 impl AdaptiveFec {
@@ -142,6 +192,11 @@ impl AdaptiveFec {
             prediction_updated: Instant::now(),
             prediction_ttl: Duration::from_millis(200), // Predictions valid for 200ms
             proactive_mode: false,
+            interleaving: InterleavingDepth::None,
+            interleave_buffer: VecDeque::with_capacity(16),
+            consecutive_losses: 0,
+            max_burst_length: 0,
+            avg_burst_length: 0.0,
         }
     }
 
@@ -150,6 +205,32 @@ impl AdaptiveFec {
         let mut fec = Self::with_config(window_size, adjustment_interval);
         fec.proactive_mode = true;
         fec
+    }
+
+    /// Create with burst interleaving enabled
+    pub fn with_interleaving(
+        window_size: usize,
+        adjustment_interval: Duration,
+        depth: InterleavingDepth,
+    ) -> Self {
+        let mut fec = Self::with_config(window_size, adjustment_interval);
+        fec.interleaving = depth;
+        fec.interleave_buffer = VecDeque::with_capacity(depth.depth() * 8);
+        fec
+    }
+
+    /// Set interleaving depth
+    pub fn set_interleaving(&mut self, depth: InterleavingDepth) {
+        self.interleaving = depth;
+        if depth.depth() > 1 {
+            self.interleave_buffer = VecDeque::with_capacity(depth.depth() * 8);
+        }
+    }
+
+    /// Enable adaptive interleaving based on observed burst patterns
+    pub fn enable_adaptive_interleaving(&mut self) {
+        let depth = InterleavingDepth::from_burst_length(self.avg_burst_length.ceil() as usize);
+        self.set_interleaving(depth);
     }
 
     /// Enable or disable proactive FEC mode
@@ -241,6 +322,8 @@ impl AdaptiveFec {
                 level: FecLevel::None,
                 shards: vec![data.to_vec()],
                 shard_size: data.len(),
+                interleave_group: seq / self.interleaving.depth() as u64,
+                interleave_pos: (seq % self.interleaving.depth() as u64) as u8,
             });
         }
 
@@ -284,6 +367,8 @@ impl AdaptiveFec {
             level: self.level,
             shards,
             shard_size,
+            interleave_group: seq / self.interleaving.depth() as u64,
+            interleave_pos: (seq % self.interleaving.depth() as u64) as u8,
         })
     }
 
@@ -293,12 +378,54 @@ impl AdaptiveFec {
             if record.seq == seq && !record.acked {
                 record.acked = true;
                 self.stats.packets_acked += 1;
+
+                // Reset consecutive loss counter on successful ack
+                if self.consecutive_losses > 0 {
+                    // Update burst statistics before reset
+                    self.update_burst_stats(self.consecutive_losses);
+                    self.consecutive_losses = 0;
+                }
                 break;
             }
         }
 
         // Periodically adjust FEC level
         self.maybe_adjust_level();
+    }
+
+    /// Record a packet loss (for burst tracking)
+    pub fn record_loss(&mut self) {
+        self.consecutive_losses += 1;
+        self.stats.packets_lost += 1;
+
+        // Adjust interleaving if we're seeing bursts
+        if self.consecutive_losses > self.max_burst_length {
+            self.max_burst_length = self.consecutive_losses;
+
+            // Automatically enable deeper interleaving for burst losses
+            if self.consecutive_losses >= 4 && self.interleaving.depth() < 4 {
+                self.set_interleaving(InterleavingDepth::Medium);
+            } else if self.consecutive_losses >= 2 && self.interleaving.depth() < 2 {
+                self.set_interleaving(InterleavingDepth::Light);
+            }
+        }
+    }
+
+    /// Update burst length statistics
+    fn update_burst_stats(&mut self, burst_length: usize) {
+        // EMA with alpha = 0.3
+        const ALPHA: f64 = 0.3;
+        self.avg_burst_length = ALPHA * burst_length as f64 + (1.0 - ALPHA) * self.avg_burst_length;
+    }
+
+    /// Get current interleaving depth
+    pub fn interleaving(&self) -> InterleavingDepth {
+        self.interleaving
+    }
+
+    /// Get burst statistics
+    pub fn burst_stats(&self) -> (usize, f64) {
+        (self.max_burst_length, self.avg_burst_length)
     }
 
     /// Record a successful recovery
@@ -423,6 +550,72 @@ pub struct EncodedPacket {
     pub level: FecLevel,
     pub shards: Vec<Vec<u8>>,
     pub shard_size: usize,
+    /// Interleaving group ID (packets in same group can recover each other)
+    pub interleave_group: u64,
+    /// Position within interleave group
+    pub interleave_pos: u8,
+}
+
+/// Interleaved packet group for burst loss recovery
+#[derive(Debug)]
+pub struct InterleaveGroup {
+    /// Group ID
+    pub id: u64,
+    /// Packets in this group
+    packets: Vec<Option<EncodedPacket>>,
+    /// Expected packet count
+    expected_count: usize,
+    /// Received packet count
+    received_count: usize,
+    /// Creation time
+    created_at: Instant,
+}
+
+impl InterleaveGroup {
+    pub fn new(id: u64, size: usize) -> Self {
+        Self {
+            id,
+            packets: vec![None; size],
+            expected_count: size,
+            received_count: 0,
+            created_at: Instant::now(),
+        }
+    }
+
+    /// Add a packet to the group
+    pub fn add_packet(&mut self, packet: EncodedPacket) -> bool {
+        let pos = packet.interleave_pos as usize;
+        if pos < self.packets.len() && self.packets[pos].is_none() {
+            self.packets[pos] = Some(packet);
+            self.received_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if group is complete
+    pub fn is_complete(&self) -> bool {
+        self.received_count >= self.expected_count
+    }
+
+    /// Check if group can be recovered with FEC
+    pub fn can_recover(&self, fec_level: FecLevel) -> bool {
+        let (data_shards, parity_shards) = fec_level.shards();
+        let min_required = data_shards;
+        self.received_count >= min_required
+            || self.received_count + parity_shards >= self.expected_count
+    }
+
+    /// Get packets for processing (returns owned packets)
+    pub fn take_packets(&mut self) -> Vec<EncodedPacket> {
+        self.packets.iter_mut().filter_map(|p| p.take()).collect()
+    }
+
+    /// Check if group has expired
+    pub fn is_expired(&self, timeout: Duration) -> bool {
+        self.created_at.elapsed() > timeout
+    }
 }
 
 #[cfg(test)]

@@ -10,6 +10,38 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+/// Connection affinity key for routing same destinations to same connections
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct AffinityKey {
+    /// Destination address
+    pub destination: SocketAddr,
+    /// Optional session/flow identifier
+    pub flow_id: Option<u64>,
+}
+
+impl AffinityKey {
+    pub fn new(destination: SocketAddr) -> Self {
+        Self { destination, flow_id: None }
+    }
+    
+    pub fn with_flow(destination: SocketAddr, flow_id: u64) -> Self {
+        Self { destination, flow_id: Some(flow_id) }
+    }
+}
+
+/// Endpoint usage statistics for pre-warming decisions
+#[derive(Debug, Clone)]
+pub struct EndpointStats {
+    /// Total connection requests to this endpoint
+    pub request_count: u64,
+    /// Last access time
+    pub last_access: Instant,
+    /// Average connection duration
+    pub avg_duration_ms: f64,
+    /// Success rate (0.0 - 1.0)
+    pub success_rate: f64,
+}
+
 /// Connection pool configuration
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -98,6 +130,10 @@ pub struct PoolStats {
     pub cache_misses: AtomicU64,
     /// Failed connection attempts
     pub connection_failures: AtomicU64,
+    /// Affinity hits (same connection reused for same destination)
+    pub affinity_hits: AtomicU64,
+    /// Pre-warmed connections used
+    pub prewarm_hits: AtomicU64,
 }
 
 impl PoolStats {
@@ -130,6 +166,12 @@ pub struct ConnectionPool {
     next_id: AtomicU64,
     /// Pool statistics
     pub stats: Arc<PoolStats>,
+    /// Connection affinity map: AffinityKey -> preferred connection ID
+    affinity_map: Arc<RwLock<HashMap<AffinityKey, u64>>>,
+    /// Endpoint usage statistics for smart pre-warming
+    endpoint_stats: Arc<RwLock<HashMap<SocketAddr, EndpointStats>>>,
+    /// Pre-warmed connection IDs (to track prewarm hits)
+    prewarmed_ids: Arc<RwLock<std::collections::HashSet<u64>>>,
 }
 
 impl ConnectionPool {
@@ -140,11 +182,44 @@ impl ConnectionPool {
             connections: Arc::new(RwLock::new(HashMap::new())),
             next_id: AtomicU64::new(1),
             stats: Arc::new(PoolStats::default()),
+            affinity_map: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_stats: Arc::new(RwLock::new(HashMap::new())),
+            prewarmed_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
 
     /// Get or create a connection to the specified endpoint
     pub async fn get(&self, endpoint: SocketAddr) -> Option<u64> {
+        self.get_with_affinity(endpoint, None).await
+    }
+    
+    /// Get connection with affinity support - prefers reusing same connection for same destination/flow
+    pub async fn get_with_affinity(&self, endpoint: SocketAddr, affinity_key: Option<AffinityKey>) -> Option<u64> {
+        // Update endpoint stats for smart pre-warming
+        self.record_endpoint_access(endpoint).await;
+        
+        // Check affinity map first
+        if let Some(ref key) = affinity_key {
+            let affinity_map = self.affinity_map.read().await;
+            if let Some(&preferred_id) = affinity_map.get(key) {
+                // Try to use the preferred connection
+                let mut conns = self.connections.write().await;
+                if let Some(pool) = conns.get_mut(&endpoint) {
+                    for conn in pool.iter_mut() {
+                        if conn.id == preferred_id && conn.state == ConnectionState::Available {
+                            conn.state = ConnectionState::InUse;
+                            conn.last_used = Instant::now();
+                            conn.reuse_count += 1;
+                            self.stats.affinity_hits.fetch_add(1, Ordering::Relaxed);
+                            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                            self.stats.connections_reused.fetch_add(1, Ordering::Relaxed);
+                            return Some(conn.id);
+                        }
+                    }
+                }
+            }
+        }
+        
         // Try to get an existing available connection
         {
             let mut conns = self.connections.write().await;
@@ -155,10 +230,23 @@ impl ConnectionPool {
                         conn.last_used = Instant::now();
                         conn.reuse_count += 1;
                         self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        self.stats
-                            .connections_reused
-                            .fetch_add(1, Ordering::Relaxed);
-                        return Some(conn.id);
+                        self.stats.connections_reused.fetch_add(1, Ordering::Relaxed);
+                        
+                        // Check if this was a pre-warmed connection
+                        let prewarmed = self.prewarmed_ids.read().await;
+                        if prewarmed.contains(&conn.id) {
+                            self.stats.prewarm_hits.fetch_add(1, Ordering::Relaxed);
+                        }
+                        
+                        let conn_id = conn.id;
+                        
+                        // Update affinity map
+                        if let Some(key) = affinity_key {
+                            drop(conns);
+                            self.affinity_map.write().await.insert(key, conn_id);
+                        }
+                        
+                        return Some(conn_id);
                     }
                 }
             }
@@ -166,7 +254,27 @@ impl ConnectionPool {
 
         // No available connection, create a new one
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
-        self.create_connection(endpoint).await
+        let conn_id = self.create_connection(endpoint).await;
+        
+        // Update affinity map for new connection
+        if let (Some(id), Some(key)) = (conn_id, affinity_key) {
+            self.affinity_map.write().await.insert(key, id);
+        }
+        
+        conn_id
+    }
+    
+    /// Record endpoint access for pre-warming decisions
+    async fn record_endpoint_access(&self, endpoint: SocketAddr) {
+        let mut stats = self.endpoint_stats.write().await;
+        let entry = stats.entry(endpoint).or_insert_with(|| EndpointStats {
+            request_count: 0,
+            last_access: Instant::now(),
+            avg_duration_ms: 0.0,
+            success_rate: 1.0,
+        });
+        entry.request_count += 1;
+        entry.last_access = Instant::now();
     }
 
     /// Create a new connection
@@ -264,10 +372,63 @@ impl ConnectionPool {
         for &endpoint in endpoints {
             for _ in 0..count_per_endpoint {
                 if let Some(id) = self.create_connection(endpoint).await {
+                    // Track as pre-warmed connection
+                    self.prewarmed_ids.write().await.insert(id);
                     self.release(id).await;
                 }
             }
         }
+    }
+    
+    /// Smart pre-warming based on historical usage patterns
+    /// Call this periodically to maintain warm connections to frequently-used endpoints
+    pub async fn smart_prewarm(&self, min_requests: u64, count_per_endpoint: usize) {
+        if !self.config.prewarm {
+            return;
+        }
+        
+        // Get frequently accessed endpoints
+        let stats = self.endpoint_stats.read().await;
+        let frequent_endpoints: Vec<SocketAddr> = stats
+            .iter()
+            .filter(|(_, s)| {
+                s.request_count >= min_requests 
+                    && s.last_access.elapsed() < Duration::from_secs(300) // Active in last 5 min
+                    && s.success_rate > 0.5 // Reasonably successful
+            })
+            .map(|(addr, _)| *addr)
+            .collect();
+        drop(stats);
+        
+        // Pre-warm connections to these endpoints
+        for endpoint in frequent_endpoints {
+            // Check if we already have enough connections
+            let conns = self.connections.read().await;
+            let current_available = conns
+                .get(&endpoint)
+                .map(|pool| pool.iter().filter(|c| c.state == ConnectionState::Available).count())
+                .unwrap_or(0);
+            drop(conns);
+            
+            // Only pre-warm if we need more
+            let needed = count_per_endpoint.saturating_sub(current_available);
+            for _ in 0..needed {
+                if let Some(id) = self.create_connection(endpoint).await {
+                    self.prewarmed_ids.write().await.insert(id);
+                    self.release(id).await;
+                }
+            }
+        }
+    }
+    
+    /// Clear affinity for a specific key
+    pub async fn clear_affinity(&self, key: &AffinityKey) {
+        self.affinity_map.write().await.remove(key);
+    }
+    
+    /// Get endpoint statistics for monitoring
+    pub async fn get_endpoint_stats(&self) -> HashMap<SocketAddr, EndpointStats> {
+        self.endpoint_stats.read().await.clone()
     }
 }
 

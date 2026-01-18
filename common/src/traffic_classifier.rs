@@ -7,10 +7,144 @@
 
 use crate::low_latency::{is_gaming_port, is_voip_port};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// User-defined priority hint for specific traffic
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityHint {
+    /// Human-readable name for this hint
+    pub name: String,
+    /// Traffic class to assign
+    pub class: TrafficClass,
+    /// Match criteria
+    pub matcher: HintMatcher,
+    /// Whether this hint is enabled
+    pub enabled: bool,
+}
+
+/// Matching criteria for priority hints
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HintMatcher {
+    /// Match by destination port
+    Port(u16),
+    /// Match by port range (inclusive)
+    PortRange(u16, u16),
+    /// Match by destination IP
+    Ip(IpAddr),
+    /// Match by IP prefix (CIDR-style)
+    IpPrefix { ip: IpAddr, prefix_len: u8 },
+    /// Match by domain suffix
+    Domain(String),
+    /// Match by process name (if available)
+    ProcessName(String),
+    /// Combined AND matcher
+    And(Vec<HintMatcher>),
+    /// Combined OR matcher
+    Or(Vec<HintMatcher>),
+}
+
+impl HintMatcher {
+    /// Check if this matcher matches the given traffic
+    pub fn matches(
+        &self,
+        dest_ip: IpAddr,
+        dest_port: u16,
+        domain: Option<&str>,
+        process: Option<&str>,
+    ) -> bool {
+        match self {
+            HintMatcher::Port(p) => dest_port == *p,
+            HintMatcher::PortRange(start, end) => dest_port >= *start && dest_port <= *end,
+            HintMatcher::Ip(ip) => dest_ip == *ip,
+            HintMatcher::IpPrefix { ip, prefix_len } => {
+                Self::ip_matches_prefix(dest_ip, *ip, *prefix_len)
+            }
+            HintMatcher::Domain(suffix) => domain.map(|d| d.ends_with(suffix)).unwrap_or(false),
+            HintMatcher::ProcessName(name) => process.map(|p| p.contains(name)).unwrap_or(false),
+            HintMatcher::And(matchers) => matchers
+                .iter()
+                .all(|m| m.matches(dest_ip, dest_port, domain, process)),
+            HintMatcher::Or(matchers) => matchers
+                .iter()
+                .any(|m| m.matches(dest_ip, dest_port, domain, process)),
+        }
+    }
+
+    fn ip_matches_prefix(ip: IpAddr, prefix_ip: IpAddr, prefix_len: u8) -> bool {
+        match (ip, prefix_ip) {
+            (IpAddr::V4(a), IpAddr::V4(b)) => {
+                let a_bits = u32::from(a);
+                let b_bits = u32::from(b);
+                let mask = if prefix_len >= 32 {
+                    !0u32
+                } else {
+                    !0u32 << (32 - prefix_len)
+                };
+                (a_bits & mask) == (b_bits & mask)
+            }
+            (IpAddr::V6(a), IpAddr::V6(b)) => {
+                let a_bits = u128::from(a);
+                let b_bits = u128::from(b);
+                let mask = if prefix_len >= 128 {
+                    !0u128
+                } else {
+                    !0u128 << (128 - prefix_len)
+                };
+                (a_bits & mask) == (b_bits & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl PriorityHint {
+    /// Create a new priority hint for a port
+    pub fn for_port(name: impl Into<String>, port: u16, class: TrafficClass) -> Self {
+        Self {
+            name: name.into(),
+            class,
+            matcher: HintMatcher::Port(port),
+            enabled: true,
+        }
+    }
+
+    /// Create a new priority hint for a domain
+    pub fn for_domain(
+        name: impl Into<String>,
+        domain: impl Into<String>,
+        class: TrafficClass,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            class,
+            matcher: HintMatcher::Domain(domain.into()),
+            enabled: true,
+        }
+    }
+
+    /// Create a new priority hint for an IP
+    pub fn for_ip(name: impl Into<String>, ip: IpAddr, class: TrafficClass) -> Self {
+        Self {
+            name: name.into(),
+            class,
+            matcher: HintMatcher::Ip(ip),
+            enabled: true,
+        }
+    }
+
+    /// Create a gaming priority hint for a port range
+    pub fn gaming_ports(name: impl Into<String>, start: u16, end: u16) -> Self {
+        Self {
+            name: name.into(),
+            class: TrafficClass::Gaming,
+            matcher: HintMatcher::PortRange(start, end),
+            enabled: true,
+        }
+    }
+}
 
 /// Traffic classification result
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -167,6 +301,8 @@ pub struct TrafficClassifier {
     streaming_ips: Arc<RwLock<HashSet<IpAddr>>>,
     /// Known gaming IPs (learned over time)  
     gaming_ips: Arc<RwLock<HashSet<IpAddr>>>,
+    /// User-defined priority hints (evaluated first)
+    priority_hints: Arc<RwLock<HashMap<String, PriorityHint>>>,
 }
 
 impl TrafficClassifier {
@@ -177,6 +313,7 @@ impl TrafficClassifier {
             domain_cache: Arc::new(RwLock::new(HashSet::new())),
             streaming_ips: Arc::new(RwLock::new(HashSet::new())),
             gaming_ips: Arc::new(RwLock::new(HashSet::new())),
+            priority_hints: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -188,7 +325,15 @@ impl TrafficClassifier {
         protocol: Protocol,
         domain: Option<&str>,
     ) -> TrafficClass {
-        // Check domain-based rules first
+        // Check user priority hints FIRST (highest precedence)
+        if let Some(class) = self
+            .check_priority_hints(dest_ip, dest_port, domain, None)
+            .await
+        {
+            return class;
+        }
+
+        // Check domain-based rules
         if let Some(domain) = domain {
             if self.is_bypass_domain(domain) {
                 return TrafficClass::Streaming;
@@ -314,6 +459,115 @@ impl TrafficClassifier {
     /// Get current bypass domains
     pub fn bypass_domains(&self) -> &[String] {
         &self.config.bypass_domains
+    }
+
+    // =========================================================================
+    // User Priority Hints API
+    // =========================================================================
+
+    /// Add a user priority hint
+    pub async fn add_priority_hint(&self, hint: PriorityHint) {
+        self.priority_hints
+            .write()
+            .await
+            .insert(hint.name.clone(), hint);
+    }
+
+    /// Remove a priority hint by name
+    pub async fn remove_priority_hint(&self, name: &str) -> Option<PriorityHint> {
+        self.priority_hints.write().await.remove(name)
+    }
+
+    /// Enable or disable a priority hint
+    pub async fn set_hint_enabled(&self, name: &str, enabled: bool) -> bool {
+        if let Some(hint) = self.priority_hints.write().await.get_mut(name) {
+            hint.enabled = enabled;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get all priority hints
+    pub async fn get_priority_hints(&self) -> Vec<PriorityHint> {
+        self.priority_hints.read().await.values().cloned().collect()
+    }
+
+    /// Clear all priority hints
+    pub async fn clear_priority_hints(&self) {
+        self.priority_hints.write().await.clear();
+    }
+
+    /// Check priority hints and return matching class if found
+    async fn check_priority_hints(
+        &self,
+        dest_ip: IpAddr,
+        dest_port: u16,
+        domain: Option<&str>,
+        process: Option<&str>,
+    ) -> Option<TrafficClass> {
+        let hints = self.priority_hints.read().await;
+
+        // Find highest priority matching hint
+        // (Gaming > RealTime > Streaming > Web > General > Bulk)
+        let mut best_match: Option<TrafficClass> = None;
+
+        for hint in hints.values() {
+            if !hint.enabled {
+                continue;
+            }
+
+            if hint.matcher.matches(dest_ip, dest_port, domain, process) {
+                match (&best_match, &hint.class) {
+                    (None, _) => best_match = Some(hint.class),
+                    (Some(current), new) if new.priority() > current.priority() => {
+                        best_match = Some(*new);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        best_match
+    }
+
+    /// Add common gaming priority hints
+    pub async fn add_gaming_presets(&self) {
+        // Riot Games (League of Legends, Valorant)
+        self.add_priority_hint(PriorityHint::gaming_ports("Riot Games", 5000, 5500))
+            .await;
+
+        // Steam game servers
+        self.add_priority_hint(PriorityHint::gaming_ports("Steam Games", 27000, 27050))
+            .await;
+
+        // Discord voice
+        self.add_priority_hint(PriorityHint::for_port(
+            "Discord Voice",
+            50000,
+            TrafficClass::RealTime,
+        ))
+        .await;
+
+        // Xbox Live
+        self.add_priority_hint(PriorityHint::for_port(
+            "Xbox Live",
+            3074,
+            TrafficClass::Gaming,
+        ))
+        .await;
+
+        // PlayStation Network
+        self.add_priority_hint(PriorityHint::gaming_ports("PlayStation", 3478, 3480))
+            .await;
+
+        // Minecraft
+        self.add_priority_hint(PriorityHint::for_port(
+            "Minecraft",
+            25565,
+            TrafficClass::Gaming,
+        ))
+        .await;
     }
 }
 

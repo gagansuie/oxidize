@@ -45,7 +45,7 @@ pub mod io_uring_impl;
 #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 pub mod kernel_bypass;
 
-pub mod bbr_v3;
+pub mod bbr_v4;
 pub mod crypto_accel;
 #[cfg(target_os = "linux")]
 pub mod ktls;

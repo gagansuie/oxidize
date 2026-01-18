@@ -114,7 +114,8 @@ impl RelayServer {
         transport_config.datagram_receive_buffer_size(Some(65536));
         transport_config.datagram_send_buffer_size(65536);
 
-        // Enable BBR congestion control for better throughput on lossy networks
+        // Use Quinn's native BBR congestion control
+        // Note: Our BBRv4 is for kernel bypass mode only (can't access Quinn's RttEstimator)
         transport_config
             .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 

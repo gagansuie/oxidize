@@ -1,7 +1,13 @@
 //! High-Performance Pipeline
 //!
-//! Integrates kernel bypass and BBRv3 for maximum throughput on Vultr bare metal.
+//! Integrates kernel bypass and BBRv4 for maximum throughput on Vultr bare metal.
 //! Target: 40-100+ Gbps with sub-1µs latency per packet.
+//!
+//! BBRv4 optimizations:
+//! - Fixed-point arithmetic (no f64 in hot paths)
+//! - Cache-line aligned structures
+//! - Batch ACK processing
+//! - Lock-free atomics
 
 #![allow(dead_code)] // Integration scaffolding
 
@@ -14,7 +20,7 @@ use tracing::debug;
 use tracing::info;
 
 #[cfg(target_os = "linux")]
-use oxidize_common::bbr_v3::{BbrCongestionControl, BbrState};
+use oxidize_common::bbr_v4::{BbrV4, BbrV4State};
 // Kernel bypass is feature-gated - only available with --features kernel-bypass
 #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor};
@@ -24,7 +30,7 @@ use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor}
 pub struct PipelineConfig {
     /// Kernel bypass configuration
     pub bypass: BypassConfigWrapper,
-    /// BBRv3 configuration
+    /// BBRv4 configuration
     pub bbr: BbrConfigWrapper,
     /// Number of worker threads
     pub workers: usize,
@@ -169,7 +175,7 @@ pub struct HighPerfPipeline {
     #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
     bypass: Option<()>,
     #[cfg(target_os = "linux")]
-    bbr_controllers: Vec<BbrCongestionControl>,
+    bbr_controllers: Vec<BbrV4>,
 }
 
 impl HighPerfPipeline {
@@ -217,9 +223,9 @@ impl HighPerfPipeline {
         let bbr_controllers = (0..config.workers)
             .map(|_| {
                 if config.bbr.gaming_mode {
-                    BbrCongestionControl::gaming()
+                    BbrV4::gaming()
                 } else {
-                    BbrCongestionControl::throughput()
+                    BbrV4::throughput()
                 }
             })
             .collect();
@@ -397,7 +403,7 @@ impl HighPerfPipeline {
 
     /// Get current BBR state for a worker
     #[cfg(target_os = "linux")]
-    pub fn bbr_state(&self, worker_id: usize) -> BbrState {
+    pub fn bbr_state(&self, worker_id: usize) -> BbrV4State {
         self.bbr_controllers[worker_id % self.bbr_controllers.len()].state()
     }
 
