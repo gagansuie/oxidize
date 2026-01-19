@@ -598,7 +598,7 @@ impl AfXdpSocket {
 
     /// Receive packets
     pub fn recv(&mut self, max_packets: usize) -> Vec<(u32, Vec<u8>)> {
-        let mut packets = Vec::with_capacity(max_packets.min(BATCH_SIZE));
+        let packets = Vec::with_capacity(max_packets.min(BATCH_SIZE));
 
         let available = self.fill_ring.peek().min(max_packets as u32);
         if available == 0 {

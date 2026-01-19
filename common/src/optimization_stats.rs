@@ -54,6 +54,7 @@ pub struct OptimizationStats {
 
 impl OptimizationStats {
     /// Collect stats from all optimization modules
+    #[allow(clippy::too_many_arguments)]
     pub fn collect(
         ml_pacer: Option<&crate::ml_pacing::MlAugmentedPacer>,
         mptcp: Option<&crate::mptcp_redundancy::MptcpRedundancyScheduler>,

@@ -230,6 +230,7 @@ pub struct CongestionAction {
 
 /// Congestion control using BBRv4 algorithm
 /// Replaces old trait-based approach with optimized BBRv4
+#[allow(dead_code)] // cwnd reserved for stateful cwnd tracking in future
 pub struct BbrV4CongestionController {
     /// Minimum RTT observed
     min_rtt_us: u64,

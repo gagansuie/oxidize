@@ -33,6 +33,7 @@ pub struct RelayServer {
     /// All decisions are made by trained ML models
     ml_engine: Arc<RwLock<OptimizedMlEngine>>,
     /// Model Hub for downloading models and uploading training data
+    #[allow(dead_code)] // Reserved for model sync functionality
     model_hub: Arc<ModelHub>,
 }
 

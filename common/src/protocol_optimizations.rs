@@ -401,8 +401,8 @@ impl NumaAllocator {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let s = name.to_string_lossy();
-                if s.starts_with("node") {
-                    if let Ok(id) = s[4..].parse::<u32>() {
+                if let Some(suffix) = s.strip_prefix("node") {
+                    if let Ok(id) = suffix.parse::<u32>() {
                         let cpus = std::fs::read_to_string(entry.path().join("cpulist"))
                             .ok()
                             .and_then(|s| Self::parse_cpulist(&s))

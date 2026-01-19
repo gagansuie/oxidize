@@ -74,9 +74,9 @@ impl RttHistory {
 
         // RTT samples (0-9)
         let rtt_len = self.samples.len();
-        for i in 0..10 {
+        for (i, feat) in features.iter_mut().take(10).enumerate() {
             if i < rtt_len {
-                features[i] = (self.samples[rtt_len - 1 - i] as f32 / 100000.0).min(1.0);
+                *feat = (self.samples[rtt_len - 1 - i] as f32 / 100000.0).min(1.0);
             }
         }
 

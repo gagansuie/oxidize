@@ -183,7 +183,7 @@ impl EntropyEstimator {
         }
 
         // Brotli
-        if magic.len() >= 1 && (magic[0] & 0x0f) == 0x0b {
+        if !magic.is_empty() && (magic[0] & 0x0f) == 0x0b {
             return true;
         }
 
@@ -881,18 +881,13 @@ impl CryptoEngine {
 pub use crate::varint_header::{BatchHeader, HeaderStats, PacketType, V2Header};
 
 /// Protocol version for header encoding
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersion {
     /// V1: Fixed 9-byte header (legacy compatibility)
     V1,
     /// V2: Variable-length 2-7 byte header (default for new connections)
+    #[default]
     V2,
-}
-
-impl Default for ProtocolVersion {
-    fn default() -> Self {
-        ProtocolVersion::V2
-    }
 }
 
 /// V2 header magic (different from V1 to distinguish)

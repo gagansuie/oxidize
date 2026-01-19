@@ -260,6 +260,12 @@ pub struct AckBatch {
     pub count: u8,
 }
 
+impl Default for AckBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AckBatch {
     pub const fn new() -> Self {
         Self {

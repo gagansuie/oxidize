@@ -156,7 +156,7 @@ impl QuantizedLinear {
         scale: f32,
         input_scale: f32,
     ) {
-        for o in 0..self.out_features {
+        for (o, out_val) in output.iter_mut().enumerate().take(self.out_features) {
             let mut acc: i32 = 0;
             let row_start = o * self.in_features;
 
@@ -173,7 +173,7 @@ impl QuantizedLinear {
                 acc += weights[row_start + i] as i32 * input[i] as i32;
             }
 
-            output[o] = (acc as f32) * scale * input_scale + self.bias[o];
+            *out_val = (acc as f32) * scale * input_scale + self.bias[o];
         }
     }
 
@@ -191,7 +191,7 @@ impl QuantizedLinear {
     ) {
         let combined_scale = scale * input_scale;
 
-        for o in 0..self.out_features {
+        for (o, out_val) in output.iter_mut().enumerate().take(self.out_features) {
             let row_start = o * self.in_features;
             let mut acc = _mm256_setzero_si256();
             let mut i = 0;
@@ -231,7 +231,7 @@ impl QuantizedLinear {
                 i += 1;
             }
 
-            output[o] = (total as f32) * combined_scale + self.bias[o];
+            *out_val = (total as f32) * combined_scale + self.bias[o];
         }
     }
 
@@ -248,7 +248,7 @@ impl QuantizedLinear {
     ) {
         let combined_scale = scale * input_scale;
 
-        for o in 0..self.out_features {
+        for (o, out_val) in output.iter_mut().enumerate().take(self.out_features) {
             let row_start = o * self.in_features;
             let mut acc = vdupq_n_s32(0);
             let mut i = 0;
@@ -286,7 +286,7 @@ impl QuantizedLinear {
                 i += 1;
             }
 
-            output[o] = (total as f32) * combined_scale + self.bias[o];
+            *out_val = (total as f32) * combined_scale + self.bias[o];
         }
     }
 }
@@ -409,7 +409,7 @@ impl MiniTransformer {
                 d_model * 4,
                 d_model,
             ),
-            pred_head: QuantizedLinear::new(&vec![0.01f32; d_model], &vec![0.0f32; 1], d_model, 1),
+            pred_head: QuantizedLinear::new(&vec![0.01f32; d_model], &[0.0f32], d_model, 1),
         }
     }
 
@@ -439,7 +439,7 @@ impl MiniTransformer {
         let ff_out = self.ff1.forward(&out);
         let ff_activated: Vec<f32> = ff_out
             .iter()
-            .map(|&x| x * 0.5 * (1.0 + (x * 0.7978845608 * (1.0 + 0.044715 * x * x)).tanh()))
+            .map(|&x| x * 0.5 * (1.0 + (x * 0.797_884_6 * (1.0 + 0.044715 * x * x)).tanh()))
             .collect();
         let ff_final = self.ff2.forward(&ff_activated);
 
@@ -478,24 +478,14 @@ impl PPOController {
         let hidden = 128;
 
         Self {
-            policy_mean: QuantizedLinear::new(
-                &vec![0.01f32; hidden * 1],
-                &vec![0.0f32; 1],
-                hidden,
-                1,
-            ),
+            policy_mean: QuantizedLinear::new(&vec![0.01f32; hidden], &[0.0f32], hidden, 1),
             policy_std: QuantizedLinear::new(
-                &vec![0.01f32; hidden * 1],
-                &vec![0.5f32; 1], // Initial std
+                &vec![0.01f32; hidden],
+                &[0.5f32], // Initial std
                 hidden,
                 1,
             ),
-            value_net: QuantizedLinear::new(
-                &vec![0.01f32; hidden * 1],
-                &vec![0.0f32; 1],
-                hidden,
-                1,
-            ),
+            value_net: QuantizedLinear::new(&vec![0.01f32; hidden], &[0.0f32], hidden, 1),
             state_dim,
             min_cwnd: 4 * 1460,
             max_cwnd: 1024 * 1460 * 1024,
@@ -871,7 +861,7 @@ impl OptimizedMlEngine {
         let sample = &data[..data.len().min(128)];
         let printable = sample
             .iter()
-            .filter(|&&b| (b >= 0x20 && b <= 0x7E) || b == 0x09 || b == 0x0A || b == 0x0D)
+            .filter(|&&b| (0x20..=0x7E).contains(&b) || b == 0x09 || b == 0x0A || b == 0x0D)
             .count();
         printable > sample.len() * 80 / 100
     }

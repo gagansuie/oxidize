@@ -29,7 +29,8 @@ use tracing::{info, warn};
 
 // DPDK FFI bindings - linked at runtime when libdpdk is available
 // These are extern "C" functions from librte_eal, librte_ethdev, etc.
-#[cfg(feature = "kernel-bypass")]
+// Triple-gated: lib.rs module, file-level #![cfg], and this module
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 mod ffi {
     #[allow(unused_imports)]
     use std::os::raw::{c_char, c_int, c_void};
