@@ -584,7 +584,7 @@ impl CachePrefetch {
             // ARM prefetch to L3 equivalent
             for chunk in data.chunks(64) {
                 unsafe {
-                    std::arch::aarch64::__prefetch(chunk.as_ptr() as *const i8);
+                    std::arch::aarch64::_prefetch(chunk.as_ptr() as *const i8);
                 }
             }
         }
