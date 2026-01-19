@@ -17,7 +17,6 @@ pub mod udp_batch;
 pub mod zero_copy;
 
 // ML Engine (INT8 quantized for inline processing)
-pub mod advanced_ml;
 pub mod ai_engine;
 pub mod ml_optimized;
 pub mod ml_training;
@@ -45,20 +44,15 @@ pub mod benchmark;
 // Kernel Bypass - 100x optimized with custom implementations (100+ Gbps)
 // Provides: BypassConfig, BypassPacket, BypassProcessor
 // Plus: UltraConfig, KernelBypassRuntime, PacketBuffer, SpscRing (100x optimized)
-#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+#[cfg(target_os = "linux")]
 pub mod kernel_bypass;
 
-// AF_XDP - Real NIC integration for 10-40 Gbps (Linux only, kernel-bypass feature)
+// AF_XDP - Real NIC integration for 10-40 Gbps (Linux only)
 // Provides: AfXdpSocket, AfXdpRuntime, AfXdpConfig
-#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+#[cfg(target_os = "linux")]
 pub mod af_xdp;
 
-// DPDK - Full kernel bypass for 100+ Gbps (Linux only, kernel-bypass feature)
-// Provides: DpdkRuntime, DpdkConfig, DpdkStats
-#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
-pub mod dpdk;
-
-// QUIC-XDP - Native AF_XDP QUIC implementation for 100x performance (Linux only, kernel-bypass feature)
+// QUIC-XDP - Native AF_XDP QUIC implementation for 100x performance (Linux only)
 // Provides: QuicXdpRuntime, QuicXdpConfig, QuicXdpStats, Connection, Stream
 // Complete userspace QUIC stack running on kernel bypass with:
 // - Zero-copy packet processing via UMEM (no syscalls in hot path)
@@ -66,7 +60,7 @@ pub mod dpdk;
 // - Hardware crypto (AES-NI)
 // - ML-augmented congestion control
 // - Batch processing (64+ packets)
-#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+#[cfg(target_os = "linux")]
 pub mod quic_xdp;
 
 // Core optimizations

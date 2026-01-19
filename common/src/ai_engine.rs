@@ -228,61 +228,28 @@ pub struct CongestionAction {
     pub slow_start: bool,
 }
 
-/// Congestion control using BBRv4 algorithm
-/// Replaces old trait-based approach with optimized BBRv4
-#[allow(dead_code)] // cwnd reserved for stateful cwnd tracking in future
-pub struct BbrV4CongestionController {
-    /// Minimum RTT observed
-    min_rtt_us: u64,
-    /// Maximum bandwidth observed
-    max_bw_bps: u64,
-    /// Current congestion window
-    cwnd: u32,
+/// Simple congestion hints - actual congestion control handled by Quinn's integrated BBR
+/// This struct provides supplementary hints for ML-based decisions
+#[derive(Default)]
+pub struct CongestionHints {
+    /// Observed RTT samples for analytics
+    pub rtt_samples: u64,
 }
 
-impl Default for BbrV4CongestionController {
-    fn default() -> Self {
-        Self {
-            min_rtt_us: u64::MAX,
-            max_bw_bps: 0,
-            cwnd: 10 * 1460, // 10 packets initial
-        }
-    }
-}
-
-impl BbrV4CongestionController {
-    /// Update estimates with new observation
-    pub fn update(&mut self, rtt_us: u64, bandwidth_bps: u64) {
-        self.min_rtt_us = self.min_rtt_us.min(rtt_us);
-        self.max_bw_bps = self.max_bw_bps.max(bandwidth_bps);
+impl CongestionHints {
+    /// Record an RTT observation (for analytics only, Quinn handles actual CC)
+    pub fn record_rtt(&mut self, _rtt_us: u64) {
+        self.rtt_samples += 1;
     }
 
-    /// BBRv4-style congestion decision
+    /// Get congestion hints - actual CC is handled by Quinn's BBR
     pub fn decide(&self, features: &NetworkFeatures) -> CongestionAction {
-        // BDP = bandwidth × RTT (BBRv4 core calculation)
-        let bdp = if self.min_rtt_us > 0 && self.min_rtt_us < u64::MAX {
-            (self.max_bw_bps as f64 * self.min_rtt_us as f64 / 1_000_000.0) as u32
-        } else {
-            features.cwnd
-        };
-
-        // BBRv4 loss-based adjustment (more aggressive than BBRv3)
-        let loss_factor = if features.loss_rate > 0.1 {
-            0.5 // Halve on high loss
-        } else if features.loss_rate > 0.02 {
-            0.7 // BBRv4 loss threshold
-        } else {
-            1.0
-        };
-
-        // BBRv4 gain = 2.0 in steady state
-        let new_cwnd = ((bdp as f32 * 2.0 * loss_factor) as u32).clamp(4 * 1460, 1_048_576);
-        let pacing_rate = (self.max_bw_bps as f32 * loss_factor) as u64;
-
+        // Quinn's integrated BBR handles actual congestion control
+        // This just provides default hints for compatibility
         CongestionAction {
-            new_cwnd,
-            pacing_rate,
-            slow_start: features.time_since_loss_ms > 10_000,
+            new_cwnd: features.cwnd,
+            pacing_rate: 0, // Let Quinn handle pacing
+            slow_start: false,
         }
     }
 }
@@ -563,7 +530,7 @@ impl LossPredictor for HeuristicLossPredictor {
     }
 }
 
-// HeuristicCongestionController removed - using BbrV4CongestionController instead
+// Congestion control is handled by Quinn's integrated BBR
 
 /// Heuristic-based path selector
 pub struct HeuristicPathSelector {
@@ -659,7 +626,7 @@ impl PathSelector for HeuristicPathSelector {
 pub struct HeuristicEngine {
     compression: Box<dyn CompressionOracle>,
     loss_predictor: Box<dyn LossPredictor>,
-    congestion: BbrV4CongestionController,
+    congestion: CongestionHints,
     path_selector: Box<dyn PathSelector>,
     /// Statistics for monitoring
     pub stats: EngineStats,
@@ -687,7 +654,7 @@ impl HeuristicEngine {
         Self {
             compression: Box::new(HeuristicCompressionOracle::default()),
             loss_predictor: Box::new(HeuristicLossPredictor::default()),
-            congestion: BbrV4CongestionController::default(),
+            congestion: CongestionHints::default(),
             path_selector: Box::new(HeuristicPathSelector::default()),
             stats: EngineStats::default(),
         }
@@ -697,7 +664,7 @@ impl HeuristicEngine {
     pub fn with_oracles(
         compression: Box<dyn CompressionOracle>,
         loss_predictor: Box<dyn LossPredictor>,
-        congestion: BbrV4CongestionController,
+        congestion: CongestionHints,
         path_selector: Box<dyn PathSelector>,
     ) -> Self {
         Self {

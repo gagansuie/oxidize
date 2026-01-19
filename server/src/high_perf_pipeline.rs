@@ -1,13 +1,8 @@
 //! High-Performance Pipeline
 //!
-//! Integrates kernel bypass and BBRv4 for maximum throughput on Vultr bare metal.
+//! Integrates kernel bypass for maximum throughput on Vultr bare metal.
 //! Target: 40-100+ Gbps with sub-1µs latency per packet.
-//!
-//! BBRv4 optimizations:
-//! - Fixed-point arithmetic (no f64 in hot paths)
-//! - Cache-line aligned structures
-//! - Batch ACK processing
-//! - Lock-free atomics
+//! Congestion control handled by Quinn's integrated BBR.
 
 #![allow(dead_code)] // Integration scaffolding
 
@@ -18,7 +13,7 @@ use std::time::{Duration, Instant};
 use tracing::info;
 
 // Kernel bypass is feature-gated - only available with --features kernel-bypass
-#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+#[cfg(target_os = "linux")]
 use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
 
 // 10x Optimized ML Engine (INT8 quantized, Transformer, PPO)
@@ -29,8 +24,6 @@ use oxidize_common::ml_optimized::OptimizedMlEngine;
 pub struct PipelineConfig {
     /// Kernel bypass configuration
     pub bypass: BypassConfigWrapper,
-    /// BBRv4 configuration
-    pub bbr: BbrConfigWrapper,
     /// Number of worker threads
     pub workers: usize,
     /// Batch size for packet processing
@@ -52,27 +45,10 @@ pub struct BypassConfigWrapper {
     pub enable_rss: bool,
 }
 
-/// Wrapper for BBR config
-#[derive(Debug, Clone)]
-pub struct BbrConfigWrapper {
-    pub gaming_mode: bool,
-    pub loss_tolerance: f64,
-}
-
-impl Default for BbrConfigWrapper {
-    fn default() -> Self {
-        Self {
-            gaming_mode: false,
-            loss_tolerance: 0.02,
-        }
-    }
-}
-
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             bypass: BypassConfigWrapper::default(),
-            bbr: BbrConfigWrapper::default(),
             workers: std::thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(4)
@@ -95,10 +71,6 @@ impl PipelineConfig {
                 enable_rss: true,
                 ..Default::default()
             },
-            bbr: BbrConfigWrapper {
-                gaming_mode: false,
-                loss_tolerance: 0.05,
-            },
             workers: std::thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(8),
@@ -117,10 +89,6 @@ impl PipelineConfig {
                 tx_queues: 4,
                 enable_rss: true,
                 ..Default::default()
-            },
-            bbr: BbrConfigWrapper {
-                gaming_mode: true,
-                loss_tolerance: 0.01,
             },
             workers: 4,
             batch_size: 32,
@@ -169,11 +137,11 @@ pub struct HighPerfPipeline {
     stats: Arc<PipelineStats>,
     running: Arc<AtomicBool>,
     start_time: Instant,
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     bypass: Option<BypassProcessor>,
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     unified_bypass: Option<UnifiedBypass>,
-    #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
+    #[cfg(not(target_os = "linux"))]
     bypass: Option<()>,
     /// 10x Optimized ML engine for loss prediction and congestion control
     ml_engine: OptimizedMlEngine,
@@ -202,7 +170,7 @@ impl HighPerfPipeline {
             }
         );
 
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         let bypass = if !config.bypass.pci_address.is_empty() {
             let bypass_config = BypassConfig {
                 pci_address: config.bypass.pci_address.clone(),
@@ -217,11 +185,11 @@ impl HighPerfPipeline {
             info!("Kernel bypass disabled - no PCI address configured");
             None
         };
-        #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
+        #[cfg(not(target_os = "linux"))]
         let bypass: Option<()> = None;
 
         // Try to initialize unified bypass (AF_XDP with fallback)
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         let unified_bypass = match UnifiedBypass::new(None) {
             Ok(ub) => {
                 info!("Unified bypass initialized: {:?}", ub.mode());
@@ -244,19 +212,19 @@ impl HighPerfPipeline {
             start_time: Instant::now(),
             #[cfg(target_os = "linux")]
             bypass,
-            #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+            #[cfg(target_os = "linux")]
             unified_bypass,
             ml_engine,
         })
     }
 
     /// Check if kernel bypass is available and configured
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     pub fn bypass_available(&self) -> bool {
         self.bypass.is_some() && BypassProcessor::is_available()
     }
 
-    #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
+    #[cfg(not(target_os = "linux"))]
     pub fn bypass_available(&self) -> bool {
         false
     }
@@ -271,7 +239,7 @@ impl HighPerfPipeline {
         self.running.store(true, Ordering::SeqCst);
         self.start_time = Instant::now();
 
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         if let Some(ref bypass) = self.bypass {
             bypass.start();
         }
@@ -283,7 +251,7 @@ impl HighPerfPipeline {
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
 
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         if let Some(ref bypass) = self.bypass {
             bypass.stop();
         }
@@ -302,7 +270,7 @@ impl HighPerfPipeline {
     }
 
     /// Process a batch of packets (main hot path)
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     pub fn process_batch(
         &mut self,
         worker_id: usize,
@@ -356,7 +324,7 @@ impl HighPerfPipeline {
     }
 
     /// Process a single packet
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     fn process_single_packet(&self, mut packet: BypassPacket) -> Option<BypassPacket> {
         // Parse headers
         if !packet.parse_headers() {
@@ -449,9 +417,9 @@ impl PipelineIntegration {
     /// Check system capabilities
     pub fn check_capabilities() -> PipelineCapabilities {
         PipelineCapabilities {
-            #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+            #[cfg(target_os = "linux")]
             bypass_available: BypassProcessor::is_available(),
-            #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+            #[cfg(not(target_os = "linux"))]
             bypass_available: false,
             ktls_available: false, // Removed - using userspace QUIC
             cpu_cores: std::thread::available_parallelism()

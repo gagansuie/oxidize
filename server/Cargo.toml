@@ -5,10 +5,6 @@ edition = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
 
-[features]
-default = []
-kernel-bypass = ["oxidize-common/kernel-bypass"]  # Kernel bypass for bare metal (100+ Gbps)
-
 [[bin]]
 name = "oxidize-server"
 path = "src/main.rs"

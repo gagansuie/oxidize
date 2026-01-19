@@ -65,7 +65,11 @@
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-#![cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+#![allow(dead_code)] // QUIC-XDP implementation scaffolding
+#![allow(ambiguous_glob_reexports)] // Intentional - prefer local types over re-exports
+#![allow(clippy::manual_clamp)] // Performance: explicit min/max faster than clamp in hot paths
+#![allow(clippy::needless_range_loop)] // Performance: explicit indexing preferred in SIMD-friendly loops
+#![allow(clippy::manual_c_str_literals)] // Compatibility with older Rust versions
 
 // Core QUIC modules
 pub mod connection;

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::Config;
 
@@ -23,8 +23,6 @@ pub enum QuicMode {
     Standard,
     /// AF_XDP kernel bypass (Linux only, 100x faster)
     AfXdp,
-    /// DPDK kernel bypass (Linux only, 100+ Gbps)
-    Dpdk,
 }
 
 /// QUIC-XDP server statistics
@@ -74,7 +72,7 @@ pub struct QuicXdpServer {
     running: Arc<AtomicBool>,
     start_time: Instant,
     _config: QuicServerConfig,
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     xdp_runtime: Option<oxidize_common::quic_xdp::QuicXdpRuntime>,
 }
 
@@ -158,7 +156,7 @@ impl QuicXdpServer {
 
         info!("Initializing QUIC server in {:?} mode", mode);
 
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         let xdp_runtime = if mode == QuicMode::AfXdp {
             let xdp_config = oxidize_common::quic_xdp::QuicXdpConfig {
                 interface: config.interface.clone(),
@@ -190,21 +188,15 @@ impl QuicXdpServer {
             running: Arc::new(AtomicBool::new(false)),
             start_time: Instant::now(),
             _config: config,
-            #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+            #[cfg(target_os = "linux")]
             xdp_runtime,
         })
     }
 
     /// Detect the best available QUIC mode
     pub fn detect_best_mode() -> QuicMode {
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         {
-            // Check for DPDK first (highest performance)
-            if oxidize_common::dpdk::DpdkRuntime::is_available() {
-                info!("DPDK detected - using DPDK mode (100+ Gbps)");
-                return QuicMode::Dpdk;
-            }
-
             // Check for AF_XDP
             if oxidize_common::quic_xdp::runtime::is_quic_xdp_available() {
                 info!("AF_XDP detected - using AF_XDP mode (10-40 Gbps)");
@@ -228,15 +220,11 @@ impl QuicXdpServer {
         match self.mode {
             QuicMode::AfXdp =>
             {
-                #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+                #[cfg(target_os = "linux")]
                 if let Some(ref mut rt) = self.xdp_runtime {
                     rt.start()?;
-                    info!("QUIC-XDP server started on port {}", self.config.port);
+                    info!("QUIC-XDP server started on port {}", self._config.port);
                 }
-            }
-            QuicMode::Dpdk => {
-                info!("DPDK mode: using high_perf_pipeline");
-                // DPDK is handled by high_perf_pipeline
             }
             QuicMode::Standard => {
                 info!("Standard QUIC mode: using Quinn");
@@ -251,7 +239,7 @@ impl QuicXdpServer {
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
 
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         if let Some(ref mut rt) = self.xdp_runtime {
             rt.stop();
         }
@@ -274,7 +262,7 @@ impl QuicXdpServer {
     pub fn stats(&self) -> QuicServerStats {
         let uptime_secs = self.start_time.elapsed().as_secs_f64();
 
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         if let Some(ref rt) = self.xdp_runtime {
             let stats = rt.stats();
             return QuicServerStats {
@@ -292,7 +280,6 @@ impl QuicXdpServer {
             mode: match self.mode {
                 QuicMode::Standard => "STD",
                 QuicMode::AfXdp => "XDP",
-                QuicMode::Dpdk => "DPDK",
             },
             uptime_secs,
             ..Default::default()
@@ -301,7 +288,7 @@ impl QuicXdpServer {
 
     /// Get connection count
     pub fn connection_count(&self) -> usize {
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         if let Some(ref rt) = self.xdp_runtime {
             return rt.connection_count();
         }
@@ -318,15 +305,10 @@ impl Drop for QuicXdpServer {
 /// Check system capabilities for QUIC-XDP
 pub fn check_capabilities() -> QuicCapabilities {
     QuicCapabilities {
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        #[cfg(target_os = "linux")]
         af_xdp_available: oxidize_common::quic_xdp::runtime::is_quic_xdp_available(),
-        #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+        #[cfg(not(target_os = "linux"))]
         af_xdp_available: false,
-
-        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
-        dpdk_available: oxidize_common::dpdk::DpdkRuntime::is_available(),
-        #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
-        dpdk_available: false,
 
         // io_uring removed - redundant with AF_XDP kernel bypass
         io_uring_available: false,
@@ -343,7 +325,6 @@ pub fn check_capabilities() -> QuicCapabilities {
 #[derive(Debug)]
 pub struct QuicCapabilities {
     pub af_xdp_available: bool,
-    pub dpdk_available: bool,
     pub io_uring_available: bool,
     pub cpu_cores: usize,
     pub recommended_mode: QuicMode,
@@ -352,9 +333,8 @@ pub struct QuicCapabilities {
 impl QuicCapabilities {
     pub fn summary(&self) -> String {
         format!(
-            "QUIC Capabilities: AF_XDP={}, DPDK={}, io_uring={}, cores={}, recommended={:?}",
+            "QUIC Capabilities: AF_XDP={}, io_uring={}, cores={}, recommended={:?}",
             if self.af_xdp_available { "yes" } else { "no" },
-            if self.dpdk_available { "yes" } else { "no" },
             if self.io_uring_available { "yes" } else { "no" },
             self.cpu_cores,
             self.recommended_mode

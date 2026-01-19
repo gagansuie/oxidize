@@ -15,7 +15,6 @@
 //! - Memory: <5MB per model
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 /// ONNX Runtime session wrapper
@@ -108,15 +107,15 @@ impl OnnxInference {
         match model_type {
             ModelType::LossPredictor => {
                 // Small MLP: 8 -> 32 -> 1
-                vec![0.01; 8 * 32 + 32 + 32 * 1 + 1]
+                vec![0.01; 8 * 32 + 32 + 32 + 1]
             }
             ModelType::CongestionController => {
                 // Small MLP: 8 -> 64 -> 1
-                vec![0.01; 8 * 64 + 64 + 64 * 1 + 1]
+                vec![0.01; 8 * 64 + 64 + 64 + 1]
             }
             ModelType::FecDecision => {
                 // Tiny MLP: 4 -> 16 -> 1
-                vec![0.01; 4 * 16 + 16 + 16 * 1 + 1]
+                vec![0.01; 4 * 16 + 16 + 16 + 1]
             }
         }
     }

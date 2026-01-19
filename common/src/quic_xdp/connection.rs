@@ -3,16 +3,14 @@
 //! Lock-free connection management designed for kernel bypass.
 //! Supports 100,000+ concurrent connections with minimal memory.
 
-use super::crypto::{CryptoEngine, CryptoSuite, Direction, KeyDerivation, PacketKeys};
-use super::frame::{AckFrame, Frame, FrameParser};
-use super::packet::{ConnectionId, QuicPacketHeader, QuicPacketType};
+use super::crypto::{CryptoSuite, Direction, KeyDerivation, PacketKeys};
+use super::packet::{ConnectionId, QuicPacketType};
 use super::stream::StreamManager;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,11 +193,7 @@ impl Connection {
             self.rttvar_us.store(sample_us / 2, Ordering::Relaxed);
         } else {
             // Subsequent measurements
-            let diff = if sample_us > srtt {
-                sample_us - srtt
-            } else {
-                srtt - sample_us
-            };
+            let diff = sample_us.abs_diff(srtt);
             let new_rttvar = (3 * rttvar + diff) / 4;
             let new_srtt = (7 * srtt + sample_us) / 8;
 

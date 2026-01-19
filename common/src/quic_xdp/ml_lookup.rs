@@ -319,7 +319,7 @@ impl MlLookupEngine {
     /// Create from OptimizedMlEngine
     pub fn from_ml_engine(engine: &crate::ml_optimized::OptimizedMlEngine) -> Self {
         Self::from_model(
-            |rtt_us, loss_rate, bw_mbps, features| {
+            |rtt_us, _loss_rate, bw_mbps, features| {
                 // Build state for congestion controller
                 let rtt_sec = rtt_us as f64 / 1_000_000.0;
                 let bw_bytes = bw_mbps * 125_000.0;

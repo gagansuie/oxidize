@@ -142,7 +142,10 @@ impl QuantizedLinear {
         }
 
         // Scalar fallback
-        self.forward_scalar(&quantized_input, weights, &mut output, scale, input_scale);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.forward_scalar(&quantized_input, weights, &mut output, scale, input_scale);
+        }
         output
     }
 
@@ -581,10 +584,10 @@ impl CachePrefetch {
 
         #[cfg(target_arch = "aarch64")]
         {
-            // ARM prefetch to L3 equivalent
+            // ARM prefetch to L3 equivalent - use volatile read as portable prefetch hint
             for chunk in data.chunks(64) {
                 unsafe {
-                    std::arch::aarch64::_prefetch(chunk.as_ptr() as *const i8);
+                    std::ptr::read_volatile(&chunk[0]);
                 }
             }
         }
@@ -1381,7 +1384,7 @@ mod tests {
         let features = vec![0.5f32; 64];
 
         let prob = transformer.predict(&features);
-        assert!(prob >= 0.0 && prob <= 1.0);
+        assert!((0.0..=1.0).contains(&prob));
     }
 
     #[test]
@@ -1401,7 +1404,7 @@ mod tests {
         // Test loss prediction
         let features = vec![0.5f32; 64];
         let prob = engine.predict_loss(1, &features);
-        assert!(prob >= 0.0 && prob <= 1.0);
+        assert!((0.0..=1.0).contains(&prob));
 
         // Test CWND
         let state = vec![100000.0, 0.01, 1e9, 1000000.0, 0.0, 0.0, 0.0, 0.0];

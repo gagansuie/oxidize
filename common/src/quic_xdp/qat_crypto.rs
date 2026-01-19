@@ -85,7 +85,7 @@ impl QatCryptoEngine {
         let qat = QatDevice::new();
         let stats = qat
             .as_ref()
-            .map(|q| Arc::new(QatStats::default()))
+            .map(|_q| Arc::new(QatStats::default()))
             .unwrap_or_else(|| Arc::new(QatStats::default()));
 
         Self {
@@ -178,7 +178,8 @@ impl QatCryptoEngine {
 
             // Note: ring's seal_in_place requires the buffer to have space for tag
             // This is a simplified version
-            key.seal_in_place_separate_tag(nonce, aad, plaintext)
+            let _ = key
+                .seal_in_place_separate_tag(nonce, aad, plaintext)
                 .map_err(|_| CryptoError::EncryptionFailed)?;
 
             self.stats.encrypt_ops.fetch_add(1, Ordering::Relaxed);

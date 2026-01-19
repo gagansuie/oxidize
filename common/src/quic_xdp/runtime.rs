@@ -14,18 +14,18 @@
 use super::connection::{CidGenerator, Connection, ConnectionTable};
 use super::crypto::CryptoEngine;
 use super::frame::{Frame, FrameParser};
-use super::packet::{parse_ip_udp_headers, ConnectionId, QuicPacketParser};
+use super::packet::{parse_ip_udp_headers, QuicPacketParser};
 use super::{QuicXdpConfig, QuicXdpStats};
 
-use crate::af_xdp::{AfXdpConfig, AfXdpSocket};
+use crate::af_xdp::AfXdpSocket;
 use crate::ml_optimized::OptimizedMlEngine;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// QUIC XDP Runtime
 pub struct QuicXdpRuntime {
@@ -229,11 +229,11 @@ fn run_worker(
         }
 
         rx_packets.extend(received);
-        let batch_size = rx_packets.len();
+        let _batch_size = rx_packets.len();
         stats.batch_count.fetch_add(1, Ordering::Relaxed);
 
         // Process each packet
-        for (frame_idx, packet_data) in rx_packets.iter() {
+        for (_frame_idx, packet_data) in rx_packets.iter() {
             local_rx_packets += 1;
             local_rx_bytes += packet_data.len() as u64;
 
@@ -318,17 +318,17 @@ fn run_worker(
             // Parse frames
             let frame_result = frame_parser.parse_frames(&decrypted[..plaintext_len], |frame| {
                 match frame {
-                    Frame::Stream(stream_frame) => {
+                    Frame::Stream(_stream_frame) => {
                         // Handle stream data
                         stats.streams.fetch_add(1, Ordering::Relaxed);
                         // In full impl: deliver to application
                     }
-                    Frame::Datagram(datagram) => {
+                    Frame::Datagram(_datagram) => {
                         // Handle datagram (direct forwarding for relay)
                         stats.datagrams.fetch_add(1, Ordering::Relaxed);
                         // Forward datagram data
                     }
-                    Frame::Ack(ack) => {
+                    Frame::Ack(_ack) => {
                         // Process ACK
                         conn.on_ack(0, None); // Simplified
                     }
@@ -453,11 +453,11 @@ impl QuicFallbackRuntime {
 
 /// Check if AF_XDP QUIC runtime is available
 pub fn is_quic_xdp_available() -> bool {
-    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    #[cfg(target_os = "linux")]
     {
         crate::af_xdp::AfXdpRuntime::is_available()
     }
-    #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+    #[cfg(not(target_os = "linux"))]
     {
         false
     }

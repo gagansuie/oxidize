@@ -58,6 +58,7 @@ impl SimdCapability {
             return SimdCapability::Neon;
         }
 
+        #[cfg(not(target_arch = "aarch64"))]
         SimdCapability::None
     }
 

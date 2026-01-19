@@ -11,7 +11,7 @@
 //! - Intel QAT ready (future)
 
 use ring::aead::{
-    self, Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305,
+    Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 

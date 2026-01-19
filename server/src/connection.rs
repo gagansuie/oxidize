@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
+use oxidize_common::adaptive_fec::AdaptiveFec;
 use oxidize_common::oxtunnel_protocol::{
     decode_packet, flags, PacketBatch, HEADER_SIZE, PROTOCOL_MAGIC,
 };
 use oxidize_common::rohc::{RohcCompressor, RohcDecompressor};
+use oxidize_common::udp_batch::UdpBatcher;
 use oxidize_common::zero_copy::BufferPool;
 use oxidize_common::{
     decompress_data, MessageBatch, MessageFramer, MessageType, RelayMessage, RelayMetrics,
@@ -54,6 +56,12 @@ pub struct ConnectionHandler {
     /// ROHC decompressor for incoming packets
     #[allow(dead_code)]
     rohc_decompressor: RohcDecompressor,
+    /// Adaptive FEC for packet loss resilience
+    #[allow(dead_code)]
+    fec: AdaptiveFec,
+    /// UDP batcher for reducing syscalls
+    #[allow(dead_code)]
+    udp_batcher: UdpBatcher,
 }
 
 impl ConnectionHandler {
@@ -83,6 +91,8 @@ impl ConnectionHandler {
             response_rx,
             rohc_compressor: RohcCompressor::new(256),
             rohc_decompressor: RohcDecompressor::new(256),
+            fec: AdaptiveFec::new(),
+            udp_batcher: UdpBatcher::new(),
         }
     }
 

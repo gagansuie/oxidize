@@ -176,7 +176,7 @@ impl FrameParser {
         let frame_type_byte = data[0];
 
         // Handle STREAM frames specially (0x08-0x0f)
-        if frame_type_byte >= 0x08 && frame_type_byte <= 0x0f {
+        if (0x08..=0x0f).contains(&frame_type_byte) {
             return self.parse_stream_frame(data, frame_type_byte);
         }
 

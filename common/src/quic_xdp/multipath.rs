@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Unique identifier for a network path
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,11 +93,7 @@ impl PathMetrics {
             self.srtt_us = rtt_us;
             self.rttvar_us = rtt_us / 2;
         } else {
-            let diff = if rtt_us > self.srtt_us {
-                rtt_us - self.srtt_us
-            } else {
-                self.srtt_us - rtt_us
-            };
+            let diff = rtt_us.abs_diff(self.srtt_us);
             self.rttvar_us = (3 * self.rttvar_us + diff) / 4;
             self.srtt_us = (7 * self.srtt_us + rtt_us) / 8;
         }

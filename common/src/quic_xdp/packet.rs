@@ -157,7 +157,7 @@ impl QuicPacketParser {
     /// Returns header info and payload offset
     #[inline]
     pub fn parse<'a>(&self, data: &'a [u8]) -> Result<(QuicPacketHeader, &'a [u8]), ParseError> {
-        if data.len() < 1 {
+        if data.is_empty() {
             return Err(ParseError::TooShort);
         }
 

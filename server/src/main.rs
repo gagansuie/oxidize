@@ -11,6 +11,8 @@ use relay_server::mobile_server::{
     generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
 };
 use relay_server::prometheus::PrometheusMetrics;
+#[cfg(target_os = "linux")]
+use relay_server::quic_xdp_server::{QuicServerConfig, QuicXdpServer};
 use relay_server::server::RelayServer;
 
 #[derive(Parser, Debug)]
@@ -95,6 +97,37 @@ async fn main() -> Result<()> {
     });
 
     let server = Arc::new(RelayServer::new(args.listen, config).await?);
+
+    // Initialize QuicXdpServer for AF_XDP kernel bypass if available
+    #[cfg(target_os = "linux")]
+    let _xdp_server = {
+        info!("📦 Initializing QUIC-XDP server for kernel bypass...");
+        let xdp_config = QuicServerConfig {
+            interface: std::env::var("OXIDIZE_INTERFACE").unwrap_or_else(|_| "eth0".to_string()),
+            port: args.listen.port(),
+            workers: std::env::var("OXIDIZE_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4),
+            zero_copy: true,
+            ml_congestion: true,
+            batch_size: 64,
+            cpu_cores: std::env::var("OXIDIZE_CPU_CORES").unwrap_or_else(|_| "2,3,4,5".to_string()),
+            force_mode: None,
+        };
+        match QuicXdpServer::new(xdp_config) {
+            Ok(xdp) => {
+                info!("✅ QUIC-XDP server initialized in {:?} mode", xdp.mode());
+                Some(xdp)
+            }
+            Err(e) => {
+                warn!("⚠️  QUIC-XDP not available: {} - using standard Quinn", e);
+                None
+            }
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _xdp_server: Option<()> = None;
 
     info!("🚀 Server listening on {}", args.listen);
     info!("📊 Max connections: {}", server.config().max_connections);

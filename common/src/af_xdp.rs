@@ -20,8 +20,8 @@
 //! - NIC with XDP support (Intel i40e, ixgbe, ice, mlx5, etc.)
 //! - CAP_NET_RAW or root privileges
 
-#![cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 #![allow(dead_code)] // AF_XDP implementation - some fields reserved for future use
+#![allow(clippy::missing_safety_doc)] // Performance-critical unsafe code with clear semantics
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::CString;
@@ -556,7 +556,7 @@ impl AfXdpSocket {
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED | libc::MAP_POPULATE,
                 fd.as_raw_fd(),
-                libc::XDP_PGOFF_RX_RING as i64,
+                libc::XDP_PGOFF_RX_RING,
             )
         };
         if rx_map == libc::MAP_FAILED {
@@ -571,7 +571,7 @@ impl AfXdpSocket {
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED | libc::MAP_POPULATE,
                 fd.as_raw_fd(),
-                libc::XDP_PGOFF_TX_RING as i64,
+                libc::XDP_PGOFF_TX_RING,
             )
         };
         if tx_map == libc::MAP_FAILED {

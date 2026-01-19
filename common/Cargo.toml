@@ -8,7 +8,7 @@ license = { workspace = true }
 [features]
 default = ["ai"]
 ai = ["dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
-kernel-bypass = []  # DPDK + AF_XDP kernel bypass for bare metal (100+ Gbps)
+# Note: AF_XDP/DPDK kernel bypass is always enabled on Linux (no feature flag needed)
 
 [[bin]]
 name = "oxidize-train"
