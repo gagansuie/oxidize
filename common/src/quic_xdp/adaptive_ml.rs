@@ -1,42 +1,46 @@
-//! Adaptive ML Engine with Online Learning
+//! Adaptive ML Engine with Online Learning + Hugging Face Integration
 //!
-//! Continuously learns from network observations and auto-refreshes lookup tables.
-//! No restart needed - model improves in real-time.
+//! Fully integrated ML pipeline:
+//! - Downloads pre-trained models from HuggingFace Hub at startup
+//! - Collects training observations in real-time
+//! - Uploads training data to HF Hub for nightly retraining
+//! - Auto-refreshes lookup tables from updated models
 //!
 //! # Architecture
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │                      Adaptive ML Engine                                  │
+//! │                Adaptive ML Engine + HuggingFace                          │
 //! ├─────────────────────────────────────────────────────────────────────────┤
 //! │                                                                          │
-//! │  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐            │
-//! │  │   Lookup     │────▶│   Live ML    │────▶│   Online     │            │
-//! │  │   Tables     │     │   Inference  │     │   Learning   │            │
-//! │  │   (<100ns)   │     │   (~1µs)     │     │              │            │
-//! │  └──────┬───────┘     └──────────────┘     └──────┬───────┘            │
-//! │         │                                         │                     │
-//! │         │         ┌──────────────┐               │                     │
-//! │         └────────▶│   Table      │◀──────────────┘                     │
-//! │                   │   Refresh    │                                      │
-//! │                   │   (hourly)   │                                      │
-//! │                   └──────────────┘                                      │
+//! │  STARTUP:                                                               │
+//! │    HF Hub (gagansuie/oxidize-models)                                    │
+//! │         │                                                               │
+//! │         ▼                                                               │
+//! │    Download safetensors ──▶ Load weights ──▶ Generate lookup tables     │
+//! │                                                                          │
+//! │  RUNTIME:                                                               │
+//! │    Lookup Tables (<100ns) ──▶ Live ML (~1µs) ──▶ Record observations     │
+//! │                                                                          │
+//! │  HOURLY:                                                                │
+//! │    Upload observations to HF ──▶ Refresh tables from online learning    │
+//! │                                                                          │
+//! │  NIGHTLY (CI/CD):                                                       │
+//! │    Aggregate training data ──▶ Retrain models ──▶ Push to HF Hub        │
 //! │                                                                          │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
-//!
-//! # Flow
-//! 1. **Fast path**: Lookup table hit → <100ns decision
-//! 2. **Slow path**: Table miss → Live ML inference (~1µs)
-//! 3. **Learning**: Every packet → Record observation
-//! 4. **Refresh**: Every hour → Retrain model, regenerate tables
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use super::ml_lookup::MlLookupEngine;
 use super::onnx_ml::OnnxInference;
+use crate::model_hub::{HubConfig, ModelHub, ModelPaths};
 
 /// Network observation for online learning
 #[derive(Debug, Clone, Copy)]
@@ -100,7 +104,33 @@ impl Observation {
     }
 }
 
-/// Adaptive ML Engine with online learning
+/// Serializable observation for HF upload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableObservation {
+    pub rtt_us: u64,
+    pub loss_rate: f32,
+    pub bandwidth_mbps: f64,
+    pub cwnd_used: u64,
+    pub throughput_achieved: u64,
+    pub reward: f32,
+    pub timestamp_ms: u64,
+}
+
+impl From<&Observation> for SerializableObservation {
+    fn from(obs: &Observation) -> Self {
+        Self {
+            rtt_us: obs.rtt_us,
+            loss_rate: obs.loss_rate,
+            bandwidth_mbps: obs.bandwidth_mbps,
+            cwnd_used: obs.cwnd_used,
+            throughput_achieved: obs.throughput_achieved,
+            reward: obs.reward,
+            timestamp_ms: obs.timestamp.elapsed().as_millis() as u64,
+        }
+    }
+}
+
+/// Adaptive ML Engine with online learning + HuggingFace integration
 pub struct AdaptiveMlEngine {
     /// Fast path: pre-computed lookup tables
     lookup: Arc<RwLock<MlLookupEngine>>,
@@ -122,6 +152,18 @@ pub struct AdaptiveMlEngine {
     last_refresh: Arc<RwLock<Instant>>,
     observations_since_refresh: AtomicU64,
     min_observations_for_refresh: u64,
+
+    /// HuggingFace Hub integration
+    hub: Arc<RwLock<Option<ModelHub>>>,
+    hf_upload_enabled: AtomicBool,
+    last_hf_upload: Arc<RwLock<Instant>>,
+    hf_upload_interval: Duration,
+
+    /// Model paths from HF
+    model_paths: Arc<RwLock<Option<ModelPaths>>>,
+
+    /// Whether models were loaded from HF
+    models_loaded: AtomicBool,
 
     /// Statistics
     pub stats: AdaptiveStats,
@@ -169,9 +211,10 @@ impl AdaptiveStats {
 }
 
 impl AdaptiveMlEngine {
-    /// Create new adaptive ML engine
+    /// Create new adaptive ML engine with HuggingFace integration
+    /// Automatically downloads models from HF Hub and initializes
     pub fn new() -> Self {
-        Self {
+        let mut engine = Self {
             lookup: Arc::new(RwLock::new(MlLookupEngine::new())),
             live_cwnd_model: OnnxInference::new(super::onnx_ml::ModelType::CongestionController),
             live_fec_model: OnnxInference::new(super::onnx_ml::ModelType::FecDecision),
@@ -183,8 +226,125 @@ impl AdaptiveMlEngine {
             last_refresh: Arc::new(RwLock::new(Instant::now())),
             observations_since_refresh: AtomicU64::new(0),
             min_observations_for_refresh: 10_000,
+            hub: Arc::new(RwLock::new(None)),
+            hf_upload_enabled: AtomicBool::new(true),
+            last_hf_upload: Arc::new(RwLock::new(Instant::now())),
+            hf_upload_interval: Duration::from_secs(3600), // Upload hourly
+            model_paths: Arc::new(RwLock::new(None)),
+            models_loaded: AtomicBool::new(false),
             stats: AdaptiveStats::default(),
+        };
+
+        // Auto-initialize from HF Hub
+        engine.init_from_huggingface();
+
+        engine
+    }
+
+    /// Initialize and download models from HuggingFace Hub
+    fn init_from_huggingface(&mut self) {
+        tracing::info!("Initializing ML engine from HuggingFace Hub...");
+
+        let hub = ModelHub::new(HubConfig::default());
+
+        // Try to download models
+        match hub.download_models() {
+            Ok(paths) => {
+                tracing::info!("Downloaded models from HuggingFace Hub");
+                self.load_weights_from_paths(&paths);
+                *self.model_paths.write().unwrap() = Some(paths);
+                self.models_loaded.store(true, Ordering::SeqCst);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to download from HF Hub: {}, using embedded weights",
+                    e
+                );
+                // Load from local hf_repo if available
+                self.load_from_local_repo();
+            }
         }
+
+        *self.hub.write().unwrap() = Some(hub);
+
+        // Regenerate lookup tables from loaded weights
+        self.regenerate_lookup_tables();
+    }
+
+    /// Load weights from local hf_repo directory
+    fn load_from_local_repo(&mut self) {
+        let local_paths = [
+            "hf_repo/lstm_loss_predictor.safetensors",
+            "hf_repo/dqn_congestion.safetensors",
+        ];
+
+        for path in &local_paths {
+            let full_path = PathBuf::from(path);
+            if full_path.exists() {
+                tracing::info!("Loading weights from local: {}", path);
+                self.load_safetensors_weights(&full_path);
+            }
+        }
+    }
+
+    /// Load weights from model paths
+    fn load_weights_from_paths(&mut self, paths: &ModelPaths) {
+        if let Some(ref lstm_path) = paths.lstm {
+            self.load_safetensors_weights(lstm_path);
+        }
+        if let Some(ref dqn_path) = paths.dqn {
+            self.load_safetensors_weights(dqn_path);
+        }
+    }
+
+    /// Load weights from safetensors file
+    fn load_safetensors_weights(&mut self, path: &PathBuf) {
+        match safetensors::SafeTensors::deserialize(&std::fs::read(path).unwrap_or_default()) {
+            Ok(tensors) => {
+                // Extract weights based on tensor names
+                for (name, tensor) in tensors.tensors() {
+                    let data: Vec<f32> = tensor
+                        .data()
+                        .chunks(4)
+                        .filter_map(|b| b.try_into().ok())
+                        .map(f32::from_le_bytes)
+                        .collect();
+
+                    if name.contains("cwnd")
+                        || name.contains("congestion")
+                        || name.contains("policy")
+                    {
+                        *self.cwnd_weights.write().unwrap() = data;
+                        tracing::info!(
+                            "Loaded CWND weights: {} params",
+                            self.cwnd_weights.read().unwrap().len()
+                        );
+                    } else if name.contains("fec") || name.contains("loss") {
+                        *self.fec_weights.write().unwrap() = data.into_iter().take(16).collect();
+                        tracing::info!("Loaded FEC weights");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load safetensors {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Regenerate lookup tables from current weights
+    fn regenerate_lookup_tables(&self) {
+        let new_lookup = MlLookupEngine::from_model(
+            |rtt_us, loss_rate, bw_mbps, features| {
+                self.infer_cwnd_with_updated_weights(rtt_us, loss_rate, bw_mbps, features)
+            },
+            |loss_rate| self.infer_fec_with_updated_weights(loss_rate),
+        );
+
+        if let Ok(mut lookup) = self.lookup.write() {
+            *lookup = new_lookup;
+        }
+
+        tracing::info!("Lookup tables regenerated from trained weights");
     }
 
     /// Create with custom refresh interval
@@ -197,6 +357,17 @@ impl AdaptiveMlEngine {
     pub fn with_max_observations(mut self, max: usize) -> Self {
         self.max_observations = max;
         self
+    }
+
+    /// Enable/disable HuggingFace upload
+    pub fn with_hf_upload(self, enabled: bool) -> Self {
+        self.hf_upload_enabled.store(enabled, Ordering::SeqCst);
+        self
+    }
+
+    /// Check if models were successfully loaded
+    pub fn models_loaded(&self) -> bool {
+        self.models_loaded.load(Ordering::SeqCst)
     }
 
     /// Get CWND decision (fast path → slow path fallback)
@@ -311,7 +482,128 @@ impl AdaptiveMlEngine {
 
         if should_refresh {
             self.refresh_tables();
+
+            // Also upload to HF if enabled
+            if self.hf_upload_enabled.load(Ordering::Relaxed) {
+                self.maybe_upload_to_hf();
+            }
         }
+    }
+
+    /// Upload training observations to HuggingFace Hub
+    fn maybe_upload_to_hf(&self) {
+        let should_upload = {
+            let last = self.last_hf_upload.read().unwrap();
+            last.elapsed() >= self.hf_upload_interval
+        };
+
+        if !should_upload {
+            return;
+        }
+
+        // Get observations to upload
+        let observations: Vec<SerializableObservation> = {
+            let obs = self.observations.read().unwrap();
+            obs.iter().map(SerializableObservation::from).collect()
+        };
+
+        if observations.is_empty() {
+            return;
+        }
+
+        // Upload in background thread to not block hot path
+        let hub = self.hub.clone();
+        let last_upload = self.last_hf_upload.clone();
+
+        std::thread::spawn(move || {
+            if let Some(ref hub) = *hub.read().unwrap() {
+                // Convert to LossSample format for hub
+                let loss_samples: Vec<crate::ml_optimized::LossSample> = observations
+                    .iter()
+                    .map(|o| crate::ml_optimized::LossSample {
+                        timestamp_ms: o.timestamp_ms,
+                        rtt_us: o.rtt_us,
+                        rtt_var_us: 0,
+                        bandwidth_bps: (o.bandwidth_mbps * 1_000_000.0) as u64,
+                        loss_rate: o.loss_rate,
+                        inflight: o.cwnd_used as u32,
+                        buffer_occupancy: 0.0,
+                        ipg_us: 0,
+                        future_loss: o.loss_rate,
+                    })
+                    .collect();
+
+                match hub.upload_training_data(&loss_samples, &[]) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Uploaded {} observations to HuggingFace Hub",
+                            observations.len()
+                        );
+                        *last_upload.write().unwrap() = Instant::now();
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to upload to HF Hub: {}", e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Force upload observations to HuggingFace Hub
+    pub fn force_upload_to_hf(&self) -> Result<(), String> {
+        let observations: Vec<SerializableObservation> = {
+            let obs = self.observations.read().unwrap();
+            obs.iter().map(SerializableObservation::from).collect()
+        };
+
+        if observations.is_empty() {
+            return Err("No observations to upload".into());
+        }
+
+        let hub_guard = self.hub.read().unwrap();
+        let hub = hub_guard.as_ref().ok_or("HF Hub not initialized")?;
+
+        let loss_samples: Vec<crate::ml_optimized::LossSample> = observations
+            .iter()
+            .map(|o| crate::ml_optimized::LossSample {
+                timestamp_ms: o.timestamp_ms,
+                rtt_us: o.rtt_us,
+                rtt_var_us: 0,
+                bandwidth_bps: (o.bandwidth_mbps * 1_000_000.0) as u64,
+                loss_rate: o.loss_rate,
+                inflight: o.cwnd_used as u32,
+                buffer_occupancy: 0.0,
+                ipg_us: 0,
+                future_loss: o.loss_rate,
+            })
+            .collect();
+
+        hub.upload_training_data(&loss_samples, &[])
+            .map_err(|e| e.to_string())?;
+
+        *self.last_hf_upload.write().unwrap() = Instant::now();
+        tracing::info!(
+            "Force uploaded {} observations to HuggingFace Hub",
+            observations.len()
+        );
+
+        Ok(())
+    }
+
+    /// Sync models from HuggingFace Hub (download latest)
+    pub fn sync_from_hf(&mut self) -> Result<(), String> {
+        let hub_guard = self.hub.read().unwrap();
+        let hub = hub_guard.as_ref().ok_or("HF Hub not initialized")?;
+
+        let paths = hub.download_models().map_err(|e| e.to_string())?;
+        drop(hub_guard);
+
+        self.load_weights_from_paths(&paths);
+        self.regenerate_lookup_tables();
+        self.models_loaded.store(true, Ordering::SeqCst);
+
+        tracing::info!("Synced models from HuggingFace Hub");
+        Ok(())
     }
 
     /// Force refresh lookup tables from current observations

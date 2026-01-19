@@ -321,8 +321,8 @@ rate_limit_per_ip = 100
 enable_rohc = true
 rohc_max_size = 1400
 
-# Congestion control (bbr, bbr_v4, cubic, gaming)
-congestion_algorithm = "bbr_v4"
+# Congestion control (adaptive_ml, cubic, gaming)
+congestion_algorithm = "adaptive_ml"
 
 # Priority scheduling
 enable_priority_scheduler = true
@@ -411,7 +411,7 @@ enable_priority_scheduler = true
 | **ML Engine** | PPO Congestion Controller | ✅ Implemented |
 | **ML Engine** | Speculative Pre-computation | ✅ Implemented |
 | **ML Engine** | UCB1 Path Selection | ✅ Implemented |
-| **Congestion** | BBRv4 (10x CPU efficiency) | ✅ Implemented |
+| **Congestion** | Adaptive ML (online learning) | ✅ Implemented |
 | **Congestion** | ML-Augmented Pacing | ✅ Implemented |
 | **Multipath** | MPTCP-style Redundancy | ✅ Implemented |
 | **Multipath** | ML Handoff Prediction (WiFi→LTE) | ✅ Implemented |
