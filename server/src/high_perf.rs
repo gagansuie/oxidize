@@ -5,7 +5,7 @@
 //! - Zero-copy buffer management
 //! - UDP batching (GSO/GRO)
 //! - Multi-path support
-//! - io_uring ready abstractions
+//! - Kernel bypass ready abstractions
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -20,8 +20,15 @@ use oxidize_common::simd_fec::FecSimdLevel;
 use oxidize_common::udp_batch::{GsoBatch, UdpBatcher, UdpCoalescer};
 use oxidize_common::zero_copy::{BufferPool, PacketRingBuffer};
 
-#[cfg(target_os = "linux")]
-use oxidize_common::io_uring_impl::UringInstance;
+// New optimization modules
+use oxidize_common::deep_packet_inspection::DeepPacketInspector;
+use oxidize_common::handoff_prediction::HandoffPredictor;
+use oxidize_common::ml_pacing::MlAugmentedPacer;
+use oxidize_common::mptcp_redundancy::MptcpRedundancyScheduler;
+use oxidize_common::optimization_stats::OptimizationStats;
+use oxidize_common::protocol_optimizations::{DynamicBufferPool, TrustedNetworkDetector};
+use oxidize_common::simd_avx512::SimdParser;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -58,8 +65,6 @@ pub struct HighPerfConfig {
     pub enable_priority_scheduler: bool,
     /// Enable SIMD FEC acceleration
     pub enable_simd_fec: bool,
-    /// Enable io_uring (Linux only)
-    pub enable_io_uring: bool,
     /// Buffer pool size
     pub buffer_pool_size: usize,
     /// Maximum batch size
@@ -78,7 +83,6 @@ impl Default for HighPerfConfig {
             enable_parallel_compression: true,
             enable_priority_scheduler: true,
             enable_simd_fec: true,
-            enable_io_uring: cfg!(target_os = "linux"),
             buffer_pool_size: 256,
             max_batch_size: 64,
             batch_flush_us: 100,
@@ -113,10 +117,6 @@ pub struct HighPerfPipeline {
     stats: Arc<PipelineStatsAtomic>,
     /// Last batch flush time
     last_flush: Mutex<Instant>,
-    /// io_uring instance (Linux only)
-    #[cfg(target_os = "linux")]
-    #[allow(dead_code)]
-    io_uring: Option<Mutex<UringInstance>>,
     /// Latency tracker for µs-precision monitoring
     #[allow(dead_code)]
     latency_tracker: LatencyTracker,
@@ -126,6 +126,21 @@ pub struct HighPerfPipeline {
     /// SIMD-accelerated compressor
     #[allow(dead_code)]
     simd_compressor: SimdCompressor,
+    // ===== New Optimization Modules =====
+    /// ML-augmented pacing for BBRv4
+    ml_pacer: MlAugmentedPacer,
+    /// MPTCP-style redundancy scheduler
+    mptcp_scheduler: MptcpRedundancyScheduler,
+    /// ML handoff prediction (WiFi→LTE)
+    handoff_predictor: HandoffPredictor,
+    /// Deep packet inspection + app fingerprinting
+    dpi: DeepPacketInspector,
+    /// Trusted network detector (skip encryption)
+    trusted_detector: TrustedNetworkDetector,
+    /// Dynamic buffer pool sizing
+    dynamic_pool: DynamicBufferPool,
+    /// AVX-512/AVX2 SIMD packet parser
+    simd_parser: SimdParser,
 }
 
 /// Atomic statistics for lock-free updates
@@ -157,26 +172,6 @@ impl HighPerfPipeline {
         let simd_fec_level = FecSimdLevel::detect();
         tracing::info!("SIMD FEC level: {:?}", simd_fec_level);
 
-        // Initialize io_uring on Linux if enabled
-        #[cfg(target_os = "linux")]
-        let io_uring = if config.enable_io_uring {
-            match UringInstance::new(256, 64, 65536) {
-                Ok(ring) => {
-                    tracing::info!("io_uring initialized with 256 entries, 64 buffers");
-                    Some(Mutex::new(ring))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to initialize io_uring: {}, falling back to standard I/O",
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         HighPerfPipeline {
             fec: Mutex::new(AdaptiveFec::new()),
             buffer_pool: Mutex::new(BufferPool::new(65536, 64, config.buffer_pool_size)),
@@ -189,13 +184,57 @@ impl HighPerfPipeline {
             ring_buffer: Mutex::new(PacketRingBuffer::new(1024 * 1024)), // 1MB ring
             stats: Arc::new(PipelineStatsAtomic::default()),
             last_flush: Mutex::new(Instant::now()),
-            #[cfg(target_os = "linux")]
-            io_uring,
             latency_tracker: LatencyTracker::default(),
             heuristic_engine: HeuristicEngine::new(),
             simd_compressor: SimdCompressor::new(),
+            // New optimization modules
+            ml_pacer: MlAugmentedPacer::default(),
+            mptcp_scheduler: MptcpRedundancyScheduler::default(),
+            handoff_predictor: HandoffPredictor::new(),
+            dpi: DeepPacketInspector::new(),
+            trusted_detector: TrustedNetworkDetector::new(),
+            dynamic_pool: DynamicBufferPool::new(config.buffer_pool_size, 64, 4096),
+            simd_parser: SimdParser::new(),
             config,
         }
+    }
+
+    /// Get unified optimization statistics
+    pub fn optimization_stats(&self) -> OptimizationStats {
+        OptimizationStats::collect(
+            Some(&self.ml_pacer),
+            Some(&self.mptcp_scheduler),
+            Some(&self.handoff_predictor),
+            Some(&self.dpi),
+            Some(&self.trusted_detector),
+            Some(&self.dynamic_pool),
+            None, // NUMA allocator not used here
+            Some(&self.simd_parser),
+        )
+    }
+
+    /// Check if destination is on trusted network (can skip encryption)
+    pub fn is_trusted_connection(&self, src: std::net::IpAddr, dst: std::net::IpAddr) -> bool {
+        self.trusted_detector.should_skip_encryption(src, dst)
+    }
+
+    /// Inspect packet and identify application
+    pub fn inspect_packet(
+        &self,
+        src_ip: std::net::IpAddr,
+        src_port: u16,
+        dst_ip: std::net::IpAddr,
+        dst_port: u16,
+        payload: &[u8],
+        packet_size: u16,
+    ) -> oxidize_common::deep_packet_inspection::IdentifiedApp {
+        self.dpi
+            .inspect(src_ip, src_port, dst_ip, dst_port, payload, packet_size)
+    }
+
+    /// Get ML pacing recommendation for CWND
+    pub fn get_pacing_recommendation(&self, current_cwnd: u32) -> u32 {
+        self.ml_pacer.get_recommended_cwnd(current_cwnd)
     }
 
     /// Process outgoing packet through the pipeline

@@ -381,7 +381,6 @@ let udp_config = UnifiedTransportConfig {
 
 - [x] **QUIC transport** - Unified QUIC for all platforms ✅
 - [x] **Unified protocol** - Same OxTunnel on desktop and mobile ✅
-- [x] **io_uring integration** - Batch I/O for fewer syscalls (Linux 5.1+) ✅
 - [x] **DPDK acceleration** - Kernel bypass for 100+ Gbps (bare metal) ✅
 - [x] **0-RTT resumption** - Instant reconnects with session tickets + anti-replay protection ✅
 - [ ] **Multi-path support** - Aggregate WiFi + LTE

@@ -191,7 +191,7 @@ impl MlIntegration {
 
         // Cache miss - compute synchronously (fast heuristic)
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut engine) = self.engine.write() {
+        if let Ok(engine) = self.engine.write() {
             engine.compression_decision(data)
         } else {
             MlCompressionDecision::Skip
@@ -260,7 +260,7 @@ impl MlIntegration {
 
     /// Select path for traffic type
     pub fn select_path(&self, traffic: TrafficContext) -> PathId {
-        if let Ok(mut engine) = self.engine.write() {
+        if let Ok(engine) = self.engine.write() {
             let path = engine.select_path(traffic);
             // Update cache
             if let Ok(mut cache) = self.cache.path_cache.write() {

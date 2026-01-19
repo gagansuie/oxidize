@@ -64,10 +64,9 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **Tiered Kernel Bypass** - Auto-selects best mode: DPDK (100+ Gbps) → AF_XDP (10-40 Gbps) → io_uring
+- **Kernel Bypass** - DPDK (100+ Gbps) and AF_XDP (10-40 Gbps) for bare metal
 - **AF_XDP Active** - Zero-copy packet I/O on bare metal (Vultr), saturates 10GbE NICs
 - **DPDK Ready** - Full DPDK implementation for future 100GbE upgrades
-- **io_uring Integration** - Real io_uring syscalls, 10-20x syscall reduction on Linux 5.1+
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
@@ -129,6 +128,11 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
   - Batch ACK processing (64 ACKs at once)
   - Lock-free atomics (zero mutex overhead)
   - Gaming mode (low latency) and throughput mode (bulk transfer)
+  - **ML-augmented pacing** - LSTM predictions pre-emptively reduce CWND before loss
+- **Deep Packet Inspection** - Identifies Discord, Zoom, Valorant, Fortnite by protocol patterns
+- **Application Fingerprinting** - Detect apps on non-standard ports (Discord on 443, etc.)
+- **MPTCP-style Redundancy** - Critical packets sent on all paths for zero packet loss
+- **ML Handoff Prediction** - Predicts WiFi→LTE transitions 5+ seconds ahead
 - **HTTP/3 Priority Scheduler** - Real-time traffic prioritization
 - **Traffic Classification** - Auto-detects gaming/streaming/VoIP for optimal handling
 - **Smart Split-Tunneling** - Gaming tunneled for optimization, streaming bypassed for clean IP
@@ -394,7 +398,6 @@ enable_priority_scheduler = true
 | **Transport** | Multi-path Aggregation | ✅ Implemented |
 | **Kernel Bypass** | AF_XDP (10-40 Gbps) | ✅ Implemented |
 | **Kernel Bypass** | DPDK Ready (100+ Gbps) | ✅ Implemented |
-| **Kernel Bypass** | io_uring Integration | ✅ Implemented |
 | **Compression** | LZ4 (~4 GB/s) | ✅ Implemented |
 | **Compression** | ROHC Headers (44% reduction) | ✅ Implemented |
 | **Compression** | Per-Connection Dictionaries | ✅ Implemented |
@@ -403,6 +406,15 @@ enable_priority_scheduler = true
 | **ML Engine** | Speculative Pre-computation | ✅ Implemented |
 | **ML Engine** | UCB1 Path Selection | ✅ Implemented |
 | **Congestion** | BBRv4 (10x CPU efficiency) | ✅ Implemented |
+| **Congestion** | ML-Augmented Pacing | ✅ Implemented |
+| **Multipath** | MPTCP-style Redundancy | ✅ Implemented |
+| **Multipath** | ML Handoff Prediction (WiFi→LTE) | ✅ Implemented |
+| **Traffic** | Deep Packet Inspection | ✅ Implemented |
+| **Traffic** | Application Fingerprinting | ✅ Implemented |
+| **Protocol** | Trusted Network Detection | ✅ Implemented |
+| **Protocol** | Dynamic Buffer Pool | ✅ Implemented |
+| **Protocol** | NUMA-Aware Allocation | ✅ Implemented |
+| **SIMD** | AVX-512/AVX2 Packet Parsing | ✅ Implemented |
 | **FEC** | Adaptive Reed-Solomon | ✅ Implemented |
 | **Security** | TLS 1.3 / Let's Encrypt | ✅ Implemented |
 | **Security** | Rate Limiting / DDoS Protection | ✅ Implemented |
@@ -555,7 +567,7 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (Transformer, PPO, UCB1)
 - [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - Tiered kernel bypass (DPDK/AF_XDP/io_uring)
+- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - Kernel bypass (DPDK/AF_XDP)
 - [VULTR_DEPLOYMENT.md](docs/VULTR_DEPLOYMENT.md) - Bare metal deployment guide
 - [OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md) - Performance tuning guide
 - [ZERO-DOWNTIME.md](docs/ZERO-DOWNTIME.md) - Zero-downtime deployment
@@ -619,7 +631,7 @@ cargo bench --package oxidize-common
 ║ CPU Pinning:         Dedicated cores per queue                 ║
 ║ NUMA Aware:          Memory allocation close to CPU            ║
 ║ Huge Pages:          1GB/2MB pages for minimal TLB misses      ║
-║ Auto-Selection:      DPDK → AF_XDP → io_uring (fallback)       ║
+║ Auto-Selection:      DPDK → AF_XDP                             ║
 ╚════════════════════════════════════════════════════════════════╝
 ```
 

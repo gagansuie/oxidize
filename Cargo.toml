@@ -16,7 +16,6 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 tokio = { version = "1.43", features = ["full"] }
-io-uring = "0.7"
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pemfile = "2.2"

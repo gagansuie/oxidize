@@ -35,12 +35,6 @@ pub mod rohc;
 pub mod unified_transport;
 pub mod varint_header;
 
-#[cfg(target_os = "linux")]
-pub mod io_uring_support;
-
-#[cfg(target_os = "linux")]
-pub mod io_uring_impl;
-
 // Kernel Bypass - 100x optimized with custom implementations (100+ Gbps)
 // Provides: BypassConfig, BypassPacket, BypassProcessor
 // Plus: UltraConfig, KernelBypassRuntime, PacketBuffer, SpscRing (100x optimized)
@@ -63,7 +57,20 @@ pub mod crypto_accel;
 pub mod ktls;
 pub mod low_latency;
 pub mod parallel_compression;
-pub mod simd_fec; // Kernel TLS offload for 30% CPU reduction
+pub mod simd_fec;
+
+// Advanced Optimizations (High Impact)
+pub mod deep_packet_inspection;
+pub mod handoff_prediction; // ML handoff prediction (WiFi→LTE)
+pub mod ml_pacing; // ML-augmented pacing for BBRv4
+pub mod mptcp_redundancy; // MPTCP-style redundancy for multipath // DPI + application fingerprinting
+
+// Protocol Optimizations (Medium Impact)
+pub mod protocol_optimizations; // Varint encoding, trusted networks, buffer pool, NUMA
+pub mod simd_avx512; // AVX-512 SIMD packet parsing
+
+// Unified optimization stats for analytics
+pub mod optimization_stats;
 
 pub use compression::*;
 pub use metrics::*;

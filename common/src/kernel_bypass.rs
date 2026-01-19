@@ -1402,7 +1402,7 @@ pub enum BypassMode {
     Dpdk,
     /// AF_XDP kernel bypass (10-40 Gbps)
     AfXdp,
-    /// Fallback to optimized userspace (io_uring)
+    /// Fallback to optimized userspace
     Userspace,
     /// Disabled (standard networking)
     Disabled,
@@ -1410,7 +1410,7 @@ pub enum BypassMode {
 
 impl UnifiedBypass {
     /// Create a new unified bypass, auto-detecting best mode
-    /// Priority: DPDK > AF_XDP > io_uring userspace
+    /// Priority: DPDK > AF_XDP > userspace
     #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
     pub fn new(interface: Option<&str>) -> std::io::Result<Self> {
         // Try DPDK first (100+ Gbps)
@@ -1462,9 +1462,9 @@ impl UnifiedBypass {
             }
         }
 
-        // Fallback to optimized userspace (io_uring)
+        // Fallback to optimized userspace
         let runtime = KernelBypassRuntime::new(UltraConfig::default())?;
-        info!("Using optimized userspace mode (io_uring)");
+        info!("Using optimized userspace mode");
 
         Ok(Self {
             dpdk: None,

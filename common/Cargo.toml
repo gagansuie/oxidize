@@ -45,8 +45,6 @@ tracing-subscriber = { workspace = true }
 socket2 = { workspace = true }
 quinn = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-io-uring = { workspace = true }
 # DPDK uses FFI bindings directly (libdpdk must be installed on system)
 
 [target.'cfg(unix)'.dependencies]

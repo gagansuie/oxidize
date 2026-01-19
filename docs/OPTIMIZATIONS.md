@@ -89,9 +89,8 @@ Layer 5: Security (Constant-Time Crypto, Rate Limiting)
 |------|--------|--------------|--------|--------|
 | AF_XDP | ✅ **ACTIVE** | Zero-copy kernel bypass for 10-40 Gbps | Very High | Very High |
 | DPDK | ✅ **READY** | Full DPDK for 100+ Gbps (when 100GbE available) | Very High | Very High |
-| io_uring | ✅ Implemented | Fallback mode with multishot recv | Medium | Medium |
 | SIMD parsing | ✅ **AVX-512/AVX2** | Packet parsing accelerated (2x with AVX-512) | Medium | High |
-| UnifiedBypass | ✅ **IMPLEMENTED** | Auto-selects DPDK → AF_XDP → io_uring | High | Very High |
+| UnifiedBypass | ✅ **IMPLEMENTED** | Auto-selects DPDK → AF_XDP | High | Very High |
 
 ---
 
@@ -118,9 +117,9 @@ Layer 5: Security (Constant-Time Crypto, Rate Limiting)
 
 ### Remaining Optimizations
 
-| Area | Current | Optimization | Effort | Impact |
-|------|---------|--------------|--------|--------|
-| CWND adjustment | Reactive | **ML-augmented pacing** - use LSTM predictions to pre-emptively reduce CWND before loss | High | High |
+| Area | Status | Optimization | Effort | Impact |
+|------|--------|--------------|--------|--------|
+| CWND adjustment | ✅ **IMPLEMENTED** | **ML-augmented pacing** (`ml_pacing.rs`) - LSTM predictions pre-emptively reduce CWND before loss | High | High |
 
 See [BBRV4.md](BBRV4.md) for detailed documentation.
 
@@ -184,11 +183,11 @@ fn adjust_fec_proactive(&mut self, loss_probability: f32) {
 
 ### Potential Optimizations
 
-| Area | Current | Optimization | Effort | Impact |
-|------|---------|--------------|--------|--------|
-| Packet scheduling | Single path | **MPTCP-style redundancy** - critical packets on both paths | Medium | High |
-| Path estimation | Rolling window | **Exponential moving average** for faster response | Low | Medium | ✅ |
-| Handoff | Reactive | **ML handoff prediction** - predict WiFi→LTE transitions | High | High |
+| Area | Status | Optimization | Effort | Impact |
+|------|--------|--------------|--------|--------|
+| Packet scheduling | ✅ **IMPLEMENTED** | **MPTCP-style redundancy** (`mptcp_redundancy.rs`) - critical packets on both paths | Medium | High |
+| Path estimation | ✅ **IMPLEMENTED** | **Exponential moving average** for faster response | Low | Medium |
+| Handoff | ✅ **IMPLEMENTED** | **ML handoff prediction** (`handoff_prediction.rs`) - predict WiFi→LTE transitions | High | High |
 
 ---
 
@@ -200,11 +199,11 @@ fn adjust_fec_proactive(&mut self, loss_probability: f32) {
 
 ### Potential Optimizations
 
-| Area | Current | Optimization | Effort | Impact |
-|------|---------|--------------|--------|--------|
-| Detection | Port-based | **Deep packet inspection** - identify game protocols by patterns, not just ports | High | High |
-| Fingerprinting | None | **Application fingerprinting** - detect Discord/Zoom on non-standard ports | High | Medium |
-| User control | None | **User hints API** - allow marking specific apps as high-priority | Low | Medium | ✅ |
+| Area | Status | Optimization | Effort | Impact |
+|------|--------|--------------|--------|--------|
+| Detection | ✅ **IMPLEMENTED** | **Deep packet inspection** (`deep_packet_inspection.rs`) - identify game protocols by patterns | High | High |
+| Fingerprinting | ✅ **IMPLEMENTED** | **Application fingerprinting** (`deep_packet_inspection.rs`) - detect Discord/Zoom on non-standard ports | High | Medium |
+| User control | ✅ **IMPLEMENTED** | **User hints API** - allow marking specific apps as high-priority | Low | Medium |
 
 ---
 
@@ -270,4 +269,16 @@ These optimizations provide the best effort-to-impact ratio:
 ---
 
 *Document created: 2026-01-14*
-*Last updated: 2026-01-18*
+*Last updated: 2026-01-19*
+
+## New Optimization Modules (2026-01-19)
+
+| Module | Type | Description |
+|--------|------|-------------|
+| `ml_pacing.rs` | High Impact | ML-augmented CWND prediction for BBRv4 |
+| `mptcp_redundancy.rs` | High Impact | MPTCP-style redundancy for critical packets |
+| `handoff_prediction.rs` | High Impact | WiFi→LTE transition prediction |
+| `deep_packet_inspection.rs` | High Impact | DPI + application fingerprinting |
+| `protocol_optimizations.rs` | Medium Impact | Varint encoding, trusted networks, buffer pool, NUMA |
+| `simd_avx512.rs` | Medium Impact | AVX-512/AVX2 packet parsing |
+| `optimization_stats.rs` | Analytics | Unified stats aggregation for monitoring |

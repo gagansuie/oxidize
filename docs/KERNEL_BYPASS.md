@@ -8,22 +8,19 @@ Oxidize includes a tiered kernel bypass implementation for bare metal deployment
 
 | Tier | Technology | Throughput | Requirements | Status |
 |------|------------|------------|--------------|--------|
-| **1** | DPDK | 100+ Gbps | Multi-NIC + libdpdk | ✅ Ready (future upgrade) |
+| **1** | DPDK | 100+ Gbps | Multi-NIC + libdpdk | ✅ Ready (future 100GbE) |
 | **2** | AF_XDP | 10-40 Gbps | Kernel 4.18+ | ✅ Active (current) |
-| **3** | io_uring | 5-10 Gbps | Kernel 5.1+ | ✅ Fallback |
 
 ## Auto-Selection Logic
 
 ```rust
 // UnifiedBypass automatically selects the best available mode:
 // 1. Try DPDK first (requires NIC bound to VFIO + libdpdk)
-// 2. Try AF_XDP second (requires root/CAP_NET_RAW)
-// 3. Fall back to io_uring userspace
+// 2. Use AF_XDP (requires root/CAP_NET_RAW)
 let bypass = UnifiedBypass::new(None)?;
 match bypass.mode() {
     BypassMode::Dpdk => info!("100+ Gbps mode"),
     BypassMode::AfXdp => info!("10-40 Gbps mode"),
-    BypassMode::Userspace => info!("5-10 Gbps mode"),
 }
 ```
 
@@ -31,7 +28,6 @@ match bypass.mode() {
 
 | Mode | Throughput | Latency | Best For |
 |------|------------|---------|----------|
-| **io_uring** (Cloud) | 5-10 Gbps | 5-20 µs | VMs, general use |
 | **AF_XDP** (Current) | 10-40 Gbps | 1-2 µs | 10GbE bare metal |
 | **DPDK** (Upgrade) | 100+ Gbps | <1 µs | 100GbE bare metal |
 
@@ -104,10 +100,10 @@ Application → User-space Driver (PMD) → NIC
 
 ## Performance Comparison
 
-| Metric | io_uring | AF_XDP (Current) | DPDK (Upgrade) |
-|--------|----------|------------------|----------------|
-| **Throughput** | 5-10 Gbps | 10-40 Gbps | 100+ Gbps |
-| **Latency** | 5-20 µs | 1-2 µs | <1 µs |
+| Metric | AF_XDP (Current) | DPDK (Upgrade) |
+|--------|------------------|----------------|
+| **Throughput** | 10-40 Gbps | 100+ Gbps |
+| **Latency** | 1-2 µs | <1 µs |
 | **Packets/sec** | 1-5M pps | 10-40M pps | 100M+ pps |
 | **CPU per packet** | ~500 cycles | ~100 cycles | ~50 cycles |
 | **System calls** | 1 per batch | 0 | 0 |
@@ -353,7 +349,7 @@ All Oxidize features work on top of kernel bypass:
 ├─────────────────────────────────────────────────────┤
 │  Ultra Kernel Bypass Runtime (100x optimized)      │  ← Custom implementation
 ├─────────────────────────────────────────────────────┤
-│  Poll-Mode Driver (kernel bypass, 100+ Gbps)       │  ← Replaces io_uring
+│  Poll-Mode Driver (kernel bypass, 100+ Gbps)       │  ← Direct NIC access
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -361,8 +357,6 @@ All Oxidize features work on top of kernel bypass:
 
 | Use Case | Recommended Mode | Technology |
 |----------|------------------|------------|
-| Development/Testing | Standard mode | io_uring |
-| Cloud VMs | Standard mode | io_uring |
 | Small VPN (<500 users) | Single Vultr node | AF_XDP |
 | Gaming/Low Latency | Bare metal Vultr | AF_XDP |
 | High-traffic CDN | Bare metal Vultr | AF_XDP |
