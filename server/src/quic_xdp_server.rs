@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::Config;
 
@@ -73,7 +73,7 @@ pub struct QuicXdpServer {
     mode: QuicMode,
     running: Arc<AtomicBool>,
     start_time: Instant,
-    config: QuicServerConfig,
+    _config: QuicServerConfig,
     #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
     xdp_runtime: Option<oxidize_common::quic_xdp::QuicXdpRuntime>,
 }
@@ -189,7 +189,7 @@ impl QuicXdpServer {
             mode,
             running: Arc::new(AtomicBool::new(false)),
             start_time: Instant::now(),
-            config,
+            _config: config,
             #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
             xdp_runtime,
         })
