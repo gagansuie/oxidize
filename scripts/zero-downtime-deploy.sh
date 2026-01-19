@@ -5,19 +5,15 @@
 #
 # Usage: ./zero-downtime-deploy.sh [--rollback]
 #
-# NOTE: This script is for SELF-HOSTED / BARE-METAL deployments using systemd.
-#       If you're deploying to Fly.io, you don't need this script!
-#       Fly.io has built-in zero-downtime deployments:
-#         fly deploy                        # Rolling (default)
-#         fly deploy --strategy bluegreen   # Blue-green
-#         fly deploy --strategy canary      # Canary
+# For Vultr bare metal deployments using systemd.
+# Uses SO_REUSEPORT for seamless handoff between old and new server.
 #
 
 set -e
 
 # Configuration
 BINARY_NAME="oxidize-server"
-SERVICE_NAME="oxidize-daemon"
+SERVICE_NAME="oxidize-server"
 INSTALL_PATH="/usr/local/bin"
 BACKUP_PATH="/usr/local/bin/backup"
 BUILD_PATH="target/release"

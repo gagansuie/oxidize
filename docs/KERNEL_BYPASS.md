@@ -307,14 +307,14 @@ Before choosing a provider, verify:
 ### Phased Deployment Strategy
 
 ```
-Phase 1 (0-300 users):     Fly.io Standard Mode ($15-30/mo)
-                           └── Validate demand before infrastructure spend
+Phase 1 (0-500 users):     Single Vultr node ($120/mo)
+                           └── vbm-4c-32gb with 10 Gbps NIC
 
-Phase 2 (300-1000 users):  Single DPDK node ($65-185/mo)
-                           └── Hetzner/OVH for testing, Vultr for production
+Phase 2 (500-2000 users):  Upgrade to larger plan ($185-350/mo)
+                           └── vbm-6c-32gb or vbm-8c-128gb
 
-Phase 3 (1000+ users):     Global DPDK deployment
-                           └── Use startup credits or revenue-funded bare metal
+Phase 3 (2000+ users):     Multi-region DPDK deployment
+                           └── Add WEST/EU servers via CI/CD matrix
 ```
 
 ## Feature Integration
@@ -335,11 +335,11 @@ All Oxidize features work on top of kernel bypass:
 
 | Use Case | Recommended Mode |
 |----------|------------------|
-| Development/Testing | Standard (Fly.io) |
-| Small VPN (<1000 users) | Standard (Fly.io) |
+| Development/Testing | Standard mode (no DPDK) |
+| Small VPN (<500 users) | Single Vultr node |
 | Gaming/Low Latency | **Kernel Bypass** (Vultr) |
 | High-traffic CDN | **Kernel Bypass** (Vultr) |
-| Enterprise (10,000+ users) | **Kernel Bypass** (Vultr) |
+| Enterprise (2000+ users) | Multi-region Vultr |
 
 ## Monitoring
 

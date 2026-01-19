@@ -397,7 +397,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  deploy:
+  deploy-fly:
     name: Deploy to Fly.io
     needs: release
     runs-on: ubuntu-latest
@@ -419,6 +419,109 @@ jobs:
         run: |
           sleep 10
           flyctl status
-          echo "✅ Deployed to relay.oxd.sh:4433"
+          echo "✅ Deployed to Fly.io"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  deploy-vultr:
+    name: Deploy to Vultr Bare Metal
+    needs: release
+    runs-on: ubuntu-latest
+    if: needs.release.outputs.release_created == 'true'
+    strategy:
+      matrix:
+        # Add more servers here for horizontal scaling
+        # Each server needs VULTR_HOST_<NAME> and VULTR_SSH_KEY secrets
+        server: [PRIMARY]
+      fail-fast: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build server binary (with kernel-bypass)
+        run: |
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release -p relay-server --features kernel-bypass
+          strip target/release/relay-server
+
+      - name: Deploy to Vultr ${{ matrix.server }}
+        env:
+          # Primary server (Chicago)
+          VULTR_HOST_PRIMARY: ${{ secrets.VULTR_HOST }}
+          VULTR_SSH_KEY: ${{ secrets.VULTR_SSH_KEY }}
+          # Add more regions for horizontal scaling:
+          # VULTR_HOST_WEST: ${{ secrets.VULTR_HOST_WEST }}
+          # VULTR_HOST_EU: ${{ secrets.VULTR_HOST_EU }}
+        run: |
+          # Get host for this matrix server
+          HOST_VAR="VULTR_HOST_${{ matrix.server }}"
+          HOST="${!HOST_VAR}"
+          
+          # Skip if secrets not configured
+          if [[ -z "$HOST" ]] || [[ -z "$VULTR_SSH_KEY" ]]; then
+            echo "⏭️ Vultr ${{ matrix.server }} not configured, skipping"
+            exit 0
+          fi
+          
+          # Setup SSH
+          mkdir -p ~/.ssh
+          echo "$VULTR_SSH_KEY" > ~/.ssh/vultr_key
+          chmod 600 ~/.ssh/vultr_key
+          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          echo "→ Deploying to Vultr ${{ matrix.server }} ($HOST)..."
+          
+          # Upload binary
+          scp -i ~/.ssh/vultr_key -o StrictHostKeyChecking=no \
+              target/release/relay-server \
+              root@$HOST:/tmp/oxidize-server
+          
+          # Zero-downtime deploy
+          ssh -i ~/.ssh/vultr_key -o StrictHostKeyChecking=no root@$HOST << 'REMOTE'
+            set -e
+            BINARY=/tmp/oxidize-server
+            INSTALL=/usr/local/bin/oxidize-server
+            BACKUP_DIR=/usr/local/bin/backup
+            
+            # Create backup dir
+            mkdir -p $BACKUP_DIR
+            
+            # Backup current binary
+            [[ -f $INSTALL ]] && cp $INSTALL $BACKUP_DIR/oxidize-server.$(date +%s)
+            
+            # Keep only last 3 backups
+            ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+            
+            # Atomic swap
+            chmod +x $BINARY
+            mv $BINARY $INSTALL
+            
+            # Graceful restart
+            systemctl reload-or-restart oxidize-server
+            
+            # Health check with retry
+            for i in 1 2 3; do
+              sleep 2
+              if curl -sf http://localhost:9090/health; then
+                echo "✓ Health check passed"
+                exit 0
+              fi
+              echo "Retry $i..."
+            done
+            
+            # Rollback on failure
+            echo "❌ Health check failed, rolling back..."
+            LATEST_BACKUP=$(ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | head -1)
+            if [[ -f "$LATEST_BACKUP" ]]; then
+              cp "$LATEST_BACKUP" $INSTALL
+              systemctl restart oxidize-server
+              echo "↩️ Rolled back to previous version"
+            fi
+            exit 1
+          REMOTE
+          
+          echo "✅ Deployed to Vultr ${{ matrix.server }}"
+          rm -f ~/.ssh/vultr_key
