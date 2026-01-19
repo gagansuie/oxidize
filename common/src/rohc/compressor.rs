@@ -7,6 +7,7 @@ use super::profiles::Profile;
 use super::FlowId;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// Compression state machine
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,8 @@ struct CompressionContext {
     packet_count: u32,
     /// IR packets sent (for state transition)
     ir_count: u8,
+    /// Last access time for LRU eviction
+    last_access: Instant,
     /// W-LSB encoder for IP-ID
     ip_id_encoder: WlsbEncoder,
     /// W-LSB encoder for sequence numbers (TCP)
@@ -62,6 +65,7 @@ impl CompressionContext {
             profile,
             packet_count: 0,
             ir_count: 0,
+            last_access: Instant::now(),
             ip_id_encoder: WlsbEncoder::new(0),
             seq_encoder: WlsbEncoder::new(-1),
             ack_encoder: WlsbEncoder::new(-1),
@@ -80,15 +84,18 @@ impl CompressionContext {
     }
 
     fn advance_state(&mut self) {
+        self.last_access = Instant::now(); // Update LRU timestamp
         match self.state {
             CompState::Ir => {
                 self.ir_count += 1;
-                if self.ir_count >= 3 {
+                // Fast transition: only 2 IR packets needed (was 3)
+                if self.ir_count >= 2 {
                     self.state = CompState::Fo;
                 }
             }
             CompState::Fo => {
-                if self.packet_count >= 10 {
+                // Fast transition: only 5 packets needed (was 10)
+                if self.packet_count >= 5 {
                     self.state = CompState::So;
                 }
             }
@@ -402,15 +409,31 @@ impl RohcCompressor {
         let cid = self.next_cid;
         self.next_cid = (self.next_cid + 1) % (self.max_contexts as u8);
 
-        // Evict old context if needed
+        // LRU eviction: remove oldest context if at capacity
         if self.contexts.len() >= self.max_contexts {
-            // Simple LRU: remove first entry
-            if let Some(key) = self.contexts.keys().next().cloned() {
-                self.contexts.remove(&key);
-            }
+            self.evict_lru_context();
         }
 
         cid
+    }
+
+    /// Evict the least recently used context
+    fn evict_lru_context(&mut self) {
+        if let Some(oldest_key) = self
+            .contexts
+            .iter()
+            .min_by_key(|(_, ctx)| ctx.last_access)
+            .map(|(k, _)| *k)
+        {
+            self.contexts.remove(&oldest_key);
+        }
+    }
+
+    /// Cleanup inactive contexts older than the given duration
+    pub fn cleanup_inactive(&mut self, max_age: std::time::Duration) {
+        let now = Instant::now();
+        self.contexts
+            .retain(|_, ctx| now.duration_since(ctx.last_access) < max_age);
     }
 
     /// Get compression statistics

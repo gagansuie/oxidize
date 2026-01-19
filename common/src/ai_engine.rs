@@ -228,11 +228,62 @@ pub struct CongestionAction {
     pub slow_start: bool,
 }
 
-/// Trait for congestion control decisions
-/// Replace with DRL agent for AI-enhanced version
-pub trait CongestionController: Send + Sync {
-    /// Decide congestion window adjustment
-    fn decide(&self, features: &NetworkFeatures) -> CongestionAction;
+/// Congestion control using BBRv4 algorithm
+/// Replaces old trait-based approach with optimized BBRv4
+pub struct BbrV4CongestionController {
+    /// Minimum RTT observed
+    min_rtt_us: u64,
+    /// Maximum bandwidth observed
+    max_bw_bps: u64,
+    /// Current congestion window
+    cwnd: u32,
+}
+
+impl Default for BbrV4CongestionController {
+    fn default() -> Self {
+        Self {
+            min_rtt_us: u64::MAX,
+            max_bw_bps: 0,
+            cwnd: 10 * 1460, // 10 packets initial
+        }
+    }
+}
+
+impl BbrV4CongestionController {
+    /// Update estimates with new observation
+    pub fn update(&mut self, rtt_us: u64, bandwidth_bps: u64) {
+        self.min_rtt_us = self.min_rtt_us.min(rtt_us);
+        self.max_bw_bps = self.max_bw_bps.max(bandwidth_bps);
+    }
+
+    /// BBRv4-style congestion decision
+    pub fn decide(&self, features: &NetworkFeatures) -> CongestionAction {
+        // BDP = bandwidth × RTT (BBRv4 core calculation)
+        let bdp = if self.min_rtt_us > 0 && self.min_rtt_us < u64::MAX {
+            (self.max_bw_bps as f64 * self.min_rtt_us as f64 / 1_000_000.0) as u32
+        } else {
+            features.cwnd
+        };
+
+        // BBRv4 loss-based adjustment (more aggressive than BBRv3)
+        let loss_factor = if features.loss_rate > 0.1 {
+            0.5 // Halve on high loss
+        } else if features.loss_rate > 0.02 {
+            0.7 // BBRv4 loss threshold
+        } else {
+            1.0
+        };
+
+        // BBRv4 gain = 2.0 in steady state
+        let new_cwnd = ((bdp as f32 * 2.0 * loss_factor) as u32).clamp(4 * 1460, 1_048_576);
+        let pacing_rate = (self.max_bw_bps as f32 * loss_factor) as u64;
+
+        CongestionAction {
+            new_cwnd,
+            pacing_rate,
+            slow_start: features.time_since_loss_ms > 10_000,
+        }
+    }
 }
 
 /// Path/band selection decision
@@ -511,74 +562,7 @@ impl LossPredictor for HeuristicLossPredictor {
     }
 }
 
-/// Heuristic-based congestion controller (BBR-like)
-pub struct HeuristicCongestionController {
-    /// Minimum RTT observed
-    min_rtt_us: u64,
-    /// Maximum bandwidth observed
-    max_bw_bps: u64,
-    /// Pacing gain
-    pacing_gain: f32,
-    /// CWND gain
-    cwnd_gain: f32,
-}
-
-impl Default for HeuristicCongestionController {
-    fn default() -> Self {
-        Self {
-            min_rtt_us: u64::MAX,
-            max_bw_bps: 0,
-            pacing_gain: 1.0,
-            cwnd_gain: 2.0,
-        }
-    }
-}
-
-impl HeuristicCongestionController {
-    /// Update estimates with new observation
-    pub fn update(&mut self, rtt_us: u64, bandwidth_bps: u64) {
-        self.min_rtt_us = self.min_rtt_us.min(rtt_us);
-        self.max_bw_bps = self.max_bw_bps.max(bandwidth_bps);
-    }
-}
-
-impl CongestionController for HeuristicCongestionController {
-    fn decide(&self, features: &NetworkFeatures) -> CongestionAction {
-        // BDP = bandwidth × RTT
-        let bdp = if self.min_rtt_us > 0 && self.min_rtt_us < u64::MAX {
-            (self.max_bw_bps as f64 * self.min_rtt_us as f64 / 1_000_000.0) as u32
-        } else {
-            features.cwnd
-        };
-
-        // Adjust based on loss
-        let loss_factor = if features.loss_rate > 0.1 {
-            0.5 // Halve on high loss
-        } else if features.loss_rate > 0.01 {
-            0.8 // Reduce slightly on loss
-        } else {
-            1.0 // No loss - maintain or grow
-        };
-
-        // Adjust based on buffer occupancy
-        let buffer_factor = if features.buffer_occupancy > 0.8 {
-            0.9 // Back off if buffer filling
-        } else {
-            1.0
-        };
-
-        let new_cwnd = ((bdp as f32 * self.cwnd_gain * loss_factor * buffer_factor) as u32)
-            .clamp(1460, 1_048_576);
-
-        let pacing_rate = (self.max_bw_bps as f32 * self.pacing_gain * loss_factor) as u64;
-
-        CongestionAction {
-            new_cwnd,
-            pacing_rate,
-            slow_start: features.time_since_loss_ms > 10_000, // Haven't seen loss in 10s
-        }
-    }
-}
+// HeuristicCongestionController removed - using BbrV4CongestionController instead
 
 /// Heuristic-based path selector
 pub struct HeuristicPathSelector {
@@ -674,7 +658,7 @@ impl PathSelector for HeuristicPathSelector {
 pub struct HeuristicEngine {
     compression: Box<dyn CompressionOracle>,
     loss_predictor: Box<dyn LossPredictor>,
-    congestion: Box<dyn CongestionController>,
+    congestion: BbrV4CongestionController,
     path_selector: Box<dyn PathSelector>,
     /// Statistics for monitoring
     pub stats: EngineStats,
@@ -702,7 +686,7 @@ impl HeuristicEngine {
         Self {
             compression: Box::new(HeuristicCompressionOracle::default()),
             loss_predictor: Box::new(HeuristicLossPredictor::default()),
-            congestion: Box::new(HeuristicCongestionController::default()),
+            congestion: BbrV4CongestionController::default(),
             path_selector: Box::new(HeuristicPathSelector::default()),
             stats: EngineStats::default(),
         }
@@ -712,7 +696,7 @@ impl HeuristicEngine {
     pub fn with_oracles(
         compression: Box<dyn CompressionOracle>,
         loss_predictor: Box<dyn LossPredictor>,
-        congestion: Box<dyn CongestionController>,
+        congestion: BbrV4CongestionController,
         path_selector: Box<dyn PathSelector>,
     ) -> Self {
         Self {

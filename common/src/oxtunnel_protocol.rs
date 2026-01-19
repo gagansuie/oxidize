@@ -715,6 +715,24 @@ impl TunnelBufferPool {
         let fallbacks = self.fallback_allocs.load(Ordering::Relaxed);
         (available, fallbacks)
     }
+
+    /// Get buffer pool utilization (0.0 - 1.0)
+    #[inline]
+    pub fn utilization(&self) -> f32 {
+        let available = self.available.load(Ordering::Relaxed).count_ones() as f32;
+        1.0 - (available / BUFFER_POOL_SIZE as f32)
+    }
+
+    /// Check if pool is under pressure (high utilization or fallback allocations)
+    #[inline]
+    pub fn is_under_pressure(&self) -> bool {
+        self.utilization() > 0.8 || self.fallback_allocs.load(Ordering::Relaxed) > 0
+    }
+
+    /// Reset fallback allocation counter (call after handling pressure)
+    pub fn reset_fallback_counter(&self) {
+        self.fallback_allocs.store(0, Ordering::Relaxed);
+    }
 }
 
 impl Default for TunnelBufferPool {
@@ -1149,6 +1167,16 @@ impl TunnelSession {
         }
     }
 
+    /// Check if encryption should be skipped for this session (trusted network optimization)
+    /// Returns true if peer is on localhost or private network (10.x, 172.16-31.x, 192.168.x)
+    #[inline]
+    pub fn should_skip_encryption(&self) -> bool {
+        if !self.encryption_enabled {
+            return true; // Already disabled
+        }
+        is_trusted_network(self.peer_addr.ip())
+    }
+
     /// Validate sequence number against replay window
     /// Returns true if packet is valid (not a replay)
     #[inline]
@@ -1547,6 +1575,39 @@ pub fn generate_id() -> [u8; 32] {
     let mut id = [0u8; 32];
     rng.fill(&mut id).expect("Failed to generate random ID");
     id
+}
+
+// ============================================================================
+// Trusted Network Detection (Skip Encryption Optimization)
+// ============================================================================
+
+/// Check if an IP address is on a trusted network where encryption can be skipped
+/// Trusted networks: localhost, private networks (RFC 1918), link-local
+#[inline]
+pub fn is_trusted_network(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            // Localhost (127.0.0.0/8)
+            octets[0] == 127
+            // Private 10.0.0.0/8
+            || octets[0] == 10
+            // Private 172.16.0.0/12
+            || (octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31))
+            // Private 192.168.0.0/16
+            || (octets[0] == 192 && octets[1] == 168)
+            // Link-local 169.254.0.0/16
+            || (octets[0] == 169 && octets[1] == 254)
+        }
+        IpAddr::V6(ipv6) => {
+            // Loopback (::1)
+            ipv6.is_loopback()
+            // Link-local (fe80::/10) - check first 10 bits
+            || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+            // Unique local (fc00::/7) - check first 7 bits
+            || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+        }
+    }
 }
 
 #[cfg(test)]

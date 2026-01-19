@@ -183,27 +183,88 @@ pub fn compression_backend() -> &'static str {
     }
 }
 
+/// Check if data should be compressed based on entropy analysis
+/// Returns false for:
+/// - Data smaller than min_size
+/// - High-entropy data (encrypted, already compressed, random)
+/// - Known encrypted/compressed magic bytes
 pub fn should_compress(data: &[u8], min_size: usize) -> bool {
     if data.len() < min_size {
         return false;
     }
 
-    // Fast entropy check using SIMD-friendly operations
-    let sample_size = std::cmp::min(data.len(), 256);
+    // Check for known encrypted/compressed magic bytes (skip these immediately)
+    if is_already_compressed_or_encrypted(data) {
+        return false;
+    }
+
+    // Fast entropy estimation using byte frequency distribution
+    let entropy = estimate_entropy(data);
+
+    // Entropy > 7.5 bits/byte indicates encrypted/compressed data (max is 8.0)
+    // Good compressible data typically has entropy < 6.0
+    entropy < 7.5
+}
+
+/// Estimate Shannon entropy of data (bits per byte)
+/// Returns 0.0-8.0 where 8.0 = perfectly random/encrypted
+#[inline]
+pub fn estimate_entropy(data: &[u8]) -> f32 {
+    if data.is_empty() {
+        return 0.0;
+    }
+
+    // Sample up to 512 bytes for speed
+    let sample_size = data.len().min(512);
     let sample = &data[..sample_size];
 
-    let mut unique_bytes = [false; 256];
-    let mut unique_count = 0;
-
+    // Count byte frequencies
+    let mut freq = [0u32; 256];
     for &byte in sample {
-        if !unique_bytes[byte as usize] {
-            unique_bytes[byte as usize] = true;
-            unique_count += 1;
+        freq[byte as usize] += 1;
+    }
+
+    // Calculate entropy: -Σ p(x) * log2(p(x))
+    let len = sample_size as f32;
+    let mut entropy: f32 = 0.0;
+
+    for &count in &freq {
+        if count > 0 {
+            let p = count as f32 / len;
+            entropy -= p * p.log2();
         }
     }
 
-    // Don't compress high-entropy data (encrypted, already compressed)
-    unique_count < 200
+    entropy
+}
+
+/// Check for known compressed/encrypted file signatures
+#[inline]
+fn is_already_compressed_or_encrypted(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+
+    match &data[..4] {
+        // Compressed formats
+        [0x1f, 0x8b, ..] => true,         // gzip
+        [0x50, 0x4b, 0x03, 0x04] => true, // ZIP/PKZIP
+        [0x52, 0x61, 0x72, 0x21] => true, // RAR
+        [0x37, 0x7a, 0xbc, 0xaf] => true, // 7z
+        [0x04, 0x22, 0x4d, 0x18] => true, // LZ4
+        [0x28, 0xb5, 0x2f, 0xfd] => true, // Zstd
+        [0xfd, 0x37, 0x7a, 0x58] => true, // XZ
+        // Encrypted/TLS records
+        [0x17, 0x03, ..] => true, // TLS Application Data
+        [0x16, 0x03, ..] => true, // TLS Handshake
+        // Image formats (already compressed)
+        [0xff, 0xd8, 0xff, ..] => true,   // JPEG
+        [0x89, 0x50, 0x4e, 0x47] => true, // PNG
+        [0x47, 0x49, 0x46, 0x38] => true, // GIF
+        // Video formats
+        [0x00, 0x00, 0x00, b] if *b >= 0x14 && *b <= 0x20 => true, // MP4/MOV
+        _ => false,
+    }
 }
 
 /// Batch compression for maximum throughput

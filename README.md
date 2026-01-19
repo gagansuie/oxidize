@@ -205,12 +205,15 @@ Netflix, Disney+, Hulu, Prime Video, HBO Max, Spotify - automatically bypassed s
 - **Per-Connection Dictionaries** - Learns per-flow patterns for 20-40% better compression
 - **ROHC Header Compression** - 44% size reduction for UDP/IP headers
   - UDP, TCP, IP, RTP, ESP, IPv6 profiles
-  - State machine compression (IR → FO → SO)
+  - Fast state transitions (IR → FO → SO in 5 packets vs standard 10)
+  - LRU context eviction for inactive flows
   - W-LSB delta encoding for sequence numbers
   - **Enabled by default** - no configuration needed
 - **SIMD-Accelerated** - AVX2/NEON when available
 - **Intelligent Selection** - Automatically chooses best compression per packet
-- **Entropy Detection** - Skips compression for encrypted/already-compressed data
+- **Smart Entropy Detection** - Shannon entropy + magic byte detection skips encrypted/compressed data
+  - Detects gzip, ZIP, LZ4, Zstd, TLS records, JPEG, PNG, MP4
+  - Entropy threshold: >7.5 bits/byte = skip compression
 
 **ROHC Performance Impact:**
 | Traffic Type | Without ROHC | With ROHC | Savings |
@@ -569,7 +572,6 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
 - [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - Kernel bypass (DPDK/AF_XDP)
 - [VULTR_DEPLOYMENT.md](docs/VULTR_DEPLOYMENT.md) - Bare metal deployment guide
-- [OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md) - Performance tuning guide
 - [ZERO-DOWNTIME.md](docs/ZERO-DOWNTIME.md) - Zero-downtime deployment
 
 ## Testing

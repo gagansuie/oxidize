@@ -484,3 +484,29 @@ impl Default for NumaAllocator {
         Self::new()
     }
 }
+
+/// Auto-select NUMA node based on current CPU affinity
+/// Call this from worker threads to optimize memory locality
+#[cfg(target_os = "linux")]
+pub fn auto_set_numa_affinity(allocator: &NumaAllocator) {
+    if !allocator.is_available() {
+        return;
+    }
+
+    // Get current CPU
+    let cpu = unsafe { libc::sched_getcpu() };
+    if cpu >= 0 {
+        if let Some(node) = allocator.get_node_for_cpu(cpu as u32) {
+            allocator.set_preferred_node(node);
+            allocator
+                .stats
+                .local_allocations
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn auto_set_numa_affinity(_allocator: &NumaAllocator) {
+    // NUMA not available on non-Linux platforms
+}

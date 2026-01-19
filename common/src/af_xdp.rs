@@ -176,7 +176,11 @@ impl Umem {
     }
 
     /// Get mutable slice for a frame
+    ///
+    /// # Safety
+    /// Caller must ensure index is valid and no other references to this frame exist.
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn frame_mut(&self, index: u32) -> &mut [u8] {
         let ptr = (self.addr.as_ptr() as usize + (index as usize) * (self.frame_size as usize))
             as *mut u8;
