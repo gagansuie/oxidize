@@ -19,7 +19,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use oxidize_common::ml_models::{
+use oxidize_common::ml_optimized::{
     CompressionSample, DrlExperience, LossSample, PathSelectionSample,
 };
 use oxidize_common::ml_training::{DqnTrainer, LstmTrainer};
@@ -278,7 +278,7 @@ fn generate_synthetic_data(data: &mut TrainingData, count: usize) {
 
     // Generate DRL experiences
     for i in 0..count {
-        use oxidize_common::ml_models::{DrlReward, DrlState};
+        use oxidize_common::ml_optimized::{DrlReward, DrlState};
 
         let state = DrlState {
             rtt_norm: rng.gen_range(0.0..1.0),

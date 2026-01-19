@@ -857,10 +857,34 @@ impl CryptoEngine {
 }
 
 // ============================================================================
+// V2 Header Integration (55% smaller headers)
+// ============================================================================
+
+pub use crate::varint_header::{BatchHeader, HeaderStats, PacketType, V2Header};
+
+/// Protocol version for header encoding
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolVersion {
+    /// V1: Fixed 9-byte header (legacy compatibility)
+    V1,
+    /// V2: Variable-length 2-7 byte header (default for new connections)
+    V2,
+}
+
+impl Default for ProtocolVersion {
+    fn default() -> Self {
+        ProtocolVersion::V2
+    }
+}
+
+/// V2 header magic (different from V1 to distinguish)
+pub const V2_MAGIC: u8 = 0x4F; // 'O' - first byte indicates V2
+
+// ============================================================================
 // Packet Encoder/Decoder
 // ============================================================================
 
-/// Packet header
+/// Packet header (V1 format - 9 bytes fixed)
 #[derive(Debug, Clone, Copy)]
 pub struct PacketHeader {
     pub flags: u8,
@@ -973,6 +997,111 @@ pub fn decode_packet<'a>(
     }
 
     Ok((header, &buf[payload_start..payload_end]))
+}
+
+// ============================================================================
+// V2 Packet Encoder/Decoder (55% smaller headers)
+// ============================================================================
+
+/// Encode a packet using V2 variable-length header
+/// Returns total packet length (header + payload)
+#[inline]
+pub fn encode_packet_v2(
+    buf: &mut [u8],
+    payload: &[u8],
+    seq_num: u32,
+    encrypted: bool,
+    compressed: bool,
+    crypto: Option<&CryptoEngine>,
+) -> Result<usize, &'static str> {
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err("Payload too large");
+    }
+
+    // Build V2 header
+    let header = V2Header::data(seq_num, encrypted, compressed);
+    let header_size = header.encode(buf).map_err(|_| "Header encode failed")?;
+
+    let payload_start = header_size;
+
+    // Copy payload
+    buf[payload_start..payload_start + payload.len()].copy_from_slice(payload);
+    let mut total_len = payload_start + payload.len();
+
+    // Encrypt if requested and crypto is available
+    if encrypted {
+        if let Some(crypto) = crypto {
+            if crypto.is_enabled() {
+                let encrypted_len = crypto.encrypt(&mut buf[payload_start..], payload.len())?;
+                total_len = payload_start + encrypted_len;
+            }
+        }
+    }
+
+    Ok(total_len)
+}
+
+/// Decode a V2 packet, returns (header, payload slice)
+#[inline]
+pub fn decode_packet_v2<'a>(
+    buf: &'a mut [u8],
+    crypto: Option<&CryptoEngine>,
+) -> Result<(V2Header, &'a [u8]), &'static str> {
+    let (header, header_size) = V2Header::decode(buf).map_err(|_| "Invalid V2 header")?;
+
+    let payload_start = header_size;
+    let payload_len = header.length.unwrap_or((buf.len() - header_size) as u16) as usize;
+    let payload_end = payload_start + payload_len;
+
+    if payload_end > buf.len() {
+        return Err("Payload extends beyond buffer");
+    }
+
+    // Decrypt if encrypted
+    if header.encrypted {
+        if let Some(crypto) = crypto {
+            let plaintext_len = crypto.decrypt(
+                &mut buf[payload_start..payload_end],
+                payload_len,
+                header.seq_num as u64,
+            )?;
+            return Ok((header, &buf[payload_start..payload_start + plaintext_len]));
+        }
+        return Err("Encrypted packet but no crypto engine");
+    }
+
+    Ok((header, &buf[payload_start..payload_end]))
+}
+
+/// Auto-detect protocol version and decode accordingly
+#[inline]
+pub fn decode_packet_auto<'a>(
+    buf: &'a mut [u8],
+    crypto: Option<&CryptoEngine>,
+) -> Result<(u32, u8, &'a [u8]), &'static str> {
+    // Check first byte to determine version
+    if buf.is_empty() {
+        return Err("Empty buffer");
+    }
+
+    // V1 starts with PROTOCOL_MAGIC [0x4F, 0x58] ("OX")
+    // V2 starts with type_flags byte where high 4 bits are packet type
+    if buf.len() >= 2 && buf[0] == PROTOCOL_MAGIC[0] && buf[1] == PROTOCOL_MAGIC[1] {
+        // V1 packet
+        let (header, payload) = decode_packet(buf, crypto)?;
+        Ok((header.seq_num, header.flags, payload))
+    } else {
+        // V2 packet
+        let (header, payload) = decode_packet_v2(buf, crypto)?;
+        let mut flags = 0u8;
+        if header.encrypted {
+            flags |= flags::ENCRYPTED;
+        }
+        if header.compressed {
+            flags |= flags::COMPRESSED;
+        }
+        Ok((header.seq_num, flags, payload))
+    }
 }
 
 // ============================================================================

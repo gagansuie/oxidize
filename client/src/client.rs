@@ -3,7 +3,7 @@ use crate::dns_cache::DnsCache;
 use anyhow::{Context, Result};
 use oxidize_common::connection_migration::{MigrationConfig, MigrationManager};
 use oxidize_common::connection_pool::{ConnectionPool, PoolConfig};
-use oxidize_common::ml_models::MlEngine;
+use oxidize_common::ml_optimized::{MlCompressionDecision, OptimizedMlEngine};
 use oxidize_common::model_hub::{HubConfig, ModelHub};
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
 use oxidize_common::prefetch::{PrefetchConfig, PrefetchResource, Prefetcher};
@@ -96,8 +96,8 @@ pub struct RelayClient {
     multipath: Arc<Mutex<MultipathScheduler>>,
     /// Predictive prefetcher for DNS/connections
     prefetcher: Arc<Mutex<Prefetcher>>,
-    /// ML Engine for AI-powered decisions (NO HEURISTIC FALLBACK)
-    ml_engine: Arc<RwLock<MlEngine>>,
+    /// ML Engine for AI-powered decisions (10x optimized)
+    ml_engine: Arc<RwLock<OptimizedMlEngine>>,
     /// Model Hub for downloading models
     model_hub: Arc<ModelHub>,
     /// Connection migration manager for WiFi↔LTE handoff
@@ -194,46 +194,21 @@ impl RelayClient {
         };
         let prefetcher = Arc::new(Mutex::new(Prefetcher::new(prefetch_config)));
 
-        // Initialize ML Engine in HEURISTIC mode (default, zero overhead)
-        // Training data collection is enabled for continuous improvement
-        let mut ml_engine = MlEngine::new();
+        // Initialize 10x Optimized ML Engine (INT8 quantized, Transformer+PPO)
+        // Always in ML mode with embedded weights - no external model loading needed
+        let ml_engine = OptimizedMlEngine::new();
 
-        // Initialize Model Hub for model sync
+        // Initialize Model Hub for model sync (kept for future updates)
         let hub_config = HubConfig {
-            upload_training_data: true, // Enable auto-upload for continuous improvement
+            upload_training_data: true,
             ..Default::default()
         };
         let model_hub = Arc::new(ModelHub::new(hub_config));
 
-        // Try to download and load ML models (optional - heuristics are default)
-        info!("🤖 Attempting to download ML models from HuggingFace Hub...");
-        match model_hub.download_models() {
-            Ok(paths) => {
-                if let Some(lstm_path) = &paths.lstm {
-                    let model_dir = lstm_path.parent().unwrap_or(lstm_path);
-                    let loaded = ml_engine.try_load_models(model_dir);
-                    if loaded == 4 {
-                        info!(
-                            "✅ All {} ML models loaded - can switch to ML mode when ready",
-                            loaded
-                        );
-                    } else if loaded > 0 {
-                        info!("⚠️ Loaded {} of 4 ML models - using heuristics", loaded);
-                    } else {
-                        info!("📊 No ML models found - using heuristics");
-                    }
-                }
-            }
-            Err(e) => {
-                info!("📊 Could not download ML models: {} - using heuristics", e);
-            }
-        }
-
-        // Log current mode
+        // Log ML engine mode (always ML with optimized engine)
         info!(
-            "🧠 AI engine mode: {:?} (models_loaded: {})",
-            ml_engine.inference_mode(),
-            ml_engine.all_models_loaded()
+            "🧠 ML engine (10x): {:?} (INT8 quantized, Transformer+PPO)",
+            ml_engine.inference_mode()
         );
 
         let ml_engine = Arc::new(RwLock::new(ml_engine));
@@ -1020,16 +995,12 @@ impl RelayClient {
 
         let mut message = RelayMessage::data(self.connection_id, sequence, packet);
 
-        // Use ML engine for smart compression decision (only if AI engine is enabled)
-        // Defaults to fast heuristics, can switch to ML when models are ready
+        // Use ML engine for smart compression decision (10x optimized)
         let should_compress_packet = if self.config.enable_ai_engine {
-            let mut ml = self.ml_engine.write().await;
+            let ml = self.ml_engine.read().await;
             let decision = ml.compression_decision(&message.payload);
             // Returns Skip, Light, Normal, or Aggressive - compress unless Skip
-            !matches!(
-                decision,
-                oxidize_common::ml_models::MlCompressionDecision::Skip
-            )
+            !matches!(decision, MlCompressionDecision::Skip)
         } else {
             // AI engine disabled - use simple threshold-based compression
             self.config.enable_compression

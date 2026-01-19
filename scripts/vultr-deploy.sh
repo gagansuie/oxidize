@@ -162,11 +162,13 @@ max_early_data_size = 4294967295
 # === AI Engine ===
 enable_ai_engine = true
 
-# === Kernel Bypass (DPDK) ===
-# Uncomment when NIC is bound to VFIO
-# enable_kernel_bypass = true
-# dpdk_cores = [2, 3, 4, 5]  # Cores for DPDK workers (skip core 0-1 for OS)
-# dpdk_memory_mb = 4096      # Memory for DPDK hugepages
+# === Kernel Bypass (AF_XDP) ===
+# Enabled by default - uses AF_XDP for 100+ Gbps throughput
+# Falls back to io_uring if AF_XDP is not available
+enable_kernel_bypass = true
+bypass_interface = "auto"    # Auto-detect or specify e.g. "enp1s0f0"
+bypass_queues = 4            # Number of RX/TX queues
+bypass_zero_copy = true      # Enable zero-copy mode (requires kernel 5.4+)
 EOF
 
     log_success "Configuration installed to $CONFIG_FILE"

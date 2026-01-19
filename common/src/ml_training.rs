@@ -24,7 +24,7 @@ use candle_core::{DType, Device, Result as CandleResult, Tensor};
 #[cfg(feature = "ai")]
 use candle_nn::{linear, seq, Activation, Linear, Module, Optimizer, VarBuilder, VarMap};
 
-use crate::ml_models::{DrlExperience, LossSample};
+use crate::ml_optimized::{DrlExperience, LossSample};
 
 // ============================================================================
 // LSTM LOSS PREDICTOR TRAINING

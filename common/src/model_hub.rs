@@ -28,7 +28,7 @@ use hf_hub::api::sync::Api;
 #[cfg(feature = "ai")]
 use hf_hub::Repo;
 
-use crate::ml_models::{DrlExperience, LossSample};
+use crate::ml_optimized::{DrlExperience, LossSample};
 
 /// Default HF Hub repository for Oxidize models
 pub const DEFAULT_REPO: &str = "gagansuie/oxidize-models";

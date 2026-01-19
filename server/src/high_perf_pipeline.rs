@@ -23,7 +23,10 @@ use tracing::info;
 use oxidize_common::bbr_v4::{BbrV4, BbrV4State};
 // Kernel bypass is feature-gated - only available with --features kernel-bypass
 #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
-use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor};
+use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
+
+// 10x Optimized ML Engine (INT8 quantized, Transformer, PPO)
+use oxidize_common::ml_optimized::OptimizedMlEngine;
 
 /// High-performance pipeline configuration
 #[derive(Debug, Clone)]
@@ -172,10 +175,14 @@ pub struct HighPerfPipeline {
     start_time: Instant,
     #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
     bypass: Option<BypassProcessor>,
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    unified_bypass: Option<UnifiedBypass>,
     #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
     bypass: Option<()>,
     #[cfg(target_os = "linux")]
     bbr_controllers: Vec<BbrV4>,
+    /// 10x Optimized ML engine for loss prediction and congestion control
+    ml_engine: OptimizedMlEngine,
 }
 
 impl HighPerfPipeline {
@@ -230,6 +237,23 @@ impl HighPerfPipeline {
             })
             .collect();
 
+        // Try to initialize unified bypass (AF_XDP with fallback)
+        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        let unified_bypass = match UnifiedBypass::new(None) {
+            Ok(ub) => {
+                info!("Unified bypass initialized: {:?}", ub.mode());
+                Some(ub)
+            }
+            Err(e) => {
+                info!("Unified bypass not available: {}", e);
+                None
+            }
+        };
+
+        // Initialize 10x optimized ML engine
+        let ml_engine = OptimizedMlEngine::new();
+        info!("  ML Engine: INT8 quantized, Transformer+PPO enabled");
+
         Ok(Self {
             config,
             stats: Arc::new(PipelineStats::default()),
@@ -237,8 +261,11 @@ impl HighPerfPipeline {
             start_time: Instant::now(),
             #[cfg(target_os = "linux")]
             bypass,
+            #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+            unified_bypass,
             #[cfg(target_os = "linux")]
             bbr_controllers,
+            ml_engine,
         })
     }
 
@@ -413,6 +440,42 @@ impl HighPerfPipeline {
         self.bbr_controllers[worker_id % self.bbr_controllers.len()]
             .stats()
             .summary()
+    }
+
+    /// Predict packet loss probability using ML engine
+    /// Returns probability 0.0-1.0
+    pub fn predict_loss(&self, seq_num: u32, rtt_us: u32, jitter_us: u32, loss_rate: f32) -> f32 {
+        let features = [rtt_us as f32, jitter_us as f32, loss_rate, 0.0];
+        self.ml_engine.predict_loss(seq_num, &features)
+    }
+
+    /// Get ML-optimized congestion window size
+    /// Uses PPO continuous control for smoother decisions
+    pub fn get_ml_cwnd(&self, current_rtt_us: u64, bandwidth_estimate: u64) -> u64 {
+        let state = [
+            current_rtt_us as f32,
+            bandwidth_estimate as f32 / 1_000_000.0, // Normalize to Mbps
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        self.ml_engine.get_cwnd(current_rtt_us, &state)
+    }
+
+    /// Check if ML predicts we should apply FEC to this packet
+    pub fn should_apply_fec(&self, seq_num: u32, current_loss_rate: f32) -> bool {
+        let features = [0.0, 0.0, current_loss_rate, 0.0];
+        let loss_prob = self.ml_engine.predict_loss(seq_num, &features);
+        // Apply FEC if predicted loss > 2%
+        loss_prob > 0.02
+    }
+
+    /// Get reference to ML engine for advanced usage
+    pub fn ml_engine(&self) -> &OptimizedMlEngine {
+        &self.ml_engine
     }
 }
 

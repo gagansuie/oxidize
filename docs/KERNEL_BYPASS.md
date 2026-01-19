@@ -1,13 +1,39 @@
-# 🚀 Kernel Bypass Mode (100x Performance)
+# 🚀 Kernel Bypass Mode (100+ Gbps)
 
-Oxidize includes a custom kernel bypass implementation for bare metal deployments achieving **100+ Gbps** throughput with **sub-microsecond latency**.
+Oxidize includes a tiered kernel bypass implementation for bare metal deployments.
+
+> **Status**: ✅ Fully implemented with automatic mode selection
+
+## Implementation Tiers
+
+| Tier | Technology | Throughput | Requirements | Status |
+|------|------------|------------|--------------|--------|
+| **1** | DPDK | 100+ Gbps | Multi-NIC + libdpdk | ✅ Ready (future upgrade) |
+| **2** | AF_XDP | 10-40 Gbps | Kernel 4.18+ | ✅ Active (current) |
+| **3** | io_uring | 5-10 Gbps | Kernel 5.1+ | ✅ Fallback |
+
+## Auto-Selection Logic
+
+```rust
+// UnifiedBypass automatically selects the best available mode:
+// 1. Try DPDK first (requires NIC bound to VFIO + libdpdk)
+// 2. Try AF_XDP second (requires root/CAP_NET_RAW)
+// 3. Fall back to io_uring userspace
+let bypass = UnifiedBypass::new(None)?;
+match bypass.mode() {
+    BypassMode::Dpdk => info!("100+ Gbps mode"),
+    BypassMode::AfXdp => info!("10-40 Gbps mode"),
+    BypassMode::Userspace => info!("5-10 Gbps mode"),
+}
+```
 
 ## Overview
 
 | Mode | Throughput | Latency | Best For |
 |------|------------|---------|----------|
-| **Standard** (Fly.io) | 1-5 Gbps | 10-50 µs | Cloud VMs, easy deployment |
-| **Kernel Bypass** (Vultr) | 100+ Gbps | <1 µs | Bare metal, max performance |
+| **io_uring** (Cloud) | 5-10 Gbps | 5-20 µs | VMs, general use |
+| **AF_XDP** (Current) | 10-40 Gbps | 1-2 µs | 10GbE bare metal |
+| **DPDK** (Upgrade) | 100+ Gbps | <1 µs | 100GbE bare metal |
 
 ## How It Works
 
@@ -78,15 +104,15 @@ Application → User-space Driver (PMD) → NIC
 
 ## Performance Comparison
 
-| Metric | Standard (Fly.io) | Kernel Bypass (Vultr) | Improvement |
-|--------|-------------------|------------------------|-------------|
-| **Throughput** | 1-5 Gbps | 100+ Gbps | **20-100x** |
-| **Latency (per packet)** | 10-50 µs | <1 µs | **10-50x** |
-| **Packets/sec** | 100K-500K pps | 100M+ pps | **200-1000x** |
-| **CPU per packet** | ~1000 cycles | ~50 cycles | **20x** |
-| **System calls** | 5-10 per packet | 0 | **∞** |
-| **Memory copies** | 2-3 per packet | 0 (zero-copy) | **∞** |
-| **Price** | $5-15/mo | ~$120/mo | 10x cost |
+| Metric | io_uring | AF_XDP (Current) | DPDK (Upgrade) |
+|--------|----------|------------------|----------------|
+| **Throughput** | 5-10 Gbps | 10-40 Gbps | 100+ Gbps |
+| **Latency** | 5-20 µs | 1-2 µs | <1 µs |
+| **Packets/sec** | 1-5M pps | 10-40M pps | 100M+ pps |
+| **CPU per packet** | ~500 cycles | ~100 cycles | ~50 cycles |
+| **System calls** | 1 per batch | 0 | 0 |
+| **NIC binding** | No | No | Yes (VFIO) |
+| **SSH access** | Yes | Yes | Requires 2nd NIC |
 
 ## Key Components
 
@@ -333,13 +359,15 @@ All Oxidize features work on top of kernel bypass:
 
 ## When To Use
 
-| Use Case | Recommended Mode |
-|----------|------------------|
-| Development/Testing | Standard mode (no DPDK) |
-| Small VPN (<500 users) | Single Vultr node |
-| Gaming/Low Latency | **Kernel Bypass** (Vultr) |
-| High-traffic CDN | **Kernel Bypass** (Vultr) |
-| Enterprise (2000+ users) | Multi-region Vultr |
+| Use Case | Recommended Mode | Technology |
+|----------|------------------|------------|
+| Development/Testing | Standard mode | io_uring |
+| Cloud VMs | Standard mode | io_uring |
+| Small VPN (<500 users) | Single Vultr node | AF_XDP |
+| Gaming/Low Latency | Bare metal Vultr | AF_XDP |
+| High-traffic CDN | Bare metal Vultr | AF_XDP |
+| Enterprise (2000+ users) | Multi-NIC Vultr | DPDK |
+| Carrier-grade (100+ Gbps) | 100GbE + Multi-NIC | DPDK |
 
 ## Monitoring
 

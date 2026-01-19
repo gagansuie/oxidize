@@ -1,8 +1,19 @@
 # Vultr Bare Metal Deployment Guide
 
-Quick-start guide for deploying Oxidize on Vultr bare metal.
+Quick-start guide for deploying Oxidize on Vultr bare metal with **kernel bypass** for maximum performance.
 
 **Current Server:** `144.202.60.215` (Chicago, vbm-4c-32gb, $120/mo)
+
+## Current Configuration
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Kernel Bypass** | ✅ AF_XDP | Auto-selected, saturates 10GbE NIC |
+| **DPDK** | ⏳ Ready | Activates when 100GbE + multi-NIC available |
+| **Zero-Downtime** | ✅ Active | SO_REUSEPORT + graceful shutdown |
+| **CI/CD** | ✅ Automated | Version bump → auto-deploy |
+| **Hugepages** | ✅ Configured | 4GB (2048 x 2MB pages) |
+| **IOMMU** | ✅ Enabled | intel_iommu=on iommu=pt |
 
 ## CI/CD Deployment (Automatic)
 

@@ -45,7 +45,15 @@
 //! └────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-#![allow(dead_code)] // Implementation scaffolding for kernel bypass
+#![allow(dead_code)] // Kernel bypass implementation with AF_XDP backend
+
+// Re-export AF_XDP for external use
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+pub use crate::af_xdp::{AfXdpConfig, AfXdpRuntime, AfXdpSocket};
+
+// Re-export DPDK for external use (100+ Gbps)
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+pub use crate::dpdk::{DpdkConfig, DpdkRuntime, DpdkStats};
 #[allow(unused_imports)]
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::UnsafeCell;
@@ -1371,6 +1379,185 @@ impl BypassProcessor {
 
     pub fn stop(&self) {
         self.runtime.stop();
+    }
+}
+
+// =============================================================================
+// Unified Kernel Bypass Interface
+// =============================================================================
+
+/// Unified kernel bypass that tries DPDK first (100+ Gbps), then AF_XDP (10-40 Gbps), then fallback
+pub struct UnifiedBypass {
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    dpdk: Option<crate::dpdk::DpdkRuntime>,
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    af_xdp: Option<crate::af_xdp::AfXdpRuntime>,
+    fallback_runtime: Option<KernelBypassRuntime>,
+    mode: BypassMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BypassMode {
+    /// Full DPDK kernel bypass (100+ Gbps)
+    Dpdk,
+    /// AF_XDP kernel bypass (10-40 Gbps)
+    AfXdp,
+    /// Fallback to optimized userspace (io_uring)
+    Userspace,
+    /// Disabled (standard networking)
+    Disabled,
+}
+
+impl UnifiedBypass {
+    /// Create a new unified bypass, auto-detecting best mode
+    /// Priority: DPDK > AF_XDP > io_uring userspace
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    pub fn new(interface: Option<&str>) -> std::io::Result<Self> {
+        // Try DPDK first (100+ Gbps)
+        if crate::dpdk::DpdkRuntime::is_available() {
+            let config = crate::dpdk::DpdkConfig::default();
+            match crate::dpdk::DpdkRuntime::new(config) {
+                Ok(runtime) => {
+                    info!("DPDK kernel bypass initialized (100+ Gbps mode)");
+                    return Ok(Self {
+                        dpdk: Some(runtime),
+                        af_xdp: None,
+                        fallback_runtime: None,
+                        mode: BypassMode::Dpdk,
+                    });
+                }
+                Err(e) => {
+                    warn!("DPDK initialization failed: {}, trying AF_XDP", e);
+                }
+            }
+        }
+
+        // Try AF_XDP second (10-40 Gbps)
+        if crate::af_xdp::AfXdpRuntime::is_available() {
+            let config = if let Some(iface) = interface {
+                crate::af_xdp::AfXdpConfig {
+                    interface: iface.to_string(),
+                    ..crate::af_xdp::AfXdpConfig::default()
+                }
+            } else {
+                crate::af_xdp::AfXdpConfig::auto_detect()?
+            };
+
+            match crate::af_xdp::AfXdpRuntime::new(config) {
+                Ok(runtime) => {
+                    info!("AF_XDP kernel bypass initialized (10-40 Gbps mode)");
+                    return Ok(Self {
+                        dpdk: None,
+                        af_xdp: Some(runtime),
+                        fallback_runtime: None,
+                        mode: BypassMode::AfXdp,
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        "AF_XDP initialization failed: {}, falling back to userspace",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fallback to optimized userspace (io_uring)
+        let runtime = KernelBypassRuntime::new(UltraConfig::default())?;
+        info!("Using optimized userspace mode (io_uring)");
+
+        Ok(Self {
+            dpdk: None,
+            af_xdp: None,
+            fallback_runtime: Some(runtime),
+            mode: BypassMode::Userspace,
+        })
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+    pub fn new(_interface: Option<&str>) -> std::io::Result<Self> {
+        Ok(Self {
+            fallback_runtime: None,
+            mode: BypassMode::Disabled,
+        })
+    }
+
+    /// Get current bypass mode
+    pub fn mode(&self) -> BypassMode {
+        self.mode
+    }
+
+    /// Check if running in full kernel bypass mode
+    pub fn is_kernel_bypass(&self) -> bool {
+        self.mode == BypassMode::Dpdk || self.mode == BypassMode::AfXdp
+    }
+
+    /// Start the bypass runtime with a packet handler
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    pub fn start<F>(&mut self, handler: F) -> std::io::Result<()>
+    where
+        F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + Clone + 'static,
+    {
+        match self.mode {
+            BypassMode::Dpdk => {
+                if let Some(ref mut runtime) = self.dpdk {
+                    runtime.start(handler)?;
+                }
+            }
+            BypassMode::AfXdp => {
+                if let Some(ref mut runtime) = self.af_xdp {
+                    runtime.start(handler)?;
+                }
+            }
+            BypassMode::Userspace => {
+                if let Some(ref runtime) = self.fallback_runtime {
+                    runtime.start();
+                }
+            }
+            BypassMode::Disabled => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+    pub fn start<F>(&mut self, _handler: F) -> std::io::Result<()>
+    where
+        F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + Clone + 'static,
+    {
+        Ok(())
+    }
+
+    /// Stop the bypass runtime
+    pub fn stop(&mut self) {
+        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        {
+            if let Some(ref mut runtime) = self.dpdk {
+                runtime.stop();
+            }
+            if let Some(ref mut runtime) = self.af_xdp {
+                runtime.stop();
+            }
+        }
+        if let Some(ref runtime) = self.fallback_runtime {
+            runtime.stop();
+        }
+    }
+
+    /// Get statistics summary
+    pub fn stats_summary(&self) -> String {
+        #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+        {
+            if let Some(ref runtime) = self.dpdk {
+                return runtime.stats_summary();
+            }
+            if let Some(ref runtime) = self.af_xdp {
+                return runtime.stats_summary();
+            }
+        }
+        if let Some(ref runtime) = self.fallback_runtime {
+            return runtime.stats_summary();
+        }
+        "Kernel bypass disabled".to_string()
     }
 }
 

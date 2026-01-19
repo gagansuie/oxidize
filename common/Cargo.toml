@@ -8,7 +8,7 @@ license = { workspace = true }
 [features]
 default = ["ai"]
 ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
-kernel-bypass = []  # Kernel bypass for bare metal (100+ Gbps) - Vultr deployment
+kernel-bypass = []  # DPDK + AF_XDP kernel bypass for bare metal (100+ Gbps)
 
 [[bin]]
 name = "oxidize-train"
@@ -47,8 +47,7 @@ quinn = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { workspace = true }
-# DPDK bindings will be added when dpdk-rs crate is stable
-# For now, we use FFI bindings directly in dpdk.rs
+# DPDK uses FFI bindings directly (libdpdk must be installed on system)
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.27"  # Unix utilities (Linux, macOS, Android, iOS)

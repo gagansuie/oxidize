@@ -1,3 +1,4 @@
+pub mod adaptive_dict;
 pub mod adaptive_fec;
 
 pub mod advanced_ml;
@@ -11,7 +12,7 @@ pub mod edge_cache;
 pub mod fec;
 pub mod metrics;
 pub mod ml_integration;
-pub mod ml_models;
+pub mod ml_optimized;
 pub mod ml_training;
 pub mod model_hub;
 pub mod multipath;
@@ -32,6 +33,7 @@ pub mod oxtunnel_protocol;
 pub mod packet_capture;
 pub mod rohc;
 pub mod unified_transport;
+pub mod varint_header;
 
 #[cfg(target_os = "linux")]
 pub mod io_uring_support;
@@ -44,6 +46,16 @@ pub mod io_uring_impl;
 // Plus: UltraConfig, KernelBypassRuntime, PacketBuffer, SpscRing (100x optimized)
 #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 pub mod kernel_bypass;
+
+// AF_XDP - Real NIC integration for 10-40 Gbps (Linux only, kernel-bypass feature)
+// Provides: AfXdpSocket, AfXdpRuntime, AfXdpConfig
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+pub mod af_xdp;
+
+// DPDK - Full kernel bypass for 100+ Gbps (Linux only, kernel-bypass feature)
+// Provides: DpdkRuntime, DpdkConfig, DpdkStats
+#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+pub mod dpdk;
 
 pub mod bbr_v4;
 pub mod crypto_accel;

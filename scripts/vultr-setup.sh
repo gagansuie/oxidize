@@ -59,6 +59,7 @@ apt-get install -y \
     libssl-dev \
     libnuma-dev \
     libpcap-dev \
+    libelf-dev \
     linux-headers-$(uname -r) \
     pciutils \
     hwloc \
@@ -69,9 +70,12 @@ apt-get install -y \
     htop \
     iotop \
     net-tools \
-    ethtool
+    ethtool \
+    dpdk \
+    dpdk-dev \
+    librte-dev
 
-log_success "Dependencies installed"
+log_success "Dependencies installed (including DPDK)"
 
 # ============================================
 # Step 2: Install Rust (if not present)

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use oxidize_common::edge_cache::{CacheConfig, EdgeCache};
-use oxidize_common::ml_models::MlEngine;
+use oxidize_common::ml_optimized::{NetworkFeatures as MlNetworkFeatures, OptimizedMlEngine};
 use oxidize_common::model_hub::{HubConfig, ModelHub};
 use oxidize_common::security::{SecurityAction, SecurityConfig, SecurityManager};
 use oxidize_common::RelayMetrics;
@@ -31,7 +31,7 @@ pub struct RelayServer {
     edge_cache: Arc<RwLock<EdgeCache>>,
     /// ML Engine for AI-powered decisions (NO HEURISTIC FALLBACK)
     /// All decisions are made by trained ML models
-    ml_engine: Arc<RwLock<MlEngine>>,
+    ml_engine: Arc<RwLock<OptimizedMlEngine>>,
     /// Model Hub for downloading models and uploading training data
     model_hub: Arc<ModelHub>,
 }
@@ -159,9 +159,9 @@ impl RelayServer {
         };
         let edge_cache = Arc::new(RwLock::new(EdgeCache::new(edge_cache_config)));
 
-        // Initialize ML Engine in HEURISTIC mode (default, zero overhead)
-        // Training data collection is enabled for continuous improvement
-        let mut ml_engine = MlEngine::new();
+        // Initialize 10x Optimized ML Engine (INT8 quantized, Transformer+PPO)
+        // Always in ML mode with embedded weights - no external model loading needed
+        let mut ml_engine = OptimizedMlEngine::new();
 
         // Initialize Model Hub for model sync and training data upload
         let hub_config = HubConfig {
@@ -267,80 +267,46 @@ impl RelayServer {
                         stats.size_bytes / 1024 / 1024
                     );
                 }
-                // Log ML engine stats (100% ML, no heuristics)
-                let ml_engine_stats = ml_stats.read().await.stats();
+                // Log ML engine stats (10x optimized - INT8 quantized, Transformer+PPO)
+                let ml_guard = ml_stats.read().await;
+                let ml_engine_stats = ml_guard.stats();
                 info!(
-                    "🧠 ML engine: all_models_loaded={}, lstm_inferences={}, drl_inferences={}, compression_skipped={}",
-                    ml_engine_stats.loss_predictor.model_loaded && ml_engine_stats.congestion_controller.model_loaded,
-                    ml_engine_stats.loss_predictor.inference_count,
-                    ml_engine_stats.congestion_controller.inference_count,
-                    ml_engine_stats.compression_oracle.skip_count
+                    "🧠 ML engine (10x): inferences={}, cache_hits={}, observations={}, avg_latency={:.1}µs",
+                    ml_engine_stats.total_inferences.load(std::sync::atomic::Ordering::Relaxed),
+                    ml_engine_stats.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+                    ml_engine_stats.observations.load(std::sync::atomic::Ordering::Relaxed),
+                    ml_engine_stats.avg_latency_us()
                 );
+                drop(ml_guard);
             }
         });
 
-        // Periodic ML training data upload to HF Hub (configurable interval)
+        // Note: OptimizedMlEngine uses embedded INT8 weights - training is done via CI/CD
+        // Observation data is collected but training happens offline
         if self.config.enable_ml_training_upload {
-            let ml_upload = self.ml_engine.clone();
-            let hub_upload = self.model_hub.clone();
+            let ml_stats = self.ml_engine.clone();
             let upload_interval = self.config.ml_upload_interval_secs;
             info!(
-                "📊 ML training data upload enabled (interval: {}s)",
+                "📊 ML observation tracking enabled (stats logged every {}s)",
                 upload_interval
             );
             tokio::spawn(async move {
-                // Wait 10 minutes before first upload to collect some data
-                tokio::time::sleep(Duration::from_secs(600)).await;
-
                 let mut interval = tokio::time::interval(Duration::from_secs(upload_interval));
                 loop {
                     interval.tick().await;
-
-                    // Export training data to temp directory
-                    let export_dir = "/tmp/oxidize_training_export";
-                    if let Err(e) = std::fs::create_dir_all(export_dir) {
-                        warn!("Failed to create export dir: {}", e);
-                        continue;
-                    }
-
-                    {
-                        let engine = ml_upload.read().await;
-                        if let Err(e) = engine.export_training_data(export_dir) {
-                            warn!("Failed to export training data: {}", e);
-                            continue;
-                        }
-                    }
-
-                    // Read exported files and upload
-                    let loss_path = format!("{}/loss_samples.json", export_dir);
-                    let drl_path = format!("{}/drl_experiences.json", export_dir);
-
-                    let loss_samples: Vec<oxidize_common::ml_models::LossSample> =
-                        std::fs::read_to_string(&loss_path)
-                            .ok()
-                            .and_then(|s| serde_json::from_str(&s).ok())
-                            .unwrap_or_default();
-
-                    let drl_experiences: Vec<oxidize_common::ml_models::DrlExperience> =
-                        std::fs::read_to_string(&drl_path)
-                            .ok()
-                            .and_then(|s| serde_json::from_str(&s).ok())
-                            .unwrap_or_default();
-
-                    if loss_samples.is_empty() && drl_experiences.is_empty() {
-                        debug!("No training data to upload yet");
-                        continue;
-                    }
-
-                    info!(
-                        "📤 Uploading training data: {} loss samples, {} DRL experiences",
-                        loss_samples.len(),
-                        drl_experiences.len()
-                    );
-
-                    match hub_upload.upload_training_data(&loss_samples, &drl_experiences) {
-                        Ok(()) => info!("✅ Training data uploaded to HF Hub"),
-                        Err(e) => warn!("Failed to upload training data: {}", e),
+                    let guard = ml_stats.read().await;
+                    let stats = guard.stats();
+                    let obs = stats
+                        .observations
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let hit_rate = stats.cache_hit_rate();
+                    drop(guard);
+                    if obs > 0 {
+                        info!(
+                            "📊 ML observations collected: {}, cache_hit_rate: {:.1}%",
+                            obs,
+                            hit_rate * 100.0
+                        );
                     }
                 }
             });
@@ -556,7 +522,7 @@ impl RelayServer {
         config: Config,
         cache: Arc<DataCache>,
         forwarder: Arc<SharedForwarder>,
-        ml_engine: Arc<RwLock<MlEngine>>,
+        ml_engine: Arc<RwLock<OptimizedMlEngine>>,
     ) -> Result<()> {
         // === MASQUE-INSPIRED: Spawn datagram handler for real-time traffic ===
         let datagram_connection = connection.clone();
@@ -621,7 +587,7 @@ impl RelayServer {
         connection: Connection,
         forwarder: Arc<SharedForwarder>,
         metrics: RelayMetrics,
-        ml_engine: Arc<RwLock<MlEngine>>,
+        ml_engine: Arc<RwLock<OptimizedMlEngine>>,
     ) {
         // Use a fixed connection ID for datagram responses (based on connection hash)
         let datagram_conn_id = connection.stable_id() as u64;
@@ -665,13 +631,12 @@ impl RelayServer {
                         continue;
                     }
 
-                    // Update ML engine with network telemetry (non-blocking)
-                    // This runs heuristics by default, ML when models are loaded
+                    // Update ML engine with network telemetry (10x optimized)
                     #[allow(clippy::manual_is_multiple_of)]
                     if packet_count % 100 == 0 {
                         // Sample every 100 packets to reduce overhead
                         if let Ok(mut engine) = ml_engine.try_write() {
-                            let features = oxidize_common::ai_engine::NetworkFeatures {
+                            let features = MlNetworkFeatures {
                                 rtt_us: last_rtt_us,
                                 rtt_var_us: last_rtt_us / 10,
                                 bandwidth_bps: (datagram.len() as u64 * 8 * 1000)
@@ -690,8 +655,7 @@ impl RelayServer {
                             };
                             engine.update(&features, 0.0, 0);
 
-                            // Get FEC decision (uses heuristics or ML depending on mode)
-                            // Records loss predictions to metrics for frontend display
+                            // Get FEC decision (INT8 quantized Transformer)
                             let fec = engine.fec_decision_with_metrics(&features, &metrics);
                             if fec.inject_fec && fec.redundancy_ratio > 0.0 {
                                 trace!(
