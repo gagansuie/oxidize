@@ -21,11 +21,17 @@ pub struct AffinityKey {
 
 impl AffinityKey {
     pub fn new(destination: SocketAddr) -> Self {
-        Self { destination, flow_id: None }
+        Self {
+            destination,
+            flow_id: None,
+        }
     }
-    
+
     pub fn with_flow(destination: SocketAddr, flow_id: u64) -> Self {
-        Self { destination, flow_id: Some(flow_id) }
+        Self {
+            destination,
+            flow_id: Some(flow_id),
+        }
     }
 }
 
@@ -192,12 +198,16 @@ impl ConnectionPool {
     pub async fn get(&self, endpoint: SocketAddr) -> Option<u64> {
         self.get_with_affinity(endpoint, None).await
     }
-    
+
     /// Get connection with affinity support - prefers reusing same connection for same destination/flow
-    pub async fn get_with_affinity(&self, endpoint: SocketAddr, affinity_key: Option<AffinityKey>) -> Option<u64> {
+    pub async fn get_with_affinity(
+        &self,
+        endpoint: SocketAddr,
+        affinity_key: Option<AffinityKey>,
+    ) -> Option<u64> {
         // Update endpoint stats for smart pre-warming
         self.record_endpoint_access(endpoint).await;
-        
+
         // Check affinity map first
         if let Some(ref key) = affinity_key {
             let affinity_map = self.affinity_map.read().await;
@@ -212,14 +222,16 @@ impl ConnectionPool {
                             conn.reuse_count += 1;
                             self.stats.affinity_hits.fetch_add(1, Ordering::Relaxed);
                             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                            self.stats.connections_reused.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .connections_reused
+                                .fetch_add(1, Ordering::Relaxed);
                             return Some(conn.id);
                         }
                     }
                 }
             }
         }
-        
+
         // Try to get an existing available connection
         {
             let mut conns = self.connections.write().await;
@@ -230,22 +242,24 @@ impl ConnectionPool {
                         conn.last_used = Instant::now();
                         conn.reuse_count += 1;
                         self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        self.stats.connections_reused.fetch_add(1, Ordering::Relaxed);
-                        
+                        self.stats
+                            .connections_reused
+                            .fetch_add(1, Ordering::Relaxed);
+
                         // Check if this was a pre-warmed connection
                         let prewarmed = self.prewarmed_ids.read().await;
                         if prewarmed.contains(&conn.id) {
                             self.stats.prewarm_hits.fetch_add(1, Ordering::Relaxed);
                         }
-                        
+
                         let conn_id = conn.id;
-                        
+
                         // Update affinity map
                         if let Some(key) = affinity_key {
                             drop(conns);
                             self.affinity_map.write().await.insert(key, conn_id);
                         }
-                        
+
                         return Some(conn_id);
                     }
                 }
@@ -255,15 +269,15 @@ impl ConnectionPool {
         // No available connection, create a new one
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
         let conn_id = self.create_connection(endpoint).await;
-        
+
         // Update affinity map for new connection
         if let (Some(id), Some(key)) = (conn_id, affinity_key) {
             self.affinity_map.write().await.insert(key, id);
         }
-        
+
         conn_id
     }
-    
+
     /// Record endpoint access for pre-warming decisions
     async fn record_endpoint_access(&self, endpoint: SocketAddr) {
         let mut stats = self.endpoint_stats.write().await;
@@ -379,37 +393,41 @@ impl ConnectionPool {
             }
         }
     }
-    
+
     /// Smart pre-warming based on historical usage patterns
     /// Call this periodically to maintain warm connections to frequently-used endpoints
     pub async fn smart_prewarm(&self, min_requests: u64, count_per_endpoint: usize) {
         if !self.config.prewarm {
             return;
         }
-        
+
         // Get frequently accessed endpoints
         let stats = self.endpoint_stats.read().await;
         let frequent_endpoints: Vec<SocketAddr> = stats
             .iter()
             .filter(|(_, s)| {
-                s.request_count >= min_requests 
+                s.request_count >= min_requests
                     && s.last_access.elapsed() < Duration::from_secs(300) // Active in last 5 min
                     && s.success_rate > 0.5 // Reasonably successful
             })
             .map(|(addr, _)| *addr)
             .collect();
         drop(stats);
-        
+
         // Pre-warm connections to these endpoints
         for endpoint in frequent_endpoints {
             // Check if we already have enough connections
             let conns = self.connections.read().await;
             let current_available = conns
                 .get(&endpoint)
-                .map(|pool| pool.iter().filter(|c| c.state == ConnectionState::Available).count())
+                .map(|pool| {
+                    pool.iter()
+                        .filter(|c| c.state == ConnectionState::Available)
+                        .count()
+                })
                 .unwrap_or(0);
             drop(conns);
-            
+
             // Only pre-warm if we need more
             let needed = count_per_endpoint.saturating_sub(current_available);
             for _ in 0..needed {
@@ -420,12 +438,12 @@ impl ConnectionPool {
             }
         }
     }
-    
+
     /// Clear affinity for a specific key
     pub async fn clear_affinity(&self, key: &AffinityKey) {
         self.affinity_map.write().await.remove(key);
     }
-    
+
     /// Get endpoint statistics for monitoring
     pub async fn get_endpoint_stats(&self) -> HashMap<SocketAddr, EndpointStats> {
         self.endpoint_stats.read().await.clone()
