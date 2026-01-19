@@ -51,7 +51,10 @@ jobs:
 
       - name: Install musl-tools (Linux)
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: |
+          # Remove problematic Microsoft repos that return 403 Forbidden
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
+          sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Clean main binaries (force version rebuild)
         shell: bash
@@ -150,6 +153,8 @@ jobs:
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          # Remove problematic Microsoft repos that return 403 Forbidden
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y libglib2.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
 
@@ -225,62 +230,35 @@ jobs:
           echo "=== Bundle directory contents ==="
           find target/${{ matrix.target }}/release/bundle -type f 2>/dev/null || echo "No bundle directory found"
 
-      - name: Prepare release artifacts (Linux)
-        if: matrix.os == 'ubuntu-22.04'
+      - name: Prepare release artifacts
         shell: bash
         run: |
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p desktop-release
+          BUNDLE=target/${{ matrix.target }}/release/bundle
           
-          # Copy deb (first match only)
-          for f in target/${{ matrix.target }}/release/bundle/deb/*.deb; do
-            [ -f "$f" ] && cp "$f" desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.deb && echo "✅ Copied .deb" && break
-          done || echo "⚠️ No .deb found"
+          # Helper to copy first matching file
+          copy_first() {
+            local pattern="$1" dest="$2"
+            for f in $pattern; do
+              [ -f "$f" ] && cp "$f" "$dest" && echo "✅ Copied $(basename $dest)" && return 0
+            done
+            echo "⚠️ No $(basename $dest) found"
+          }
           
-          # Copy AppImage (first match only)
-          for f in target/${{ matrix.target }}/release/bundle/appimage/*.AppImage; do
-            [ -f "$f" ] && cp "$f" desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.AppImage && echo "✅ Copied .AppImage" && break
-          done || echo "⚠️ No .AppImage found"
-          
-          # Copy rpm (first match only)
-          for f in target/${{ matrix.target }}/release/bundle/rpm/*.rpm; do
-            [ -f "$f" ] && cp "$f" desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.rpm && echo "✅ Copied .rpm" && break
-          done || echo "⚠️ No .rpm found"
-          
-          echo "=== desktop-release contents ==="
-          ls -la desktop-release/
-
-      - name: Prepare release artifacts (macOS)
-        if: startsWith(matrix.os, 'macos')
-        shell: bash
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          mkdir -p desktop-release
-          
-          # Copy dmg (first match only)
-          for f in target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
-            [ -f "$f" ] && cp "$f" desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.dmg && echo "✅ Copied .dmg" && break
-          done || echo "⚠️ No .dmg found"
-          
-          echo "=== desktop-release contents ==="
-          ls -la desktop-release/
-
-      - name: Prepare release artifacts (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          mkdir -p desktop-release
-          
-          # Copy MSI (first match only)
-          for f in target/${{ matrix.target }}/release/bundle/msi/*.msi; do
-            [ -f "$f" ] && cp "$f" desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.msi && echo "✅ Copied .msi" && break
-          done || echo "⚠️ No .msi found"
-          
-          # Copy NSIS installer (first match only)
-          for f in target/${{ matrix.target }}/release/bundle/nsis/*.exe; do
-            [ -f "$f" ] && cp "$f" desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}-setup.exe && echo "✅ Copied NSIS .exe" && break
-          done || echo "⚠️ No NSIS .exe found"
+          # Linux artifacts
+          if [[ "${{ matrix.os }}" == "ubuntu-22.04" ]]; then
+            copy_first "$BUNDLE/deb/*.deb" "desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.deb"
+            copy_first "$BUNDLE/appimage/*.AppImage" "desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.AppImage"
+            copy_first "$BUNDLE/rpm/*.rpm" "desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.rpm"
+          # macOS artifacts
+          elif [[ "${{ matrix.os }}" == macos* ]]; then
+            copy_first "$BUNDLE/dmg/*.dmg" "desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.dmg"
+          # Windows artifacts
+          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            copy_first "$BUNDLE/msi/*.msi" "desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}.msi"
+            copy_first "$BUNDLE/nsis/*.exe" "desktop-release/oxidize-desktop-$VERSION-${{ matrix.platform }}-setup.exe"
+          fi
           
           echo "=== desktop-release contents ==="
           ls -la desktop-release/
@@ -397,31 +375,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  deploy-fly:
-    name: Deploy to Fly.io
-    needs: release
-    runs-on: ubuntu-latest
-    if: needs.release.outputs.release_created == 'true'
+  # deploy-fly:
+  #   name: Deploy to Fly.io
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   if: needs.release.outputs.release_created == 'true'
     
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
 
-      - name: Setup Fly.io CLI
-        uses: superfly/flyctl-actions/setup-flyctl@master
+  #     - name: Setup Fly.io CLI
+  #       uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only --strategy bluegreen
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  #     - name: Deploy to Fly.io
+  #       run: flyctl deploy --remote-only --strategy bluegreen
+  #       env:
+  #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
-      - name: Verify deployment
-        run: |
-          sleep 10
-          flyctl status
-          echo "✅ Deployed to Fly.io"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  #     - name: Verify deployment
+  #       run: |
+  #         sleep 10
+  #         flyctl status
+  #         echo "✅ Deployed to Fly.io"
+  #       env:
+  #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
   deploy-vultr:
     name: Deploy to Vultr Bare Metal
