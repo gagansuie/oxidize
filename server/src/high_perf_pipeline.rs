@@ -15,12 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
-use tracing::debug;
 use tracing::info;
 
-#[cfg(target_os = "linux")]
-use oxidize_common::bbr_v4::{BbrV4, BbrV4State};
 // Kernel bypass is feature-gated - only available with --features kernel-bypass
 #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
 use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
@@ -179,8 +175,6 @@ pub struct HighPerfPipeline {
     unified_bypass: Option<UnifiedBypass>,
     #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
     bypass: Option<()>,
-    #[cfg(target_os = "linux")]
-    bbr_controllers: Vec<BbrV4>,
     /// 10x Optimized ML engine for loss prediction and congestion control
     ml_engine: OptimizedMlEngine,
 }
@@ -226,17 +220,6 @@ impl HighPerfPipeline {
         #[cfg(all(target_os = "linux", not(feature = "kernel-bypass")))]
         let bypass: Option<()> = None;
 
-        #[cfg(target_os = "linux")]
-        let bbr_controllers = (0..config.workers)
-            .map(|_| {
-                if config.bbr.gaming_mode {
-                    BbrV4::gaming()
-                } else {
-                    BbrV4::throughput()
-                }
-            })
-            .collect();
-
         // Try to initialize unified bypass (AF_XDP with fallback)
         #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
         let unified_bypass = match UnifiedBypass::new(None) {
@@ -263,8 +246,6 @@ impl HighPerfPipeline {
             bypass,
             #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
             unified_bypass,
-            #[cfg(target_os = "linux")]
-            bbr_controllers,
             ml_engine,
         })
     }
@@ -329,7 +310,7 @@ impl HighPerfPipeline {
     ) -> Vec<BypassPacket> {
         let start = Instant::now();
         let mut output = Vec::with_capacity(packets.len());
-        let bbr_idx = worker_id % self.bbr_controllers.len();
+        let _worker_id = worker_id; // ML congestion control in quic_xdp
         let stats = Arc::clone(&self.stats);
         let quic_port = self.config.quic_port;
         let enable_rohc = self.config.enable_rohc;
@@ -339,12 +320,6 @@ impl HighPerfPipeline {
             stats
                 .rx_bytes
                 .fetch_add(packet.len as u64, Ordering::Relaxed);
-
-            // Check BBR congestion window
-            if !self.bbr_controllers[bbr_idx].can_send() {
-                debug!("BBR congestion - dropping packet");
-                continue;
-            }
 
             // Process packet inline
             if !packet.parse_headers() {
@@ -363,9 +338,6 @@ impl HighPerfPipeline {
             if enable_rohc {
                 stats.packets_compressed.fetch_add(1, Ordering::Relaxed);
             }
-
-            // Record send with BBR
-            self.bbr_controllers[bbr_idx].on_send(packet.len as u64);
 
             stats.tx_packets.fetch_add(1, Ordering::Relaxed);
             stats
@@ -408,38 +380,6 @@ impl HighPerfPipeline {
         }
 
         Some(packet)
-    }
-
-    /// Record an ACK for BBR
-    #[cfg(target_os = "linux")]
-    pub fn record_ack(&mut self, worker_id: usize, bytes: u64, rtt: Duration) {
-        let bbr_idx = worker_id % self.bbr_controllers.len();
-        self.bbr_controllers[bbr_idx].on_ack(bytes, rtt);
-
-        // Update stats with BBR cwnd
-        let cwnd = self.bbr_controllers[bbr_idx].cwnd();
-        self.stats.bbr_cwnd_avg.store(cwnd, Ordering::Relaxed);
-    }
-
-    /// Record a packet loss for BBR
-    #[cfg(target_os = "linux")]
-    pub fn record_loss(&mut self, worker_id: usize, bytes: u64) {
-        let bbr_idx = worker_id % self.bbr_controllers.len();
-        self.bbr_controllers[bbr_idx].on_loss(bytes);
-    }
-
-    /// Get current BBR state for a worker
-    #[cfg(target_os = "linux")]
-    pub fn bbr_state(&self, worker_id: usize) -> BbrV4State {
-        self.bbr_controllers[worker_id % self.bbr_controllers.len()].state()
-    }
-
-    /// Get BBR statistics
-    #[cfg(target_os = "linux")]
-    pub fn bbr_stats(&self, worker_id: usize) -> String {
-        self.bbr_controllers[worker_id % self.bbr_controllers.len()]
-            .stats()
-            .summary()
     }
 
     /// Predict packet loss probability using ML engine
@@ -513,10 +453,7 @@ impl PipelineIntegration {
             bypass_available: BypassProcessor::is_available(),
             #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
             bypass_available: false,
-            #[cfg(target_os = "linux")]
-            ktls_available: oxidize_common::ktls::KtlsSocket::is_available(),
-            #[cfg(not(target_os = "linux"))]
-            ktls_available: false,
+            ktls_available: false, // Removed - using userspace QUIC
             cpu_cores: std::thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(1),

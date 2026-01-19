@@ -5,13 +5,13 @@ use oxidize_common::oxtunnel_client::OxTunnelConfig;
 use oxidize_common::oxtunnel_protocol::{
     encode_packet, flags, PacketBatch, HEADER_SIZE, MAX_PACKET_SIZE,
 };
-use oxidize_common::packet_capture::{create_queue, QueueConfig, Verdict};
+// NFQUEUE packet_capture removed - using AF_XDP kernel bypass for bare metal
+// TODO: Integrate with quic_xdp runtime for packet capture
 use relay_client::{ClientConfig, RelayClient};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::signal;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -155,15 +155,15 @@ async fn main() -> Result<()> {
 
     info!("Oxidize Daemon starting...");
 
-    // Detect platform and packet queue method
-    match create_queue() {
-        Ok(queue) => {
-            info!("📦 Packet queue: {}", queue.platform_name());
-        }
-        Err(e) => {
-            warn!("⚠️  Packet queue not available: {}", e);
-            warn!("   The daemon will still run but cannot intercept traffic");
-        }
+    // AF_XDP kernel bypass mode - NFQUEUE removed
+    // TODO: Initialize quic_xdp runtime for bare metal packet capture
+    #[cfg(all(target_os = "linux", feature = "kernel-bypass"))]
+    {
+        info!("📦 AF_XDP kernel bypass mode available");
+    }
+    #[cfg(not(all(target_os = "linux", feature = "kernel-bypass")))]
+    {
+        warn!("⚠️  Kernel bypass not available - build with --features kernel-bypass");
     }
 
     let state = Arc::new(Mutex::new(DaemonState::default()));
@@ -395,110 +395,20 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     };
     info!("✅ QUIC handshake complete to {}", server_addr);
 
-    // STEP 4: Now setup NFQUEUE packet interception (requires root)
-    let mut queue = match create_queue() {
-        Ok(q) => q,
-        Err(e) => {
-            error!("❌ NFQUEUE not available: {}", e);
-            error!("   Daemon must run as root for NFQUEUE packet interception.");
-            return DaemonResponse {
-                success: false,
-                message: format!("NFQUEUE failed: {}. Ensure daemon runs as root.", e),
-                data: None,
-            };
-        }
-    };
+    // STEP 4: AF_XDP Kernel Bypass Mode (NFQUEUE removed for bare metal)
+    // TODO: Integrate with quic_xdp runtime for direct NIC packet capture
+    // For now, just run the client without packet interception
+    info!("📦 AF_XDP mode: packet capture via quic_xdp runtime (TODO)");
 
-    let platform = queue.platform_name().to_string();
-    let platform_clone = platform.clone();
-    info!("📦 Setting up NFQUEUE: {}", platform);
-
-    // Configure queue - exclude relay server to prevent intercepting our own connection
-    let mut queue_config = QueueConfig::default();
-    if !queue_config.exclude_ports.contains(&RELAY_PORT) {
-        queue_config.exclude_ports.push(RELAY_PORT);
-    }
-    queue_config.exclude_ips.push(server_addr.ip());
-
-    // Bind to queue (this adds iptables rules with exclusions)
-    if let Err(e) = queue.bind(queue_config) {
-        error!("Failed to bind packet queue: {}", e);
-        return DaemonResponse {
-            success: false,
-            message: format!("Failed to bind packet queue: {}", e),
-            data: None,
-        };
-    }
-
-    // Create channel for OxTunnel-encapsulated packets -> QUIC
-    let (oxtunnel_tx, oxtunnel_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
-
-    // Create stop flag for graceful shutdown
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_clone = stop_flag.clone();
-
-    // Spawn queue reading task - send raw packets directly (no batching for now)
-    let queue_task = tokio::task::spawn_blocking(move || {
-        info!("📡 NFQUEUE capture started - sending raw packets");
-        let mut packet_count: u64 = 0;
-        let start = Instant::now();
-
-        loop {
-            // Check stop flag for graceful shutdown
-            if stop_flag_clone.load(Ordering::Relaxed) {
-                info!("📡 NFQUEUE stop signal received, cleaning up...");
-                break;
-            }
-
-            match queue.recv() {
-                Ok(packet) => {
-                    packet_count += 1;
-
-                    // Extract packet ID before taking ownership of data
-                    let packet_id = packet.id;
-
-                    // Send raw packet directly (server expects raw IP packets)
-                    // Only send if packet fits in QUIC datagram (~1100 bytes payload limit)
-                    if packet.data.len() <= 1100 {
-                        let _ = oxtunnel_tx.blocking_send(packet.data);
-                    }
-
-                    // Accept the packet (forward it normally)
-                    if let Err(e) = queue.set_verdict(packet_id, Verdict::Accept) {
-                        error!("Failed to set verdict: {}", e);
-                    }
-
-                    // Log throughput periodically
-                    #[allow(clippy::manual_is_multiple_of)]
-                    if packet_count % 10000 == 0 {
-                        let elapsed = start.elapsed().as_secs_f64();
-                        let pps = packet_count as f64 / elapsed;
-                        info!("📦 NFQUEUE: {} packets, {:.0} pps", packet_count, pps);
-                    }
-                }
-                Err(e) => {
-                    if !queue.is_bound() {
-                        break;
-                    }
-                    error!("Queue recv error: {}", e);
-                }
-            }
-        }
-
-        // Explicit cleanup - unbind will clean up iptables
-        info!("📡 NFQUEUE cleanup: unbinding queue...");
-        if let Err(e) = queue.unbind() {
-            error!("Failed to unbind queue: {}", e);
-        }
-        info!("NFQUEUE capture ended ({} packets)", packet_count);
-    });
+    // Create channel for packets -> QUIC
+    let (_oxtunnel_tx, oxtunnel_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
 
     // Spawn client task with pre-established connection
     let task = tokio::spawn(async move {
-        info!("🚀 Starting relay client with raw packet forwarding...");
-        info!("   ├─ Packet queue: {}", platform_clone);
+        info!("🚀 Starting relay client (AF_XDP mode)...");
+        info!("   ├─ Mode: Kernel bypass");
         info!("   ├─ QUIC datagrams: enabled");
-        info!("   └─ Raw packets: enabled (no batching)");
+        info!("   └─ TODO: Integrate quic_xdp packet capture");
 
         if let Err(e) = client.run_with_connection(connection, oxtunnel_rx).await {
             error!("Client error: {}", e);
@@ -507,10 +417,14 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         info!("Client task ended");
     });
 
+    // Create stop flag for graceful shutdown
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let platform = "AF_XDP".to_string();
+
     state_guard.connected = true;
     state_guard.server_id = Some(server_id.clone());
     state_guard.client_task = Some(task);
-    state_guard.queue_task = Some(queue_task);
+    state_guard.queue_task = None; // No NFQUEUE task in AF_XDP mode
     state_guard.queue_stop_flag = Some(stop_flag);
     state_guard.metrics = Some(metrics);
     state_guard.connected_at = Some(std::time::Instant::now());
@@ -521,7 +435,7 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         data: Some(serde_json::json!({
             "server_id": server_id,
             "server_addr": server_addr.to_string(),
-            "packet_queue": true,
+            "packet_queue": false,  // No NFQUEUE in AF_XDP mode
             "platform": platform,
         })),
     }

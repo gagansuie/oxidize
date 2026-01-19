@@ -122,61 +122,64 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
 - **Smart Traffic Detection** - Auto-detects gaming/VoIP ports for optimal routing
 
 ### 🧠 Smart Traffic Management
-- **BBRv4 Congestion Control** - 10x CPU efficiency over traditional implementations
-  - Fixed-point arithmetic (no f64 in hot paths)
-  - Cache-line aligned structures (64-byte alignment)
-  - Batch ACK processing (64 ACKs at once)
-  - Lock-free atomics (zero mutex overhead)
-  - Gaming mode (low latency) and throughput mode (bulk transfer)
-  - **ML-augmented pacing** - LSTM predictions pre-emptively reduce CWND before loss
+- **Adaptive ML Congestion Control** - Online learning with continuous improvement
+  - Lookup tables generated from trained ML model (<100ns decisions)
+  - Live ML inference for edge cases (~1µs)
+  - Automatic table refresh (hourly) from real traffic observations
+  - No restart needed - model improves continuously
+- **ECN (Explicit Congestion Notification)** - RFC 9000 compliant
+  - DCTCP-style congestion response
+  - Better signals than loss-based detection
+- **Multipath QUIC** - Aggregate bandwidth across paths
+  - Adaptive path selection (RTT + loss + bandwidth scoring)
+  - Seamless failover on path failure
+  - Round-robin, weighted, or lowest-RTT scheduling
 - **Deep Packet Inspection** - Identifies Discord, Zoom, Valorant, Fortnite by protocol patterns
 - **Application Fingerprinting** - Detect apps on non-standard ports (Discord on 443, etc.)
-- **MPTCP-style Redundancy** - Critical packets sent on all paths for zero packet loss
-- **ML Handoff Prediction** - Predicts WiFi→LTE transitions 5+ seconds ahead
-- **HTTP/3 Priority Scheduler** - Real-time traffic prioritization
 - **Traffic Classification** - Auto-detects gaming/streaming/VoIP for optimal handling
 - **Smart Split-Tunneling** - Gaming tunneled for optimization, streaming bypassed for clean IP
 - **Edge Caching** - LRU cache for static content at relay points
 
-> BBRv4 is used for kernel bypass mode. Normal QUIC uses Quinn's native BBR. See [BBRV4.md](docs/BBRV4.md).
+> See [QUIC_XDP.md](docs/QUIC_XDP.md) for the complete QUIC-XDP stack documentation.
 
 ### 🧠 Deep Learning Engine (Pure Rust, 10x Optimized)
-Self-improving network optimization using neural networks with **INT8 quantized inference**:
+Self-improving network optimization using neural networks with **adaptive online learning**:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                   OptimizedMlEngine (Production)                         │
+│                     AdaptiveMlEngine (Production)                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────┐  │
-│  │ MiniTransformer    │  │ PPOController      │  │ SpeculativeCache │  │
-│  │  - INT8 quantized  │  │ - Continuous CWND  │  │ - 100 pre-computed│  │
-│  │  - 4 attention head│  │ - Gaussian policy  │  │ - <1µs cache hit │  │
-│  │  - <10µs inference │  │ - Smooth control   │  │ - Near-zero lat  │  │
+│  │ ML Lookup Tables │  │ Live ML Inference  │  │ Online Learning  │  │
+│  │  - From ML model   │  │ - ONNX Runtime     │  │ - 100K obs buffer│  │
+│  │  - <100ns lookup   │  │ - <1µs inference  │  │ - Hourly refresh │  │
+│  │  - 90%+ hit rate   │  │ - Edge cases only  │  │ - No restart     │  │
 │  └────────────────────┘  └────────────────────┘  └──────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Core Models (Always Active):**
 | Model | Architecture | Latency | Purpose |
-|-------|--------------|---------|---------|
+|-------|--------------|---------|----------|
 | **Loss Predictor** | Transformer (INT8) | <10µs | Predicts packet loss 50-100ms ahead |
-| **Congestion Control** | PPO (continuous) | <10µs | Optimal CWND without discrete jumps |
+| **Congestion Control** | PPO (continuous) | <1µs | Optimal CWND via lookup + ML fallback |
 | **Compression Oracle** | Entropy heuristics | <1µs | Skip already-compressed data |
 | **Path Selector** | UCB1 bandit | <1µs | Learns best path per traffic type |
+| **FEC Decision** | Lookup table | <100ns | Optimal redundancy ratio |
 
 **Performance Benchmarks:**
 ```
 ╔════════════════════════════════════════════════════════════════╗
 ║                    ML ENGINE BENCHMARKS                         ║
 ╠════════════════════════════════════════════════════════════════╣
-║ Transformer Inference:  <10µs (INT8 quantized)                  ║
-║ PPO Action Selection:   <10µs (continuous policy)               ║
-║ Speculative Cache Hit:  <1µs  (100 decisions pre-computed)      ║
-║ Compression Decision:   <1µs  (entropy heuristics)              ║
-║ Path Selection:         <1µs  (UCB1 bandit)                     ║
-║ Memory Footprint:       <10MB (all models embedded)             ║
-║ Cache Hit Rate:         >95%  (speculative pre-computation)     ║
-╚════════════════════════════════════════════════════════════════╝
+║ Lookup Table Hit:      <100ns (90%+ of decisions)                ║
+║ Live ML Inference:     <1µs  (ONNX optimized)                   ║
+║ Transformer (INT8):    <10µs (loss prediction)                  ║
+║ Online Learning:       Continuous (no restart)                  ║
+║ Table Refresh:         Hourly (from observations)               ║
+║ Memory Footprint:      <10MB (all models + tables)              ║
+║ Observation Buffer:    100K samples (circular)                  ║
+╚═════════════════════════════════════════════════════════════════╝
 ```
 
 **Advanced ML Features (Scale-Ready):**
@@ -565,8 +568,9 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 
 ## Documentation
 
+- [QUIC_XDP.md](docs/QUIC_XDP.md) - **QUIC-XDP stack (10x optimizations, adaptive ML, multipath)**
+- [CHANGELOG.md](docs/CHANGELOG.md) - **Recent changes and removed modules**
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
-- [BBRV4.md](docs/BBRV4.md) - BBRv4 congestion control (10x CPU efficiency)
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (Transformer, PPO, UCB1)
 - [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection

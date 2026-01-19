@@ -8,6 +8,12 @@
 //! - **Latency**: <1µs per packet (P99)
 //! - **PPS**: 14.88+ Mpps per queue (line rate for 64-byte packets on 10GbE)
 //!
+//! # Built-in Optimizations (integrated from bottleneck elimination)
+//! - **NUMA-aware allocation**: Memory bound to local NUMA node
+//! - **Huge pages**: 2MB pages reduce TLB misses by 512x
+//! - **PCIe multi-queue spreading**: Distributes load across PCIe lanes
+//! - **Hardware prefetch hints**: Pre-fetches packet data to L1 cache
+//!
 //! # Requirements
 //! - Linux kernel 4.18+ (5.4+ for zero-copy mode)
 //! - Hugepages configured (2MB or 1GB)
@@ -57,6 +63,11 @@ const DEFAULT_FRAME_SIZE: u32 = 4096;
 const DEFAULT_NUM_FRAMES: u32 = 4096;
 const DEFAULT_RING_SIZE: u32 = 2048;
 const BATCH_SIZE: usize = 64;
+
+// Huge page constants
+const HUGE_PAGE_SIZE_2MB: usize = 2 * 1024 * 1024;
+const MAP_HUGETLB: i32 = 0x40000;
+const MAP_HUGE_2MB: i32 = 21 << 26; // MAP_HUGE_SHIFT = 26
 
 // =============================================================================
 // AF_XDP Structures (from linux/if_xdp.h)
@@ -113,6 +124,7 @@ struct SockaddrXdp {
 // =============================================================================
 
 /// User-space memory region for zero-copy packet I/O
+/// Uses NUMA-aware huge page allocation for maximum performance
 pub struct Umem {
     /// Base address of the memory region
     addr: NonNull<u8>,
@@ -124,18 +136,38 @@ pub struct Umem {
     num_frames: u32,
     /// Memory layout for deallocation
     layout: Layout,
+    /// Whether huge pages were used
+    uses_huge_pages: bool,
+    /// NUMA node ID (-1 if not NUMA-aware)
+    numa_node: i32,
 }
 
 impl Umem {
     /// Allocate a new UMEM region with hugepage backing if available
+    /// Automatically uses NUMA-aware allocation and huge pages for best performance
     pub fn new(num_frames: u32, frame_size: u32) -> io::Result<Self> {
+        Self::new_numa(num_frames, frame_size, -1) // Auto-detect NUMA node
+    }
+
+    /// Allocate UMEM on a specific NUMA node with huge pages
+    ///
+    /// # Arguments
+    /// * `num_frames` - Number of packet frames
+    /// * `frame_size` - Size of each frame (typically 4096)
+    /// * `numa_node` - NUMA node ID (-1 for auto-detect/current CPU's node)
+    pub fn new_numa(num_frames: u32, frame_size: u32, numa_node: i32) -> io::Result<Self> {
         let size = (num_frames as usize) * (frame_size as usize);
 
-        // Try to allocate with hugepage alignment
-        let layout = Layout::from_size_align(size, 2 * 1024 * 1024) // 2MB alignment
-            .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+        // Round up to huge page boundary
+        let aligned_size = (size + HUGE_PAGE_SIZE_2MB - 1) & !(HUGE_PAGE_SIZE_2MB - 1);
 
-        let addr = unsafe { alloc(layout) };
+        // Try to allocate with huge pages first (512x fewer TLB misses)
+        let (addr, uses_huge_pages) = Self::try_alloc_huge_pages(aligned_size, numa_node)
+            .unwrap_or_else(|| {
+                warn!("Huge pages unavailable, falling back to regular pages");
+                Self::alloc_regular(size)
+            });
+
         if addr.is_null() {
             return Err(Error::new(
                 ErrorKind::OutOfMemory,
@@ -146,13 +178,25 @@ impl Umem {
         // Zero the memory
         unsafe { ptr::write_bytes(addr, 0, size) };
 
+        // Bind to NUMA node if specified
+        let actual_numa_node = if numa_node >= 0 {
+            Self::bind_numa(addr, size, numa_node);
+            numa_node
+        } else {
+            Self::detect_numa_node()
+        };
+
         let addr = NonNull::new(addr).unwrap();
+        let layout = Layout::from_size_align(size, HUGE_PAGE_SIZE_2MB)
+            .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
 
         info!(
-            "UMEM allocated: {} frames x {} bytes = {} MB",
+            "UMEM allocated: {} frames x {} bytes = {} MB (huge_pages={}, numa_node={})",
             num_frames,
             frame_size,
-            size / (1024 * 1024)
+            size / (1024 * 1024),
+            uses_huge_pages,
+            actual_numa_node
         );
 
         Ok(Self {
@@ -161,7 +205,84 @@ impl Umem {
             frame_size,
             num_frames,
             layout,
+            uses_huge_pages,
+            numa_node: actual_numa_node,
         })
+    }
+
+    /// Try to allocate with huge pages using mmap
+    fn try_alloc_huge_pages(size: usize, numa_node: i32) -> Option<(*mut u8, bool)> {
+        let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB;
+
+        let addr = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                flags,
+                -1,
+                0,
+            )
+        };
+
+        if addr == libc::MAP_FAILED {
+            return None;
+        }
+
+        // Apply NUMA binding if requested
+        if numa_node >= 0 {
+            Self::bind_numa(addr as *mut u8, size, numa_node);
+        }
+
+        Some((addr as *mut u8, true))
+    }
+
+    /// Fallback to regular allocation
+    fn alloc_regular(size: usize) -> (*mut u8, bool) {
+        let layout = Layout::from_size_align(size, HUGE_PAGE_SIZE_2MB)
+            .unwrap_or_else(|_| Layout::from_size_align(size, 4096).unwrap());
+        (unsafe { alloc(layout) }, false)
+    }
+
+    /// Bind memory to a NUMA node using mbind
+    fn bind_numa(addr: *mut u8, size: usize, numa_node: i32) {
+        // MPOL_BIND = 2, MPOL_MF_STRICT = 1, MPOL_MF_MOVE = 2
+        const MPOL_BIND: i32 = 2;
+        const MPOL_MF_STRICT: u32 = 1;
+        const MPOL_MF_MOVE: u32 = 2;
+
+        let mut nodemask: u64 = 1u64 << numa_node;
+
+        unsafe {
+            // mbind(addr, len, mode, nodemask, maxnode, flags)
+            libc::syscall(
+                libc::SYS_mbind,
+                addr as *mut libc::c_void,
+                size,
+                MPOL_BIND,
+                &mut nodemask as *mut u64,
+                64u64, // maxnode
+                MPOL_MF_STRICT | MPOL_MF_MOVE,
+            );
+        }
+    }
+
+    /// Detect current CPU's NUMA node
+    fn detect_numa_node() -> i32 {
+        // Read from /sys/devices/system/cpu/cpu{N}/node{M}
+        let cpu_id = unsafe { libc::sched_getcpu() };
+        if cpu_id < 0 {
+            return 0;
+        }
+
+        let path = format!(
+            "/sys/devices/system/cpu/cpu{}/topology/physical_package_id",
+            cpu_id
+        );
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
     }
 
     /// Get raw address for registration
@@ -667,24 +788,92 @@ unsafe impl Send for AfXdpSocket {}
 // =============================================================================
 
 /// Configuration for AF_XDP runtime
+/// Includes PCIe multi-queue spreading for maximum throughput
 #[derive(Debug, Clone)]
 pub struct AfXdpConfig {
     pub interface: String,
+    /// Number of RX/TX queues (spread across PCIe lanes)
     pub num_queues: u32,
     pub zero_copy: bool,
     pub busy_poll: bool,
     pub quic_port: u16,
+    /// NUMA node to bind memory (-1 for auto-detect)
+    pub numa_node: i32,
+    /// Enable RSS (Receive Side Scaling) for multi-queue
+    pub enable_rss: bool,
+    /// CPU affinity mask for queue distribution
+    pub cpu_affinity: Option<Vec<usize>>,
 }
 
 impl Default for AfXdpConfig {
     fn default() -> Self {
+        // Auto-detect optimal queue count based on CPU cores
+        let num_queues = std::thread::available_parallelism()
+            .map(|p| p.get().min(8) as u32)
+            .unwrap_or(4);
+
         Self {
             interface: "eth0".to_string(),
-            num_queues: 1,
+            num_queues,
             zero_copy: true,
             busy_poll: true,
             quic_port: 4433,
+            numa_node: -1, // Auto-detect
+            enable_rss: true,
+            cpu_affinity: None,
         }
+    }
+}
+
+/// PCIe multi-queue spreader for maximum throughput
+/// Distributes packets across multiple queues to utilize all PCIe lanes
+pub struct MultiQueueSpreader {
+    /// Current queue index for round-robin
+    current_queue: std::sync::atomic::AtomicUsize,
+    /// Total number of queues
+    num_queues: usize,
+    /// Per-queue packet counts
+    queue_counts: Vec<AtomicU64>,
+}
+
+impl MultiQueueSpreader {
+    pub fn new(num_queues: usize) -> Self {
+        Self {
+            current_queue: std::sync::atomic::AtomicUsize::new(0),
+            num_queues,
+            queue_counts: (0..num_queues).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    /// Get next queue ID using round-robin
+    #[inline]
+    pub fn next_queue(&self) -> usize {
+        let queue = self.current_queue.fetch_add(1, Ordering::Relaxed) % self.num_queues;
+        self.queue_counts[queue].fetch_add(1, Ordering::Relaxed);
+        queue
+    }
+
+    /// Get queue ID based on flow hash (for RSS-like behavior)
+    #[inline]
+    pub fn queue_for_flow(&self, src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16) -> usize {
+        // Toeplitz-like hash for flow distribution
+        let hash = src_ip
+            .wrapping_mul(0x9e3779b9)
+            .wrapping_add(dst_ip.wrapping_mul(0x85ebca6b))
+            .wrapping_add((src_port as u32).wrapping_mul(0xc2b2ae35))
+            .wrapping_add((dst_port as u32).wrapping_mul(0x27d4eb2f));
+
+        let queue = (hash as usize) % self.num_queues;
+        self.queue_counts[queue].fetch_add(1, Ordering::Relaxed);
+        queue
+    }
+
+    /// Get queue statistics
+    pub fn stats(&self) -> Vec<u64> {
+        self.queue_counts
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .collect()
     }
 }
 

@@ -1,13 +1,10 @@
 use crate::config::ClientConfig;
 use crate::dns_cache::DnsCache;
 use anyhow::{Context, Result};
-use oxidize_common::connection_migration::{MigrationConfig, MigrationManager};
-use oxidize_common::connection_pool::{ConnectionPool, PoolConfig};
 use oxidize_common::ml_optimized::{MlCompressionDecision, OptimizedMlEngine};
 use oxidize_common::model_hub::{HubConfig, ModelHub};
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
 use oxidize_common::prefetch::{PrefetchConfig, PrefetchResource, Prefetcher};
-use oxidize_common::unified_transport::{TransportType, UnifiedTransportConfig};
 use oxidize_common::{compress_data, MessageFramer, MessageType, RelayMessage, RelayMetrics};
 use quinn::ClientConfig as QuinnClientConfig;
 use quinn::Endpoint;
@@ -100,15 +97,6 @@ pub struct RelayClient {
     ml_engine: Arc<RwLock<OptimizedMlEngine>>,
     /// Model Hub for downloading models
     model_hub: Arc<ModelHub>,
-    /// Connection migration manager for WiFi↔LTE handoff
-    #[allow(dead_code)]
-    migration_manager: MigrationManager,
-    /// Connection pool for QUIC connection reuse
-    #[allow(dead_code)]
-    connection_pool: ConnectionPool,
-    /// Transport configuration for QUIC/UDP selection
-    #[allow(dead_code)]
-    transport_config: UnifiedTransportConfig,
 }
 
 impl RelayClient {
@@ -235,18 +223,6 @@ impl RelayClient {
             prefetcher,
             ml_engine,
             model_hub,
-            migration_manager: MigrationManager::new(MigrationConfig::default()),
-            connection_pool: ConnectionPool::new(PoolConfig::default()),
-            transport_config: UnifiedTransportConfig {
-                server_addr,
-                transport: TransportType::Quic,
-                enable_oxtunnel_encryption: false,
-                enable_batching: true,
-                max_batch_size: 64,
-                batch_timeout_us: 1000,
-                connect_timeout: Duration::from_secs(10),
-                keepalive_interval: Duration::from_secs(15),
-            },
         })
     }
 
@@ -1066,9 +1042,6 @@ impl RelayClient {
             prefetcher: self.prefetcher.clone(),
             ml_engine: self.ml_engine.clone(),
             model_hub: self.model_hub.clone(),
-            migration_manager: MigrationManager::new(MigrationConfig::default()),
-            connection_pool: ConnectionPool::new(PoolConfig::default()),
-            transport_config: self.transport_config.clone(),
         }
     }
 }

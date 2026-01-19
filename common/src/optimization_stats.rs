@@ -1,6 +1,7 @@
 //! Unified Optimization Statistics
 //!
 //! Aggregates stats from all optimization modules for monitoring and analytics.
+//! Simplified after removing legacy modules - stats now come from quic_xdp ML engine.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,11 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Unified optimization statistics for analytics dashboard
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OptimizationStats {
-    // ML Pacing Stats
-    pub ml_predictions_made: u64,
-    pub ml_preemptive_reductions: u64,
-    pub ml_loss_probability: f32,
-
     // MPTCP Redundancy Stats
     pub redundant_packets_sent: u64,
     pub redundant_packets_useful: u64,
@@ -29,50 +25,23 @@ pub struct OptimizationStats {
     pub dpi_flows_identified: u64,
     pub dpi_cache_hit_rate: f32,
 
-    // Protocol Optimization Stats
-    pub varint_bytes_saved: u64,
-    pub encryption_skipped: u64,
-    pub trusted_connections: u64,
+    // ML Stats (from quic_xdp ML engine)
+    pub ml_predictions_made: u64,
+    pub ml_cwnd_adjustments: u64,
+    pub ml_loss_probability: f32,
 
-    // Buffer Pool Stats
-    pub buffer_pool_size: usize,
-    pub buffer_pool_utilization: f32,
-    pub buffer_expansions: u64,
-    pub buffer_contractions: u64,
-
-    // NUMA Stats
-    pub numa_nodes: usize,
-    pub numa_local_allocs: u64,
-    pub numa_remote_allocs: u64,
-
-    // SIMD Stats
-    pub simd_avx512_ops: u64,
-    pub simd_avx2_ops: u64,
-    pub simd_scalar_ops: u64,
+    // SIMD Stats (from quic_xdp parser)
     pub simd_packets_parsed: u64,
 }
 
 impl OptimizationStats {
-    /// Collect stats from all optimization modules
-    #[allow(clippy::too_many_arguments)]
+    /// Collect stats from optimization modules
     pub fn collect(
-        ml_pacer: Option<&crate::ml_pacing::MlAugmentedPacer>,
         mptcp: Option<&crate::mptcp_redundancy::MptcpRedundancyScheduler>,
         handoff: Option<&crate::handoff_prediction::HandoffPredictor>,
         dpi: Option<&crate::deep_packet_inspection::DeepPacketInspector>,
-        trusted: Option<&crate::protocol_optimizations::TrustedNetworkDetector>,
-        buffer_pool: Option<&crate::protocol_optimizations::DynamicBufferPool>,
-        numa: Option<&crate::protocol_optimizations::NumaAllocator>,
-        simd: Option<&crate::simd_avx512::SimdParser>,
     ) -> Self {
         let mut stats = Self::default();
-
-        // ML Pacing
-        if let Some(p) = ml_pacer {
-            stats.ml_predictions_made = p.stats.predictions_made.load(Ordering::Relaxed);
-            stats.ml_preemptive_reductions = p.stats.preemptive_reductions.load(Ordering::Relaxed);
-            stats.ml_loss_probability = p.get_loss_probability();
-        }
 
         // MPTCP Redundancy
         if let Some(m) = mptcp {
@@ -103,49 +72,19 @@ impl OptimizationStats {
             };
         }
 
-        // Trusted Networks
-        if let Some(t) = trusted {
-            stats.encryption_skipped = t.stats.encryption_skipped.load(Ordering::Relaxed);
-            stats.trusted_connections = t.stats.trusted_connections.load(Ordering::Relaxed);
-        }
-
-        // Buffer Pool
-        if let Some(b) = buffer_pool {
-            stats.buffer_pool_size = b.size();
-            stats.buffer_pool_utilization = b.utilization();
-            stats.buffer_expansions = b.stats.expansions.load(Ordering::Relaxed);
-            stats.buffer_contractions = b.stats.contractions.load(Ordering::Relaxed);
-        }
-
-        // NUMA
-        if let Some(n) = numa {
-            stats.numa_nodes = n.node_count();
-            stats.numa_local_allocs = n.stats.local_allocations.load(Ordering::Relaxed);
-            stats.numa_remote_allocs = n.stats.remote_allocations.load(Ordering::Relaxed);
-        }
-
-        // SIMD
-        if let Some(s) = simd {
-            stats.simd_avx512_ops = s.stats.avx512_ops.load(Ordering::Relaxed);
-            stats.simd_avx2_ops = s.stats.avx2_ops.load(Ordering::Relaxed);
-            stats.simd_scalar_ops = s.stats.scalar_ops.load(Ordering::Relaxed);
-            stats.simd_packets_parsed = s.stats.packets_parsed.load(Ordering::Relaxed);
-        }
-
         stats
     }
 
     /// Get summary for logging
     pub fn summary(&self) -> String {
         format!(
-            "ML: {}pred/{}reduce | MPTCP: {}dup/{}fail | DPI: {}flows | SIMD: {}avx512/{}avx2",
+            "ML: {}pred/{}cwnd | MPTCP: {}dup/{}fail | DPI: {}flows | SIMD: {}pkts",
             self.ml_predictions_made,
-            self.ml_preemptive_reductions,
+            self.ml_cwnd_adjustments,
             self.redundant_packets_sent,
             self.path_failovers,
             self.dpi_flows_identified,
-            self.simd_avx512_ops,
-            self.simd_avx2_ops,
+            self.simd_packets_parsed,
         )
     }
 }
