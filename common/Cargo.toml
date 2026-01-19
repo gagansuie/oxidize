@@ -7,7 +7,7 @@ license = { workspace = true }
 
 [features]
 default = ["ai"]
-ai = ["dep:tract-onnx", "dep:ndarray", "dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
+ai = ["dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
 kernel-bypass = []  # DPDK + AF_XDP kernel bypass for bare metal (100+ Gbps)
 
 [[bin]]
@@ -33,8 +33,6 @@ reed-solomon-erasure = { workspace = true }
 rayon = { workspace = true }
 libc = "0.2"
 ring = { workspace = true }  # Hardware-accelerated crypto
-tract-onnx = { workspace = true, optional = true }
-ndarray = { workspace = true, optional = true }
 candle-core = { workspace = true, optional = true }
 candle-nn = { workspace = true, optional = true }
 safetensors = { workspace = true, optional = true }
