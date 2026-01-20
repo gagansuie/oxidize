@@ -1,103 +1,15 @@
 use anyhow::{Context, Result};
-// OxTunnelConfig available for future daemon OxTunnel integration
-#[allow(unused_imports)]
-use oxidize_common::oxtunnel_client::OxTunnelConfig;
-use oxidize_common::oxtunnel_protocol::{
-    encode_packet, flags, PacketBatch, HEADER_SIZE, MAX_PACKET_SIZE,
-};
+use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService};
 // AF_XDP kernel bypass for bare metal packet capture (always enabled on Linux)
 #[cfg(target_os = "linux")]
 use oxidize_common::quic_xdp::{QuicXdpConfig, QuicXdpRuntime};
 use relay_client::{ClientConfig, RelayClient};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
-
-// ============================================================================
-// OxTunnel Batching for NFQUEUE
-// ============================================================================
-
-/// Simple packet batcher for OxTunnel encapsulation
-/// Respects QUIC datagram MTU limits
-#[allow(dead_code)]
-struct PacketBatcher {
-    packets: Vec<Vec<u8>>,
-    total_size: usize,
-    max_batch_size: usize,
-    max_payload_size: usize, // Must fit within QUIC datagram MTU
-    sequence: AtomicU32,
-}
-
-#[allow(dead_code)]
-impl PacketBatcher {
-    /// Create batcher with max_payload_size to fit within QUIC datagrams
-    /// QUIC datagram MTU is typically ~1200 bytes, so use 1100 to be safe
-    fn new(max_batch_size: usize, max_payload_size: usize) -> Self {
-        Self {
-            packets: Vec::with_capacity(max_batch_size),
-            total_size: 0,
-            max_batch_size,
-            max_payload_size,
-            sequence: AtomicU32::new(0),
-        }
-    }
-
-    fn next_seq(&self) -> u32 {
-        self.sequence.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn add(&mut self, packet: Vec<u8>) -> Option<Vec<u8>> {
-        let new_size = self.total_size + packet.len() + 2; // +2 for length prefix
-                                                           // Flush if adding this packet would exceed MTU or max batch count
-        let should_flush = new_size > self.max_payload_size - HEADER_SIZE - 32
-            || self.packets.len() >= self.max_batch_size;
-
-        if should_flush && !self.packets.is_empty() {
-            let result = self.flush();
-            self.packets.push(packet);
-            self.total_size = self.packets.last().map(|p| p.len() + 2).unwrap_or(0);
-            return result;
-        }
-
-        self.packets.push(packet);
-        self.total_size = new_size;
-        None
-    }
-
-    fn flush(&mut self) -> Option<Vec<u8>> {
-        if self.packets.is_empty() {
-            return None;
-        }
-
-        let mut batch = PacketBatch::new();
-        for pkt in &self.packets {
-            batch.add(pkt);
-        }
-        self.packets.clear();
-        self.total_size = 0;
-
-        let mut payload = vec![0u8; MAX_PACKET_SIZE];
-        let payload_len = match batch.encode(&mut payload) {
-            Ok(len) => len,
-            Err(_) => return None,
-        };
-        payload.truncate(payload_len);
-
-        let seq = self.next_seq();
-        let mut output = vec![0u8; HEADER_SIZE + payload.len() + 32];
-        match encode_packet(&mut output, &payload, seq, flags::BATCH, None) {
-            Ok(len) => {
-                output.truncate(len);
-                Some(output)
-            }
-            Err(_) => None,
-        }
-    }
-}
 
 #[cfg(unix)]
 use std::path::Path;
@@ -137,8 +49,6 @@ struct DaemonState {
     connected: bool,
     server_id: Option<String>,
     client_task: Option<tokio::task::JoinHandle<()>>,
-    queue_task: Option<tokio::task::JoinHandle<()>>,
-    queue_stop_flag: Option<Arc<AtomicBool>>,
     metrics: Option<oxidize_common::RelayMetrics>,
     connected_at: Option<std::time::Instant>,
 }
@@ -208,12 +118,9 @@ async fn main() -> Result<()> {
         shutdown_signal().await;
         warn!("Shutdown signal received, cleaning up...");
 
-        // Abort client and queue tasks
+        // Abort client task (capture service is stopped internally)
         let mut state_guard = shutdown_state.lock().await;
         if let Some(task) = state_guard.client_task.take() {
-            task.abort();
-        }
-        if let Some(task) = state_guard.queue_task.take() {
             task.abort();
         }
         drop(state_guard);
@@ -429,47 +336,56 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     };
     info!("✅ QUIC handshake complete to {}", server_addr);
 
-    // STEP 4: AF_XDP Kernel Bypass Mode (NFQUEUE removed for bare metal)
-    // QuicXdpRuntime is initialized at daemon startup for direct NIC packet capture
-    info!("📦 AF_XDP mode: kernel bypass initialized at daemon startup");
+    // STEP 4: Cross-platform packet capture using unified PacketCaptureService
+    // Configure capture with relay server exclusion
+    let capture_config = CaptureConfig {
+        capture_tcp: true,
+        capture_udp: true,
+        exclude_ips: vec![server_addr.ip()],
+        queue_num: 0,
+    };
 
-    // Create channel for packets -> QUIC
-    let (_oxtunnel_tx, oxtunnel_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10000);
+    // Start cross-platform packet capture service
+    let capture_service = PacketCaptureService::new(capture_config);
+    let (oxtunnel_rx, capture_handle) = capture_service.start();
+
+    // Get platform name for logging
+    let platform = PacketCaptureService::platform_name();
 
     // Spawn client task with pre-established connection
     let task = tokio::spawn(async move {
-        info!("🚀 Starting relay client (AF_XDP mode)...");
-        info!("   ├─ Mode: Kernel bypass");
+        info!("🚀 Starting relay client ({} mode)...", platform);
+        info!("   ├─ Mode: {} packet capture", platform);
         info!("   ├─ QUIC datagrams: enabled");
-        info!("   └─ QuicXdpRuntime: active");
+        info!("   └─ Capturing TCP+UDP traffic");
 
         if let Err(e) = client.run_with_connection(connection, oxtunnel_rx).await {
             error!("Client error: {}", e);
         }
 
+        // Stop capture service when client ends
+        capture_service.stop();
+        let _ = capture_handle.await;
         info!("Client task ended");
     });
-
-    // Create stop flag for graceful shutdown
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let platform = "AF_XDP".to_string();
 
     state_guard.connected = true;
     state_guard.server_id = Some(server_id.clone());
     state_guard.client_task = Some(task);
-    state_guard.queue_task = None; // No NFQUEUE task in AF_XDP mode
-    state_guard.queue_stop_flag = Some(stop_flag);
     state_guard.metrics = Some(metrics);
     state_guard.connected_at = Some(std::time::Instant::now());
 
     DaemonResponse {
         success: true,
-        message: format!("Connected to {} ({})", server_addr, platform),
+        message: format!(
+            "Connected to {} ({})",
+            server_addr,
+            PacketCaptureService::platform_name()
+        ),
         data: Some(serde_json::json!({
             "server_id": server_id,
             "server_addr": server_addr.to_string(),
-            "packet_queue": false,  // No NFQUEUE in AF_XDP mode
-            "platform": platform,
+            "platform": PacketCaptureService::platform_name(),
         })),
     }
 }
@@ -485,23 +401,10 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         };
     }
 
-    // Abort the client task
+    // Abort the client task (capture service is stopped internally when client ends)
     if let Some(task) = state_guard.client_task.take() {
         task.abort();
         info!("Client task aborted");
-    }
-
-    // Signal queue task to stop gracefully (so it can unbind NFQUEUE)
-    if let Some(stop_flag) = state_guard.queue_stop_flag.take() {
-        stop_flag.store(true, Ordering::Relaxed);
-        info!("Queue stop signal sent");
-    }
-
-    // Wait for queue task to finish cleanup
-    if let Some(task) = state_guard.queue_task.take() {
-        // Give it time to clean up (max 2 seconds)
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
-        info!("Queue task stopped");
     }
 
     let uptime = state_guard

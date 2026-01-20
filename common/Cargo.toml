@@ -48,6 +48,9 @@ parking_lot = "0.12"  # Fast RwLock for QUIC-XDP connection table
 [target.'cfg(unix)'.dependencies]
 nix = "0.27"  # Unix utilities (Linux, macOS, Android, iOS)
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nfq = "0.2"  # NFQUEUE packet capture for Linux
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windivert = { version = "0.6", features = ["vendored"] }  # WinDivert packet capture
 

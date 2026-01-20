@@ -187,24 +187,38 @@
                         >
                     </div>
                     <div class="server-stats">
-                        {#if liveLatency !== null}
+                        {#if liveLatency !== null || region.latency_ms !== null}
+                            {@const displayLatency =
+                                liveLatency ?? region.latency_ms ?? 0}
                             <span
                                 class="latency"
-                                style="color: {getLatencyColor(liveLatency)}"
-                                >{liveLatency}ms</span
+                                style="color: {getLatencyColor(displayLatency)}"
+                                >{displayLatency}ms</span
                             >
+                            <div class="load-bar">
+                                <div
+                                    class="load-fill"
+                                    style="width: {Math.min(
+                                        (displayLatency / 200) * 100,
+                                        100,
+                                    )}%; background: {getLatencyColor(
+                                        displayLatency,
+                                    )}"
+                                ></div>
+                                <span class="load-value">{displayLatency}</span>
+                            </div>
+                        {:else}
+                            <span class="latency" style="color: #666">--ms</span
+                            >
+                            <div class="load-bar">
+                                <div
+                                    class="load-fill"
+                                    style="width: {region.load}%; background: {getLoadColor(
+                                        region.load,
+                                    )}"
+                                ></div>
+                            </div>
                         {/if}
-                        <div class="load-bar">
-                            <div
-                                class="load-fill"
-                                style="width: {liveLatency !== null
-                                    ? Math.min((liveLatency / 200) * 100, 100)
-                                    : region.load}%; background: {liveLatency !==
-                                null
-                                    ? getLatencyColor(liveLatency)
-                                    : getLoadColor(region.load)}"
-                            ></div>
-                        </div>
                     </div>
                 </button>
             {/each}
@@ -403,5 +417,13 @@
         height: 100%;
         border-radius: 2px;
         transition: width 0.3s;
+    }
+
+    .load-bar {
+        position: relative;
+    }
+
+    .load-value {
+        display: none;
     }
 </style>

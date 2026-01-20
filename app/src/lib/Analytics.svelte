@@ -952,13 +952,6 @@
                     <span class="ip-value protected">{status.ip || "--"}</span>
                     <span class="ip-tag protected">Protected</span>
                 </div>
-                {#if status.original_ip}
-                    <div class="ip-row">
-                        <span class="ip-label">Your IP</span>
-                        <span class="ip-value">{status.original_ip}</span>
-                        <span class="ip-tag hidden">Hidden</span>
-                    </div>
-                {/if}
             </div>
         </div>
     {/if}

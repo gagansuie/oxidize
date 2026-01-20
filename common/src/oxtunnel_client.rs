@@ -624,6 +624,367 @@ impl OxTunnelSender {
     }
 }
 
+// ============================================================================
+// Cross-Platform Packet Capture Service
+// ============================================================================
+
+use std::sync::atomic::AtomicBool;
+
+/// Packet capture configuration
+#[derive(Clone, Debug)]
+pub struct CaptureConfig {
+    /// Capture TCP traffic
+    pub capture_tcp: bool,
+    /// Capture UDP traffic  
+    pub capture_udp: bool,
+    /// Exclude these destination IPs (e.g., relay server)
+    pub exclude_ips: Vec<std::net::IpAddr>,
+    /// NFQUEUE number (Linux only)
+    pub queue_num: u16,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            capture_tcp: true,
+            capture_udp: true,
+            exclude_ips: Vec::new(),
+            queue_num: 0,
+        }
+    }
+}
+
+/// Cross-platform packet capture service
+/// Uses NFQUEUE on Linux, WinDivert on Windows, BPF on macOS
+pub struct PacketCaptureService {
+    config: CaptureConfig,
+    stop_flag: Arc<AtomicBool>,
+}
+
+impl PacketCaptureService {
+    pub fn new(config: CaptureConfig) -> Self {
+        Self {
+            config,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Start packet capture, returns receiver for captured packets
+    pub fn start(&self) -> (mpsc::Receiver<Vec<u8>>, tokio::task::JoinHandle<()>) {
+        let (tx, rx) = mpsc::channel(10000);
+        let stop_flag = self.stop_flag.clone();
+        let config = self.config.clone();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            run_platform_capture(tx, stop_flag, config);
+        });
+
+        (rx, handle)
+    }
+
+    /// Stop packet capture
+    pub fn stop(&self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Get the platform name for logging
+    pub fn platform_name() -> &'static str {
+        #[cfg(target_os = "linux")]
+        {
+            "NFQUEUE"
+        }
+        #[cfg(target_os = "windows")]
+        {
+            "WinDivert"
+        }
+        #[cfg(target_os = "macos")]
+        {
+            "BPF"
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            "Unsupported"
+        }
+    }
+}
+
+// ============================================================================
+// Linux: NFQUEUE capture
+// ============================================================================
+#[cfg(target_os = "linux")]
+fn run_platform_capture(
+    tx: mpsc::Sender<Vec<u8>>,
+    stop_flag: Arc<AtomicBool>,
+    config: CaptureConfig,
+) {
+    use nfq::{Queue, Verdict};
+
+    info!(
+        "📦 Linux NFQUEUE capture starting on queue {}...",
+        config.queue_num
+    );
+    info!(
+        "   TCP: {}, UDP: {}",
+        config.capture_tcp, config.capture_udp
+    );
+
+    let mut queue = match Queue::open() {
+        Ok(q) => q,
+        Err(e) => {
+            error!("Failed to open NFQUEUE: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = queue.bind(config.queue_num) {
+        error!("Failed to bind NFQUEUE {}: {}", config.queue_num, e);
+        return;
+    }
+
+    info!(
+        "✅ NFQUEUE bound to queue {} - capturing TCP+UDP packets",
+        config.queue_num
+    );
+
+    let mut packet_count: u64 = 0;
+    let mut last_log = std::time::Instant::now();
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        match queue.recv() {
+            Ok(mut msg) => {
+                let payload = msg.get_payload().to_vec();
+
+                // Send packet through channel (non-blocking)
+                if tx.blocking_send(payload).is_ok() {
+                    packet_count += 1;
+                }
+
+                // Accept the packet (let it through)
+                msg.set_verdict(Verdict::Accept);
+                let _ = queue.verdict(msg);
+
+                // Log progress every 10 seconds
+                if last_log.elapsed().as_secs() >= 10 {
+                    let pps = packet_count as f64 / last_log.elapsed().as_secs_f64();
+                    info!("📦 NFQUEUE: {} packets, {:.0} pps", packet_count, pps);
+                    last_log = std::time::Instant::now();
+                }
+            }
+            Err(e) => {
+                if !stop_flag.load(Ordering::Relaxed) {
+                    warn!("NFQUEUE recv error: {}", e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    info!("📦 NFQUEUE capture stopped after {} packets", packet_count);
+}
+
+// ============================================================================
+// Windows: WinDivert capture
+// ============================================================================
+#[cfg(target_os = "windows")]
+fn run_platform_capture(
+    tx: mpsc::Sender<Vec<u8>>,
+    stop_flag: Arc<AtomicBool>,
+    config: CaptureConfig,
+) {
+    use windivert::prelude::*;
+
+    info!("📦 Windows WinDivert capture starting...");
+
+    // Build filter based on config
+    let mut filter_parts = Vec::new();
+    if config.capture_tcp {
+        filter_parts.push("tcp");
+    }
+    if config.capture_udp {
+        filter_parts.push("udp");
+    }
+
+    let filter = format!("outbound and ({})", filter_parts.join(" or "));
+
+    let handle = match WinDivert::network(&filter, 0, WinDivertFlags::new()) {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to open WinDivert: {}", e);
+            return;
+        }
+    };
+
+    info!("✅ WinDivert opened with filter: {}", filter);
+
+    let mut packet_count: u64 = 0;
+    let mut last_log = std::time::Instant::now();
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        match handle.recv(None) {
+            Ok(packet) => {
+                let data = packet.data.to_vec();
+
+                if tx.blocking_send(data).is_ok() {
+                    packet_count += 1;
+                }
+
+                // Re-inject packet to allow normal traffic flow
+                let _ = handle.send(&packet);
+
+                if last_log.elapsed().as_secs() >= 10 {
+                    let pps = packet_count as f64 / last_log.elapsed().as_secs_f64();
+                    info!("📦 WinDivert: {} packets, {:.0} pps", packet_count, pps);
+                    last_log = std::time::Instant::now();
+                }
+            }
+            Err(e) => {
+                if !stop_flag.load(Ordering::Relaxed) {
+                    warn!("WinDivert recv error: {}", e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    info!(
+        "📦 WinDivert capture stopped after {} packets",
+        packet_count
+    );
+}
+
+// ============================================================================
+// macOS: BPF capture
+// ============================================================================
+#[cfg(target_os = "macos")]
+fn run_platform_capture(
+    tx: mpsc::Sender<Vec<u8>>,
+    stop_flag: Arc<AtomicBool>,
+    config: CaptureConfig,
+) {
+    use std::io::Read;
+
+    info!("📦 macOS BPF capture starting...");
+
+    // Find available BPF device
+    let bpf_path = (0..256)
+        .map(|i| format!("/dev/bpf{}", i))
+        .find(|path| std::path::Path::new(path).exists());
+
+    let bpf_path = match bpf_path {
+        Some(p) => p,
+        None => {
+            error!("No available BPF device found");
+            return;
+        }
+    };
+
+    let mut bpf_file = match std::fs::File::open(&bpf_path) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to open BPF device {}: {}", bpf_path, e);
+            return;
+        }
+    };
+
+    info!("✅ BPF device opened: {}", bpf_path);
+
+    let mut packet_count: u64 = 0;
+    let mut last_log = std::time::Instant::now();
+    let mut buf = vec![0u8; 65536];
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        match bpf_file.read(&mut buf) {
+            Ok(len) if len > 0 => {
+                let payload = buf[..len].to_vec();
+
+                if tx.blocking_send(payload).is_ok() {
+                    packet_count += 1;
+                }
+
+                if last_log.elapsed().as_secs() >= 10 {
+                    let pps = packet_count as f64 / last_log.elapsed().as_secs_f64();
+                    info!("📦 BPF: {} packets, {:.0} pps", packet_count, pps);
+                    last_log = std::time::Instant::now();
+                }
+            }
+            Ok(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(e) => {
+                if !stop_flag.load(Ordering::Relaxed) {
+                    warn!("BPF read error: {}", e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    info!("📦 BPF capture stopped after {} packets", packet_count);
+}
+
+// ============================================================================
+// Unsupported platforms
+// ============================================================================
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+fn run_platform_capture(
+    _tx: mpsc::Sender<Vec<u8>>,
+    _stop_flag: Arc<AtomicBool>,
+    _config: CaptureConfig,
+) {
+    error!("❌ Packet capture not supported on this platform");
+    error!("   Supported: Linux (NFQUEUE), Windows (WinDivert), macOS (BPF)");
+}
+
+// ============================================================================
+// Integrated OxTunnel Pipeline
+// ============================================================================
+
+/// Complete OxTunnel pipeline: Capture -> Encapsulate -> Send
+/// This integrates PacketCaptureService with OxTunnelSender
+pub struct OxTunnelPipeline {
+    capture: PacketCaptureService,
+    encapsulator: Arc<OxTunnelEncapsulator>,
+}
+
+impl OxTunnelPipeline {
+    pub fn new(capture_config: CaptureConfig, tunnel_config: OxTunnelConfig) -> Self {
+        Self {
+            capture: PacketCaptureService::new(capture_config),
+            encapsulator: Arc::new(OxTunnelEncapsulator::new(tunnel_config)),
+        }
+    }
+
+    /// Run the complete pipeline: capture packets -> encapsulate -> send to output
+    pub async fn run(&self, output_tx: mpsc::Sender<Vec<u8>>) {
+        info!(
+            "🚀 OxTunnel Pipeline starting ({})...",
+            PacketCaptureService::platform_name()
+        );
+
+        let (packet_rx, capture_handle) = self.capture.start();
+
+        let sender = OxTunnelSender {
+            encapsulator: self.encapsulator.clone(),
+            output_tx,
+        };
+
+        sender.run(packet_rx).await;
+
+        self.capture.stop();
+        let _ = capture_handle.await;
+
+        info!("📦 OxTunnel Pipeline stopped");
+    }
+
+    pub fn stop(&self) {
+        self.capture.stop();
+    }
+
+    pub fn encapsulator(&self) -> &Arc<OxTunnelEncapsulator> {
+        &self.encapsulator
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
