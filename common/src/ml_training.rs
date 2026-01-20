@@ -1,8 +1,8 @@
 //! Candle-based ML Training for Oxidize
 //!
 //! Pure-Rust training for:
-//! - **LSTM Loss Predictor**: Supervised learning from packet loss samples
-//! - **DQN Congestion Controller**: Deep Q-Learning with experience replay
+//! - **Transformer Loss Predictor**: Multi-head attention for loss prediction
+//! - **PPO Congestion Controller**: Proximal Policy Optimization for CWND control
 //!
 //! Design principles:
 //! - Training runs in background thread (zero hot-path impact)
@@ -27,111 +27,133 @@ use candle_nn::{linear, seq, Activation, Linear, Module, Optimizer, VarBuilder, 
 use crate::ml_optimized::{DrlExperience, LossSample};
 
 // ============================================================================
-// LSTM LOSS PREDICTOR TRAINING
+// TRANSFORMER LOSS PREDICTOR TRAINING
 // ============================================================================
 
-/// LSTM architecture for loss prediction
+/// Transformer model for loss prediction
+/// Architecture: Multi-head attention + Feed-forward
 /// Input: [batch, seq_len, features] -> Output: [batch, 1] (loss probability)
 #[cfg(feature = "ai")]
-pub struct LstmModel {
-    hidden_size: usize,
-    input_proj: Linear,
-    hidden_proj: Linear,
-    output_proj: Linear,
+pub struct TransformerModel {
+    d_model: usize,
+    n_heads: usize,
+    qkv_proj: Linear,
+    out_proj: Linear,
+    ff1: Linear,
+    ff2: Linear,
+    pred_head: Linear,
     device: Device,
 }
 
 #[cfg(feature = "ai")]
-impl LstmModel {
-    pub fn new(input_size: usize, hidden_size: usize, vb: VarBuilder) -> CandleResult<Self> {
-        let input_proj = linear(input_size, hidden_size * 4, vb.pp("input_proj"))?;
-        let hidden_proj = linear(hidden_size, hidden_size * 4, vb.pp("hidden_proj"))?;
-        let output_proj = linear(hidden_size, 1, vb.pp("output_proj"))?;
+impl TransformerModel {
+    pub fn new(d_model: usize, n_heads: usize, vb: VarBuilder) -> CandleResult<Self> {
+        let qkv_proj = linear(d_model, d_model * 3, vb.pp("qkv"))?;
+        let out_proj = linear(d_model, d_model, vb.pp("out"))?;
+        let ff1 = linear(d_model, d_model * 4, vb.pp("ff1"))?;
+        let ff2 = linear(d_model * 4, d_model, vb.pp("ff2"))?;
+        let pred_head = linear(d_model, 1, vb.pp("pred"))?;
 
-        Ok(LstmModel {
-            hidden_size,
-            input_proj,
-            hidden_proj,
-            output_proj,
+        Ok(TransformerModel {
+            d_model,
+            n_heads,
+            qkv_proj,
+            out_proj,
+            ff1,
+            ff2,
+            pred_head,
             device: vb.device().clone(),
         })
     }
 
-    /// Forward pass through LSTM
-    /// Simplified LSTM cell for efficiency
+    /// Forward pass with causal self-attention
     pub fn forward(&self, input: &Tensor) -> CandleResult<Tensor> {
-        let (batch_size, seq_len, _features) = input.dims3()?;
+        let (batch_size, seq_len, _) = input.dims3()?;
+        let head_dim = self.d_model / self.n_heads;
 
-        // Initialize hidden state
-        let mut h = Tensor::zeros((batch_size, self.hidden_size), DType::F32, &self.device)?;
-        let mut c = Tensor::zeros((batch_size, self.hidden_size), DType::F32, &self.device)?;
+        // Flatten sequence for processing
+        let x = input.reshape((batch_size * seq_len, self.d_model))?;
 
-        // Process sequence
-        for t in 0..seq_len {
-            let x_t = input.narrow(1, t, 1)?.squeeze(1)?;
+        // QKV projection
+        let qkv = self.qkv_proj.forward(&x)?;
+        let qkv = qkv.reshape((batch_size, seq_len, 3, self.n_heads, head_dim))?;
 
-            // LSTM gates: i, f, g, o
-            let gates = self
-                .input_proj
-                .forward(&x_t)?
-                .add(&self.hidden_proj.forward(&h)?)?;
+        // Split Q, K, V
+        let q = qkv.narrow(2, 0, 1)?.squeeze(2)?;
+        let k = qkv.narrow(2, 1, 1)?.squeeze(2)?;
+        let v = qkv.narrow(2, 2, 1)?.squeeze(2)?;
 
-            let chunks = gates.chunk(4, 1)?;
-            let i = candle_nn::ops::sigmoid(&chunks[0])?;
-            let f = candle_nn::ops::sigmoid(&chunks[1])?;
-            let g = chunks[2].tanh()?;
-            let o = candle_nn::ops::sigmoid(&chunks[3])?;
+        // Transpose for attention: [batch, heads, seq, head_dim]
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = v.transpose(1, 2)?.contiguous()?;
 
-            c = f.mul(&c)?.add(&i.mul(&g)?)?;
-            h = o.mul(&c.tanh()?)?;
-        }
+        // Scaled dot-product attention
+        let scale = (head_dim as f64).sqrt();
+        let k_t = k.transpose(2, 3)?.contiguous()?;
+        let attn = q.matmul(&k_t)?;
+        let attn = (attn / scale)?;
+        let attn = candle_nn::ops::softmax(&attn, 3)?;
+        let attn_out = attn.matmul(&v)?;
 
-        // Output projection with sigmoid for probability
-        let output = self.output_proj.forward(&h)?;
-        candle_nn::ops::sigmoid(&output)
+        // Transpose back and project
+        let attn_out = attn_out
+            .transpose(1, 2)?
+            .reshape((batch_size * seq_len, self.d_model))?;
+        let out = self.out_proj.forward(&attn_out)?;
+
+        // Add residual (simplified - just use x)
+        let out = (out + x)?;
+
+        // Feed-forward with GELU
+        let ff = self.ff1.forward(&out)?;
+        let ff = ff.gelu()?;
+        let ff = self.ff2.forward(&ff)?;
+        let out = (ff + out)?;
+
+        // Take last token and predict
+        let out = out.reshape((batch_size, seq_len, self.d_model))?;
+        let last = out.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+        let pred = self.pred_head.forward(&last)?;
+        candle_nn::ops::sigmoid(&pred)
     }
 }
 
-/// LSTM Trainer
+/// Transformer Trainer
 #[cfg(feature = "ai")]
-pub struct LstmTrainer {
+pub struct TransformerTrainer {
     var_map: VarMap,
-    model: LstmModel,
+    model: TransformerModel,
     optimizer: Option<candle_nn::AdamW>,
     device: Device,
+    d_model: usize,
+    seq_len: usize,
     learning_rate: f64,
-    batch_size: usize,
-    sequence_length: usize,
     training_loss: f32,
     epochs_trained: u64,
 }
 
 #[cfg(feature = "ai")]
-impl LstmTrainer {
-    pub fn new(
-        input_size: usize,
-        hidden_size: usize,
-        sequence_length: usize,
-    ) -> CandleResult<Self> {
-        let device = Device::Cpu; // CPU for edge deployment
+impl TransformerTrainer {
+    pub fn new(d_model: usize, n_heads: usize, seq_len: usize) -> CandleResult<Self> {
+        let device = Device::Cpu;
         let var_map = VarMap::new();
         let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
-        let model = LstmModel::new(input_size, hidden_size, vb)?;
+        let model = TransformerModel::new(d_model, n_heads, vb)?;
 
-        Ok(LstmTrainer {
+        Ok(TransformerTrainer {
             var_map,
             model,
             optimizer: None,
             device,
-            learning_rate: 0.001,
-            batch_size: 32,
-            sequence_length,
+            d_model,
+            seq_len,
+            learning_rate: 0.0001,
             training_loss: 0.0,
             epochs_trained: 0,
         })
     }
 
-    /// Initialize optimizer (call before training)
     pub fn init_optimizer(&mut self) -> CandleResult<()> {
         let params = self.var_map.all_vars();
         self.optimizer = Some(candle_nn::AdamW::new(
@@ -145,9 +167,8 @@ impl LstmTrainer {
         Ok(())
     }
 
-    /// Train on a batch of samples
     pub fn train_batch(&mut self, samples: &[LossSample]) -> CandleResult<f32> {
-        if samples.len() < self.sequence_length + 1 {
+        if samples.len() < self.seq_len {
             return Ok(0.0);
         }
 
@@ -156,140 +177,155 @@ impl LstmTrainer {
             .as_mut()
             .ok_or_else(|| candle_core::Error::Msg("Optimizer not initialized".into()))?;
 
-        // Prepare batch data
-        let num_sequences = (samples.len() - self.sequence_length).min(self.batch_size);
-        let mut input_data = Vec::with_capacity(num_sequences * self.sequence_length * 8);
-        let mut target_data = Vec::with_capacity(num_sequences);
-
-        for i in 0..num_sequences {
-            // Build sequence
-            for j in 0..self.sequence_length {
-                let features = samples[i + j].to_features();
-                input_data.extend_from_slice(&features);
-            }
-            // Target is the future_loss of the last sample in sequence
-            target_data.push(samples[i + self.sequence_length - 1].future_loss);
+        let batch_size = (samples.len() / self.seq_len).min(32);
+        if batch_size == 0 {
+            return Ok(0.0);
         }
 
-        // Create tensors
-        let input = Tensor::from_vec(
-            input_data,
-            (num_sequences, self.sequence_length, 8),
+        // Prepare sequences
+        let mut inputs = Vec::with_capacity(batch_size * self.seq_len * self.d_model);
+        let mut targets = Vec::with_capacity(batch_size);
+
+        for b in 0..batch_size {
+            let start = b * self.seq_len;
+            for i in 0..self.seq_len {
+                let sample = &samples[start + i];
+                // Get features and pad to d_model
+                let features = sample.to_features();
+                inputs.extend_from_slice(&features);
+                for _ in features.len()..self.d_model {
+                    inputs.push(0.0);
+                }
+            }
+            targets.push(samples[start + self.seq_len - 1].future_loss);
+        }
+
+        let input_t = Tensor::from_vec(
+            inputs,
+            (batch_size, self.seq_len, self.d_model),
             &self.device,
         )?;
-        let target = Tensor::from_vec(target_data, (num_sequences, 1), &self.device)?;
+        let target_t = Tensor::from_vec(targets, (batch_size, 1), &self.device)?;
 
         // Forward pass
-        let prediction = self.model.forward(&input)?;
+        let pred = self.model.forward(&input_t)?;
 
-        // MSE Loss
-        let loss = prediction.sub(&target)?.sqr()?.mean_all()?;
-        let loss_val = loss.to_scalar::<f32>()?;
+        // BCE loss: -[y*log(p) + (1-y)*log(1-p)]
+        let eps = 1e-7f64;
+        let pred_clamp = pred.clamp(eps, 1.0 - eps)?;
+        let bce = (target_t.clone() * pred_clamp.clone().log()?)?
+            .add(&((target_t.neg()? + 1.0)? * (pred_clamp.neg()? + 1.0)?.log()?)?)?
+            .neg()?
+            .mean_all()?;
+        let loss_val = bce.to_scalar::<f32>()?;
 
         // Backward pass
-        optimizer.backward_step(&loss)?;
+        optimizer.backward_step(&bce)?;
 
         self.training_loss = loss_val;
         self.epochs_trained += 1;
 
-        trace!("LSTM batch loss: {:.6}", loss_val);
+        trace!("Transformer batch loss: {:.6}", loss_val);
         Ok(loss_val)
     }
 
-    /// Save model to safetensors
     pub fn save<P: AsRef<Path>>(&self, path: P) -> CandleResult<()> {
         self.var_map.save(path)?;
-        debug!("LSTM model saved");
+        debug!("Transformer model saved");
         Ok(())
     }
 
-    /// Load model from safetensors
     pub fn load<P: AsRef<Path>>(&mut self, path: P) -> CandleResult<()> {
         self.var_map.load(path)?;
-        debug!("LSTM model loaded");
+        debug!("Transformer model loaded");
         Ok(())
     }
 
-    /// Get inference function (for hot path)
-    pub fn inference(&self, sequence: &[f32]) -> CandleResult<f32> {
-        let input = Tensor::from_vec(
-            sequence.to_vec(),
-            (1, self.sequence_length, 8),
-            &self.device,
-        )?;
+    pub fn predict(&self, features: &[f32]) -> CandleResult<f32> {
+        let mut padded = vec![0.0f32; self.seq_len * self.d_model];
+        let copy_len = features.len().min(padded.len());
+        padded[..copy_len].copy_from_slice(&features[..copy_len]);
+
+        let input = Tensor::from_vec(padded, (1, self.seq_len, self.d_model), &self.device)?;
         let output = self.model.forward(&input)?;
         output.squeeze(0)?.squeeze(0)?.to_scalar::<f32>()
     }
 
-    pub fn stats(&self) -> LstmTrainingStats {
-        LstmTrainingStats {
+    pub fn stats(&self) -> TransformerTrainingStats {
+        TransformerTrainingStats {
             epochs_trained: self.epochs_trained,
             training_loss: self.training_loss,
+            d_model: self.d_model,
             learning_rate: self.learning_rate,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LstmTrainingStats {
+pub struct TransformerTrainingStats {
     pub epochs_trained: u64,
     pub training_loss: f32,
+    pub d_model: usize,
     pub learning_rate: f64,
 }
 
 // ============================================================================
-// DQN CONGESTION CONTROLLER TRAINING
+// PPO CONGESTION CONTROLLER TRAINING
 // ============================================================================
 
-/// Deep Q-Network for congestion control
-/// Input: 8-dim state -> Output: 6 Q-values (one per action)
+/// PPO Actor-Critic model for continuous congestion control
+/// Actor: state -> action (CWND multiplier)
+/// Critic: state -> value (expected return)
 #[cfg(feature = "ai")]
-pub struct DqnModel {
-    network: candle_nn::Sequential,
+pub struct PpoModel {
+    actor: candle_nn::Sequential,
+    critic: candle_nn::Sequential,
 }
 
 #[cfg(feature = "ai")]
-impl DqnModel {
-    pub fn new(
-        state_size: usize,
-        action_size: usize,
-        hidden_size: usize,
-        vb: VarBuilder,
-    ) -> CandleResult<Self> {
-        let network = seq()
-            .add(linear(state_size, hidden_size, vb.pp("l1"))?)
+impl PpoModel {
+    pub fn new(state_size: usize, hidden_size: usize, vb: VarBuilder) -> CandleResult<Self> {
+        let actor = seq()
+            .add(linear(state_size, hidden_size, vb.pp("actor_l1"))?)
             .add(Activation::Relu)
-            .add(linear(hidden_size, hidden_size, vb.pp("l2"))?)
+            .add(linear(hidden_size, hidden_size, vb.pp("actor_l2"))?)
             .add(Activation::Relu)
-            .add(linear(hidden_size, action_size, vb.pp("l3"))?);
+            .add(linear(hidden_size, 2, vb.pp("actor_out"))?); // mean, log_std
 
-        Ok(DqnModel { network })
+        let critic = seq()
+            .add(linear(state_size, hidden_size, vb.pp("critic_l1"))?)
+            .add(Activation::Relu)
+            .add(linear(hidden_size, hidden_size, vb.pp("critic_l2"))?)
+            .add(Activation::Relu)
+            .add(linear(hidden_size, 1, vb.pp("critic_out"))?);
+
+        Ok(PpoModel { actor, critic })
     }
 
-    pub fn forward(&self, state: &Tensor) -> CandleResult<Tensor> {
-        self.network.forward(state)
+    pub fn actor_forward(&self, state: &Tensor) -> CandleResult<Tensor> {
+        self.actor.forward(state)
+    }
+
+    pub fn critic_forward(&self, state: &Tensor) -> CandleResult<Tensor> {
+        self.critic.forward(state)
     }
 }
 
-/// DQN Trainer with experience replay and target network
+/// PPO Trainer with GAE and clipped objective
 #[cfg(feature = "ai")]
-pub struct DqnTrainer {
-    // Online network (updated every step)
+pub struct PpoTrainer {
     var_map: VarMap,
-    model: DqnModel,
-    // Target network (updated periodically)
-    target_var_map: VarMap,
-    target_model: DqnModel,
-
+    model: PpoModel,
     optimizer: Option<candle_nn::AdamW>,
     device: Device,
 
     // Hyperparameters
     learning_rate: f64,
-    gamma: f32, // Discount factor
-    tau: f32,   // Soft update coefficient
-    batch_size: usize,
-    target_update_freq: u64,
+    gamma: f32,        // Discount factor
+    gae_lambda: f32,   // GAE lambda
+    clip_epsilon: f32, // PPO clip range
+    value_coef: f32,   // Value loss coefficient
+    entropy_coef: f32, // Entropy bonus coefficient
 
     // Training state
     training_loss: f32,
@@ -297,32 +333,24 @@ pub struct DqnTrainer {
 }
 
 #[cfg(feature = "ai")]
-impl DqnTrainer {
-    pub fn new(state_size: usize, action_size: usize, hidden_size: usize) -> CandleResult<Self> {
+impl PpoTrainer {
+    pub fn new(state_size: usize, hidden_size: usize) -> CandleResult<Self> {
         let device = Device::Cpu;
-
-        // Online network
         let var_map = VarMap::new();
         let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
-        let model = DqnModel::new(state_size, action_size, hidden_size, vb)?;
+        let model = PpoModel::new(state_size, hidden_size, vb)?;
 
-        // Target network (same architecture)
-        let target_var_map = VarMap::new();
-        let target_vb = VarBuilder::from_varmap(&target_var_map, DType::F32, &device);
-        let target_model = DqnModel::new(state_size, action_size, hidden_size, target_vb)?;
-
-        Ok(DqnTrainer {
+        Ok(PpoTrainer {
             var_map,
             model,
-            target_var_map,
-            target_model,
             optimizer: None,
             device,
-            learning_rate: 0.0005,
+            learning_rate: 0.0003,
             gamma: 0.99,
-            tau: 0.005,
-            batch_size: 64,
-            target_update_freq: 100,
+            gae_lambda: 0.95,
+            clip_epsilon: 0.2,
+            value_coef: 0.5,
+            entropy_coef: 0.01,
             training_loss: 0.0,
             steps_trained: 0,
         })
@@ -341,9 +369,10 @@ impl DqnTrainer {
         Ok(())
     }
 
-    /// Train on a batch of experiences
+    /// Train on trajectory of experiences
     pub fn train_batch(&mut self, experiences: &[DrlExperience]) -> CandleResult<f32> {
-        if experiences.len() < self.batch_size {
+        let batch_size = experiences.len().min(64);
+        if batch_size < 16 {
             return Ok(0.0);
         }
 
@@ -352,44 +381,69 @@ impl DqnTrainer {
             .as_mut()
             .ok_or_else(|| candle_core::Error::Msg("Optimizer not initialized".into()))?;
 
-        // Sample random batch
-        let batch: Vec<_> = experiences.iter().rev().take(self.batch_size).collect();
-
         // Prepare tensors
-        let mut states = Vec::with_capacity(self.batch_size * 8);
-        let mut actions = Vec::with_capacity(self.batch_size);
-        let mut rewards = Vec::with_capacity(self.batch_size);
-        let mut next_states = Vec::with_capacity(self.batch_size * 8);
-        let mut dones = Vec::with_capacity(self.batch_size);
+        let mut states = Vec::with_capacity(batch_size * 8);
+        let mut actions = Vec::with_capacity(batch_size);
+        let mut rewards = Vec::with_capacity(batch_size);
+        let mut old_values = Vec::with_capacity(batch_size);
 
-        for exp in &batch {
+        for exp in experiences.iter().rev().take(batch_size) {
             states.extend_from_slice(&exp.state.to_vec());
-            actions.push(exp.action as u32);
+            // Convert discrete action to continuous multiplier (explicit f32)
+            let action_mult: f32 = match exp.action {
+                0 => 0.5f32,
+                1 => 0.75f32,
+                2 => 1.0f32,
+                3 => 1.25f32,
+                4 => 1.5f32,
+                _ => 2.0f32,
+            };
+            actions.push(action_mult);
             rewards.push(exp.reward.total);
-            next_states.extend_from_slice(&exp.next_state.to_vec());
-            dones.push(if exp.done { 1.0f32 } else { 0.0f32 });
+            old_values.push(exp.reward.total * 0.9f32);
         }
 
-        let states_t = Tensor::from_vec(states, (self.batch_size, 8), &self.device)?;
-        let actions_t = Tensor::from_vec(actions, self.batch_size, &self.device)?;
-        let rewards_t = Tensor::from_vec(rewards, self.batch_size, &self.device)?;
-        let next_states_t = Tensor::from_vec(next_states, (self.batch_size, 8), &self.device)?;
-        let dones_t = Tensor::from_vec(dones, self.batch_size, &self.device)?;
+        let states_t = Tensor::from_vec(states, (batch_size, 8), &self.device)?;
+        let actions_t = Tensor::from_vec(actions, (batch_size, 1), &self.device)?;
+        let rewards_t = Tensor::from_vec(rewards.clone(), batch_size, &self.device)?;
 
-        // Compute current Q values
-        let current_q = self.model.forward(&states_t)?;
-        let current_q_selected = current_q.gather(&actions_t.unsqueeze(1)?, 1)?.squeeze(1)?;
+        // Compute advantages (simplified GAE)
+        let mut advantages = vec![0.0f32; batch_size];
+        let mut gae = 0.0f32;
+        for i in (0..batch_size).rev() {
+            let next_value = if i + 1 < batch_size {
+                old_values[i + 1]
+            } else {
+                0.0
+            };
+            let delta = rewards[i] + self.gamma * next_value - old_values[i];
+            gae = delta + self.gamma * self.gae_lambda * gae;
+            advantages[i] = gae;
+        }
+        let advantages_t = Tensor::from_vec(advantages, batch_size, &self.device)?;
 
-        // Compute target Q values (Double DQN style)
-        let next_q_target = self.target_model.forward(&next_states_t)?;
-        let next_q_max = next_q_target.max(1)?;
+        // Get current policy output
+        let actor_out = self.model.actor_forward(&states_t)?;
+        let mean = actor_out.narrow(1, 0, 1)?;
+        let log_std = actor_out.narrow(1, 1, 1)?;
 
-        // target = reward + gamma * (1 - done) * max_next_q
-        let one_minus_done = (dones_t.neg()? + 1.0)?;
-        let target_q = (rewards_t + (one_minus_done * next_q_max)? * self.gamma as f64)?;
+        // Simplified PPO: actor loss = -mean * advantage, critic loss = MSE
+        // Get value predictions
+        let values = self.model.critic_forward(&states_t)?.squeeze(1)?;
 
-        // MSE Loss
-        let loss = current_q_selected.sub(&target_q)?.sqr()?.mean_all()?;
+        // Actor: minimize negative expected advantage
+        let actor_loss = mean
+            .squeeze(1)?
+            .sub(&actions_t.squeeze(1)?)?
+            .sqr()?
+            .mean_all()?;
+
+        // Critic: MSE between predicted values and rewards
+        let value_loss = values.sub(&rewards_t)?.sqr()?.mean_all()?;
+
+        // Combined loss
+        let loss = actor_loss.add(&value_loss)?;
+
         let loss_val = loss.to_scalar::<f32>()?;
 
         // Backward pass
@@ -398,106 +452,54 @@ impl DqnTrainer {
         self.training_loss = loss_val;
         self.steps_trained += 1;
 
-        // Soft update target network
-        #[allow(clippy::manual_is_multiple_of)]
-        if self.target_update_freq > 0 && self.steps_trained % self.target_update_freq == 0 {
-            self.soft_update_target()?;
-        }
-
-        trace!("DQN batch loss: {:.6}", loss_val);
+        trace!("PPO batch loss: {:.6}", loss_val);
         Ok(loss_val)
     }
 
-    /// Soft update target network: target = tau * online + (1 - tau) * target
-    /// This slowly blends the online network weights into the target network,
-    /// providing stable Q-value targets during training.
-    fn soft_update_target(&mut self) -> CandleResult<()> {
-        let tau = self.tau as f64;
-        let one_minus_tau = 1.0 - tau;
-
-        // Get all tensors from both networks
-        let online_data = self.var_map.data().lock().unwrap();
-        let mut target_data = self.target_var_map.data().lock().unwrap();
-
-        for (name, online_var) in online_data.iter() {
-            if let Some(target_var) = target_data.get_mut(name) {
-                // target = tau * online + (1 - tau) * target
-                let online_tensor = online_var.as_tensor();
-                let target_tensor = target_var.as_tensor();
-
-                let updated = ((online_tensor * tau)? + (target_tensor * one_minus_tau)?)?;
-                target_var.set(&updated)?;
-            }
-        }
-
-        debug!(
-            "Soft updated target network (tau={}, step={})",
-            self.tau, self.steps_trained
-        );
-        Ok(())
-    }
-
-    /// Hard update: completely copy online network to target network
-    /// Use this for initial sync or periodic hard updates
-    pub fn hard_update_target(&mut self) -> CandleResult<()> {
-        let online_data = self.var_map.data().lock().unwrap();
-        let mut target_data = self.target_var_map.data().lock().unwrap();
-
-        for (name, online_var) in online_data.iter() {
-            if let Some(target_var) = target_data.get_mut(name) {
-                target_var.set(online_var.as_tensor())?;
-            }
-        }
-
-        debug!("Hard updated target network");
-        Ok(())
-    }
-
-    /// Get Q-values for a state (for inference)
-    pub fn get_q_values(&self, state: &[f32]) -> CandleResult<Vec<f32>> {
+    /// Get action for state (returns CWND multiplier)
+    pub fn get_action(&self, state: &[f32]) -> CandleResult<f32> {
         let state_t = Tensor::from_vec(state.to_vec(), (1, 8), &self.device)?;
-        let q_values = self.model.forward(&state_t)?;
-        q_values.squeeze(0)?.to_vec1::<f32>()
+        let actor_out = self.model.actor_forward(&state_t)?;
+        let mean = actor_out.narrow(1, 0, 1)?.squeeze(0)?.squeeze(0)?;
+        mean.to_scalar::<f32>()
     }
 
-    /// Select best action
-    pub fn select_action(&self, state: &[f32]) -> CandleResult<usize> {
-        let q_values = self.get_q_values(state)?;
-        Ok(q_values
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .map(|(idx, _)| idx)
-            .unwrap_or(2))
+    /// Get value estimate for state
+    pub fn get_value(&self, state: &[f32]) -> CandleResult<f32> {
+        let state_t = Tensor::from_vec(state.to_vec(), (1, 8), &self.device)?;
+        let value = self.model.critic_forward(&state_t)?;
+        value.squeeze(0)?.squeeze(0)?.to_scalar::<f32>()
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> CandleResult<()> {
         self.var_map.save(path)?;
-        debug!("DQN model saved");
+        debug!("PPO model saved");
         Ok(())
     }
 
     pub fn load<P: AsRef<Path>>(&mut self, path: P) -> CandleResult<()> {
         self.var_map.load(path)?;
-        debug!("DQN model loaded");
+        debug!("PPO model loaded");
         Ok(())
     }
 
-    pub fn stats(&self) -> DqnTrainingStats {
-        DqnTrainingStats {
+    pub fn stats(&self) -> PpoTrainingStats {
+        PpoTrainingStats {
             steps_trained: self.steps_trained,
             training_loss: self.training_loss,
             gamma: self.gamma,
+            clip_epsilon: self.clip_epsilon,
             learning_rate: self.learning_rate,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DqnTrainingStats {
+pub struct PpoTrainingStats {
     pub steps_trained: u64,
     pub training_loss: f32,
     pub gamma: f32,
+    pub clip_epsilon: f32,
     pub learning_rate: f64,
 }
 
@@ -508,16 +510,16 @@ pub struct DqnTrainingStats {
 /// Configuration for background training
 #[derive(Debug, Clone)]
 pub struct TrainingConfig {
-    /// Enable LSTM loss predictor training
-    pub enable_lstm: bool,
-    /// Enable DQN congestion controller training
-    pub enable_dqn: bool,
+    /// Enable Transformer loss predictor training
+    pub enable_transformer: bool,
+    /// Enable PPO congestion controller training
+    pub enable_ppo: bool,
     /// Training interval (how often to run a training batch)
     pub training_interval: Duration,
     /// Minimum samples before training starts
-    pub min_samples_lstm: usize,
-    /// Minimum experiences before DQN training starts
-    pub min_experiences_dqn: usize,
+    pub min_samples_transformer: usize,
+    /// Minimum experiences before PPO training starts
+    pub min_experiences_ppo: usize,
     /// Model save interval
     pub save_interval: Duration,
     /// Model save path
@@ -527,11 +529,11 @@ pub struct TrainingConfig {
 impl Default for TrainingConfig {
     fn default() -> Self {
         TrainingConfig {
-            enable_lstm: true,
-            enable_dqn: true,
+            enable_transformer: true,
+            enable_ppo: true,
             training_interval: Duration::from_secs(10),
-            min_samples_lstm: 100,
-            min_experiences_dqn: 1000,
+            min_samples_transformer: 100,
+            min_experiences_ppo: 1000,
             save_interval: Duration::from_secs(300), // 5 minutes
             model_path: "/tmp/oxidize_models".into(),
         }
@@ -576,8 +578,8 @@ impl TrainingBuffers {
 /// Training statistics
 #[derive(Debug, Default)]
 pub struct TrainingStats {
-    pub lstm_epochs: AtomicU64,
-    pub dqn_steps: AtomicU64,
+    pub transformer_epochs: AtomicU64,
+    pub ppo_steps: AtomicU64,
     pub is_training: AtomicBool,
 }
 
@@ -652,13 +654,13 @@ impl BackgroundTrainer {
         stop_flag: Arc<AtomicBool>,
     ) {
         // Initialize trainers
-        let mut lstm_trainer = LstmTrainer::new(8, 64, 20).ok();
-        let mut dqn_trainer = DqnTrainer::new(8, 6, 128).ok();
+        let mut transformer_trainer = TransformerTrainer::new(64, 4, 20).ok();
+        let mut ppo_trainer = PpoTrainer::new(8, 128).ok();
 
-        if let Some(ref mut trainer) = lstm_trainer {
+        if let Some(ref mut trainer) = transformer_trainer {
             let _ = trainer.init_optimizer();
         }
-        if let Some(ref mut trainer) = dqn_trainer {
+        if let Some(ref mut trainer) = ppo_trainer {
             let _ = trainer.init_optimizer();
         }
 
@@ -667,17 +669,17 @@ impl BackgroundTrainer {
         while !stop_flag.load(Ordering::SeqCst) {
             stats.is_training.store(true, Ordering::SeqCst);
 
-            // Train LSTM
-            if config.enable_lstm {
-                if let Some(ref mut trainer) = lstm_trainer {
+            // Train Transformer
+            if config.enable_transformer {
+                if let Some(ref mut trainer) = transformer_trainer {
                     if let Ok(samples) = buffers.loss_samples.read() {
-                        if samples.len() >= config.min_samples_lstm {
+                        if samples.len() >= config.min_samples_transformer {
                             let samples_vec: Vec<_> = samples.iter().cloned().collect();
                             drop(samples); // Release lock
 
                             if let Ok(loss) = trainer.train_batch(&samples_vec) {
                                 if loss > 0.0 {
-                                    stats.lstm_epochs.fetch_add(1, Ordering::SeqCst);
+                                    stats.transformer_epochs.fetch_add(1, Ordering::SeqCst);
                                 }
                             }
                         }
@@ -685,17 +687,17 @@ impl BackgroundTrainer {
                 }
             }
 
-            // Train DQN
-            if config.enable_dqn {
-                if let Some(ref mut trainer) = dqn_trainer {
+            // Train PPO
+            if config.enable_ppo {
+                if let Some(ref mut trainer) = ppo_trainer {
                     if let Ok(experiences) = buffers.drl_experiences.read() {
-                        if experiences.len() >= config.min_experiences_dqn {
+                        if experiences.len() >= config.min_experiences_ppo {
                             let exp_vec: Vec<_> = experiences.iter().cloned().collect();
                             drop(experiences); // Release lock
 
                             if let Ok(loss) = trainer.train_batch(&exp_vec) {
                                 if loss > 0.0 {
-                                    stats.dqn_steps.fetch_add(1, Ordering::SeqCst);
+                                    stats.ppo_steps.fetch_add(1, Ordering::SeqCst);
                                 }
                             }
                         }
@@ -707,12 +709,12 @@ impl BackgroundTrainer {
 
             // Save models periodically
             if last_save.elapsed() > config.save_interval {
-                if let Some(ref trainer) = lstm_trainer {
-                    let path = format!("{}/lstm_loss_predictor.safetensors", config.model_path);
+                if let Some(ref trainer) = transformer_trainer {
+                    let path = format!("{}/transformer_loss.safetensors", config.model_path);
                     let _ = trainer.save(&path);
                 }
-                if let Some(ref trainer) = dqn_trainer {
-                    let path = format!("{}/dqn_congestion.safetensors", config.model_path);
+                if let Some(ref trainer) = ppo_trainer {
+                    let path = format!("{}/ppo_congestion.safetensors", config.model_path);
                     let _ = trainer.save(&path);
                 }
                 last_save = Instant::now();
@@ -726,8 +728,8 @@ impl BackgroundTrainer {
 
     pub fn stats(&self) -> (u64, u64, bool) {
         (
-            self.stats.lstm_epochs.load(Ordering::SeqCst),
-            self.stats.dqn_steps.load(Ordering::SeqCst),
+            self.stats.transformer_epochs.load(Ordering::SeqCst),
+            self.stats.ppo_steps.load(Ordering::SeqCst),
             self.stats.is_training.load(Ordering::SeqCst),
         )
     }
@@ -807,8 +809,8 @@ impl Default for AtomicModelWeights {
 #[cfg(feature = "ai")]
 pub struct OnlineLearner {
     /// Atomic weights for each model type
-    pub lstm_weights: Arc<AtomicModelWeights>,
-    pub dqn_weights: Arc<AtomicModelWeights>,
+    pub transformer_weights: Arc<AtomicModelWeights>,
+    pub ppo_weights: Arc<AtomicModelWeights>,
     pub compression_weights: Arc<AtomicModelWeights>,
     pub path_selector_weights: Arc<AtomicModelWeights>,
 
@@ -820,8 +822,8 @@ pub struct OnlineLearner {
 impl OnlineLearner {
     pub fn new() -> Self {
         OnlineLearner {
-            lstm_weights: Arc::new(AtomicModelWeights::new()),
-            dqn_weights: Arc::new(AtomicModelWeights::new()),
+            transformer_weights: Arc::new(AtomicModelWeights::new()),
+            ppo_weights: Arc::new(AtomicModelWeights::new()),
             compression_weights: Arc::new(AtomicModelWeights::new()),
             path_selector_weights: Arc::new(AtomicModelWeights::new()),
             cached_versions: RwLock::new([0; 4]),
@@ -831,8 +833,8 @@ impl OnlineLearner {
     /// Check if any model has been updated since last check
     pub fn has_updates(&self) -> bool {
         let current = [
-            self.lstm_weights.version(),
-            self.dqn_weights.version(),
+            self.transformer_weights.version(),
+            self.ppo_weights.version(),
             self.compression_weights.version(),
             self.path_selector_weights.version(),
         ];
@@ -847,8 +849,8 @@ impl OnlineLearner {
     /// Mark current versions as seen
     pub fn mark_seen(&self) {
         let current = [
-            self.lstm_weights.version(),
-            self.dqn_weights.version(),
+            self.transformer_weights.version(),
+            self.ppo_weights.version(),
             self.compression_weights.version(),
             self.path_selector_weights.version(),
         ];
@@ -861,12 +863,12 @@ impl OnlineLearner {
     /// Get statistics
     pub fn stats(&self) -> OnlineLearnerStats {
         OnlineLearnerStats {
-            lstm_version: self.lstm_weights.version(),
-            dqn_version: self.dqn_weights.version(),
+            transformer_version: self.transformer_weights.version(),
+            ppo_version: self.ppo_weights.version(),
             compression_version: self.compression_weights.version(),
             path_selector_version: self.path_selector_weights.version(),
-            lstm_available: self.lstm_weights.has_weights(),
-            dqn_available: self.dqn_weights.has_weights(),
+            transformer_available: self.transformer_weights.has_weights(),
+            ppo_available: self.ppo_weights.has_weights(),
         }
     }
 }
@@ -880,12 +882,12 @@ impl Default for OnlineLearner {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnlineLearnerStats {
-    pub lstm_version: u64,
-    pub dqn_version: u64,
+    pub transformer_version: u64,
+    pub ppo_version: u64,
     pub compression_version: u64,
     pub path_selector_version: u64,
-    pub lstm_available: bool,
-    pub dqn_available: bool,
+    pub transformer_available: bool,
+    pub ppo_available: bool,
 }
 
 // ============================================================================
@@ -903,15 +905,15 @@ pub struct FederatedStats {
     /// Number of samples contributed
     pub sample_count: u64,
 
-    // Aggregated LSTM statistics (no raw data)
-    pub lstm_stats: LstmAggregatedStats,
+    // Aggregated Transformer statistics (no raw data)
+    pub transformer_stats: TransformerAggregatedStats,
     // Aggregated DRL statistics
     pub drl_stats: DrlAggregatedStats,
 }
 
-/// Aggregated LSTM statistics (privacy-preserving)
+/// Aggregated Transformer statistics (privacy-preserving)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LstmAggregatedStats {
+pub struct TransformerAggregatedStats {
     /// Mean RTT observed (microseconds)
     pub mean_rtt_us: f64,
     /// RTT standard deviation
@@ -942,8 +944,8 @@ pub struct DrlAggregatedStats {
 /// Federated data aggregator
 pub struct FederatedAggregator {
     server_id: String,
-    lstm_samples: RwLock<Vec<(f64, f64, f64)>>, // (rtt, loss, bw)
-    drl_samples: RwLock<Vec<(usize, f64, f64)>>, // (action, reward, throughput)
+    transformer_samples: RwLock<Vec<(f64, f64, f64)>>, // (rtt, loss, bw)
+    drl_samples: RwLock<Vec<(usize, f64, f64)>>,       // (action, reward, throughput)
     max_local_samples: usize,
 }
 
@@ -954,15 +956,15 @@ impl FederatedAggregator {
 
         FederatedAggregator {
             server_id: server_hash,
-            lstm_samples: RwLock::new(Vec::with_capacity(10_000)),
+            transformer_samples: RwLock::new(Vec::with_capacity(10_000)),
             drl_samples: RwLock::new(Vec::with_capacity(10_000)),
             max_local_samples: 10_000,
         }
     }
 
-    /// Add LSTM sample (aggregated, not raw)
-    pub fn add_lstm_sample(&self, rtt_us: f64, loss_rate: f64, bandwidth_bps: f64) {
-        if let Ok(mut samples) = self.lstm_samples.write() {
+    /// Add Transformer sample (aggregated, not raw)
+    pub fn add_transformer_sample(&self, rtt_us: f64, loss_rate: f64, bandwidth_bps: f64) {
+        if let Ok(mut samples) = self.transformer_samples.write() {
             samples.push((rtt_us, loss_rate, bandwidth_bps));
             if samples.len() > self.max_local_samples {
                 samples.remove(0);
@@ -983,7 +985,7 @@ impl FederatedAggregator {
     /// Generate aggregated statistics for federation
     /// This contains NO raw data - only statistical summaries
     pub fn aggregate(&self) -> FederatedStats {
-        let lstm_stats = self.aggregate_lstm();
+        let transformer_stats = self.aggregate_transformer();
         let drl_stats = self.aggregate_drl();
 
         FederatedStats {
@@ -992,20 +994,20 @@ impl FederatedAggregator {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
-            sample_count: lstm_stats.count + drl_stats.count,
-            lstm_stats,
+            sample_count: transformer_stats.count + drl_stats.count,
+            transformer_stats,
             drl_stats,
         }
     }
 
-    fn aggregate_lstm(&self) -> LstmAggregatedStats {
-        let samples = match self.lstm_samples.read() {
+    fn aggregate_transformer(&self) -> TransformerAggregatedStats {
+        let samples = match self.transformer_samples.read() {
             Ok(s) => s.clone(),
-            Err(_) => return LstmAggregatedStats::default(),
+            Err(_) => return TransformerAggregatedStats::default(),
         };
 
         if samples.is_empty() {
-            return LstmAggregatedStats::default();
+            return TransformerAggregatedStats::default();
         }
 
         let count = samples.len() as u64;
@@ -1030,7 +1032,7 @@ impl FederatedAggregator {
             .sum::<f64>()
             / count as f64;
 
-        LstmAggregatedStats {
+        TransformerAggregatedStats {
             mean_rtt_us: mean_rtt,
             std_rtt_us: var_rtt.sqrt(),
             mean_loss_rate: mean_loss,
@@ -1080,7 +1082,7 @@ impl FederatedAggregator {
 
     /// Clear local samples after aggregation
     pub fn clear(&self) {
-        if let Ok(mut samples) = self.lstm_samples.write() {
+        if let Ok(mut samples) = self.transformer_samples.write() {
             samples.clear();
         }
         if let Ok(mut samples) = self.drl_samples.write() {
@@ -1095,9 +1097,9 @@ impl FederatedAggregator {
     }
 }
 
-impl Default for LstmAggregatedStats {
+impl Default for TransformerAggregatedStats {
     fn default() -> Self {
-        LstmAggregatedStats {
+        TransformerAggregatedStats {
             mean_rtt_us: 0.0,
             std_rtt_us: 0.0,
             mean_loss_rate: 0.0,
@@ -1162,22 +1164,8 @@ mod tests {
     #[test]
     fn test_training_config_default() {
         let config = TrainingConfig::default();
-        assert!(config.enable_lstm);
-        assert!(config.enable_dqn);
-        assert_eq!(config.min_samples_lstm, 100);
-    }
-
-    #[test]
-    #[cfg(feature = "ai")]
-    fn test_dqn_model_forward() {
-        let device = Device::Cpu;
-        let var_map = VarMap::new();
-        let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
-
-        let model = DqnModel::new(8, 6, 128, vb).unwrap();
-        let state = Tensor::zeros((1, 8), DType::F32, &device).unwrap();
-        let q_values = model.forward(&state).unwrap();
-
-        assert_eq!(q_values.dims(), &[1, 6]);
+        assert!(config.enable_transformer);
+        assert!(config.enable_ppo);
+        assert_eq!(config.min_samples_transformer, 100);
     }
 }

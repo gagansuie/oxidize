@@ -7,7 +7,7 @@
 //! - **Throughput**: 400+ Gbps (multi-queue, 512 batch)
 //! - **Latency**: <500ns per packet (P99)
 //! - **PPS**: 200+ Mpps with batching
-//! - **ML Inference**: <1µs (ONNX + lookup tables)
+//! - **ML Inference**: <1µs (lookup tables + candle)
 //!
 //! # Architecture
 //! ```text
@@ -54,8 +54,7 @@
 //! │                            ▼                                            │
 //! │  ┌─────────────────────────────────────────────────────────────────┐   │
 //! │  │                    Congestion Control (ML+ECN)                   │   │
-//! │  │  - ONNX Runtime inference (<1µs)                                 │   │
-//! │  │  - Lookup tables for common cases (skip ML 90%)                  │   │
+//! │  │  - Lookup tables for common cases (<1µs)                         │   │
 //! │  │  - ECN-aware congestion response                                 │   │
 //! │  │  - Multipath QUIC support                                        │   │
 //! │  └─────────────────────────────────────────────────────────────────┘   │
@@ -82,7 +81,6 @@ pub mod adaptive_ml; // Adaptive ML with online learning
 pub mod ecn; // ECN (Explicit Congestion Notification)
 pub mod ml_lookup; // ML lookup tables (generated from model)
 pub mod multipath; // Multipath QUIC support
-pub mod onnx_ml; // ONNX Runtime ML inference
 pub mod qat_crypto; // Intel QAT hardware crypto offload
 
 pub use adaptive_ml::*;
@@ -92,7 +90,6 @@ pub use ecn::*;
 pub use frame::*;
 pub use ml_lookup::*;
 pub use multipath::*;
-pub use onnx_ml::*;
 pub use packet::*;
 pub use qat_crypto::*;
 pub use runtime::*;

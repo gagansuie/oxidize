@@ -9,8 +9,8 @@ The new optimized ML engine provides **10x faster inference** with minimal accur
 | Feature | Old | New | Improvement |
 |---------|-----|-----|-------------|
 | **Inference** | FP32 | INT8 Quantized | 10x faster |
-| **Loss Predictor** | LSTM | Transformer | Better accuracy |
-| **Congestion Control** | DQN (discrete) | PPO (continuous) | Smoother CWND |
+| **Loss Predictor** | Heuristic | Transformer | Better accuracy |
+| **Congestion Control** | Discrete | PPO (continuous) | Smoother CWND |
 | **Caching** | None | Speculative pre-computation | Near-zero latency |
 
 ### INT8 Quantization
@@ -141,7 +141,7 @@ Distributed reinforcement learning with inter-agent communication.
 │                                                              │
 │   ┌─────────┐      ┌─────────┐      ┌─────────┐             │
 │   │ Agent 1 │◄────▶│ Agent 2 │◄────▶│ Agent N │             │
-│   │  (DQN)  │ msg  │  (DQN)  │ msg  │  (DQN)  │             │
+│   │  (PPO)  │ msg  │  (PPO)  │ msg  │  (PPO)  │             │
 │   └────┬────┘      └────┬────┘      └────┬────┘             │
 │        │                │                │                   │
 │        └────────────────┼────────────────┘                   │
@@ -156,7 +156,7 @@ Distributed reinforcement learning with inter-agent communication.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Actions (Same as single-agent DQN)
+### Actions (Same as single-agent PPO)
 
 | Action | Effect |
 |--------|--------|
@@ -240,7 +240,7 @@ Statistical experimentation for model deployment decisions.
 │                                                              │
 │   ┌──────────────┐                 ┌──────────────┐         │
 │   │   Control    │                 │  Treatment   │         │
-│   │ (LSTM v1.0)  │                 │ (Transformer)│         │
+│   │ (Old v1.0)   │                 │ (Transformer)│         │
 │   └──────┬───────┘                 └──────┬───────┘         │
 │          │                                │                  │
 │          │  50% traffic                   │  50% traffic    │
@@ -266,14 +266,14 @@ use oxidize_common::advanced_ml::{
 let framework = ABTestingFramework::new();
 
 let control = ModelVariant {
-    name: "lstm_v1".to_string(),
-    model_path: "/models/lstm_v1.onnx".to_string(),
+    name: "old_v1".to_string(),
+    model_path: "/models/old_v1.safetensors".to_string(),
     is_treatment: false,
 };
 
 let treatment = ModelVariant {
     name: "transformer_v1".to_string(),
-    model_path: "/models/transformer_v1.onnx".to_string(),
+    model_path: "/models/transformer_v1.safetensors".to_string(),
     is_treatment: true,
 };
 
@@ -286,7 +286,7 @@ let config = ABTestConfig {
 };
 
 let exp_id = framework.create_experiment(
-    "lstm_vs_transformer".to_string(),
+    "old_vs_transformer".to_string(),
     control,
     treatment,
     config,

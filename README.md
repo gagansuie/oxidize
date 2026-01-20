@@ -150,7 +150,7 @@ Self-improving network optimization using neural networks with **adaptive online
 ├─────────────────────────────────────────────────────────────────────────┤
 │  ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────┐  │
 │  │ ML Lookup Tables │  │ Live ML Inference  │  │ Online Learning  │  │
-│  │  - From ML model   │  │ - ONNX Runtime     │  │ - 100K obs buffer│  │
+│  │  - From ML model   │  │ - Candle/SafeTensors│  │ - 100K obs buffer│  │
 │  │  - <100ns lookup   │  │ - <1µs inference  │  │ - Hourly refresh │  │
 │  │  - 90%+ hit rate   │  │ - Edge cases only  │  │ - No restart     │  │
 │  └────────────────────┘  └────────────────────┘  └──────────────────┘  │
@@ -160,7 +160,7 @@ Self-improving network optimization using neural networks with **adaptive online
 **Core Models (Always Active):**
 | Model | Architecture | Latency | Purpose |
 |-------|--------------|---------|----------|
-| **Loss Predictor** | Transformer (INT8) | <10µs | Predicts packet loss 50-100ms ahead |
+| **Loss Predictor** | Transformer | <10µs | Predicts packet loss 50-100ms ahead |
 | **Congestion Control** | PPO (continuous) | <1µs | Optimal CWND via lookup + ML fallback |
 | **Compression Oracle** | Entropy heuristics | <1µs | Skip already-compressed data |
 | **Path Selector** | UCB1 bandit | <1µs | Learns best path per traffic type |
@@ -172,8 +172,8 @@ Self-improving network optimization using neural networks with **adaptive online
 ║                    ML ENGINE BENCHMARKS                         ║
 ╠════════════════════════════════════════════════════════════════╣
 ║ Lookup Table Hit:      <100ns (90%+ of decisions)                ║
-║ Live ML Inference:     <1µs  (ONNX optimized)                   ║
-║ Transformer (INT8):    <10µs (loss prediction)                  ║
+║ Live ML Inference:     <1µs  (candle optimized)                  ║
+║ Transformer:           <10µs (loss prediction)                  ║
 ║ Online Learning:       Continuous (no restart)                  ║
 ║ Table Refresh:         Hourly (from observations)               ║
 ║ Memory Footprint:      <10MB (all models + tables)              ║
@@ -405,7 +405,7 @@ enable_priority_scheduler = true
 | **Compression** | LZ4 (~4 GB/s) | ✅ Implemented |
 | **Compression** | ROHC Headers (44% reduction) | ✅ Implemented |
 | **Compression** | Per-Connection Dictionaries | ✅ Implemented |
-| **ML Engine** | Transformer Loss Predictor (INT8) | ✅ Implemented |
+| **ML Engine** | Transformer Loss Predictor | ✅ Implemented |
 | **ML Engine** | PPO Congestion Controller | ✅ Implemented |
 | **ML Engine** | Speculative Pre-computation | ✅ Implemented |
 | **ML Engine** | UCB1 Path Selection | ✅ Implemented |
@@ -611,7 +611,7 @@ cargo bench --package oxidize-common
 ╔════════════════════════════════════════════════════════════════╗
 ║                   ML INFERENCE BENCHMARKS                       ║
 ╠════════════════════════════════════════════════════════════════╣
-║ Transformer (INT8):  <10µs inference (loss prediction)          ║
+║ Transformer:         <10µs inference (loss prediction)          ║
 ║ PPO Controller:      <10µs inference (CWND optimization)        ║
 ║ Speculative Cache:   <1µs hit (100 decisions pre-computed)      ║
 ║ Compression Oracle:  <1µs (entropy-based heuristics)            ║

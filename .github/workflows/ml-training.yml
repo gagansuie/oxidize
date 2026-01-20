@@ -101,8 +101,8 @@ jobs:
           ./target/release/oxidize-train \
             --input ./training_data \
             --output ./trained_models \
-            --lstm-epochs 100 \
-            --dqn-steps 1000 \
+            --transformer-epochs 100 \
+            --ppo-steps 1000 \
             $SYNTHETIC_FLAG \
             --verbose
 

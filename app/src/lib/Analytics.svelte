@@ -504,7 +504,7 @@
             </p>
         </div>
 
-        <!-- LSTM Predictions -->
+        <!-- Transformer Predictions -->
         <div class="section ml-card">
             <div class="ml-header">
                 <div class="ml-icon">
@@ -520,7 +520,7 @@
                     </svg>
                 </div>
                 <div class="ml-title">
-                    <strong>LSTM Loss Predictor</strong>
+                    <strong>Transformer Loss Predictor</strong>
                     <span>Predicts packet loss before it happens</span>
                 </div>
             </div>
@@ -545,7 +545,7 @@
             </p>
         </div>
 
-        <!-- DQN Congestion -->
+        <!-- PPO Congestion -->
         <div class="section ml-card">
             <div class="ml-header">
                 <div class="ml-icon">
@@ -559,7 +559,7 @@
                     </svg>
                 </div>
                 <div class="ml-title">
-                    <strong>DQN Congestion Control</strong>
+                    <strong>PPO Congestion Control</strong>
                     <span>Neural network learns optimal bandwidth</span>
                 </div>
             </div>

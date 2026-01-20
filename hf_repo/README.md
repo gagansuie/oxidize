@@ -6,8 +6,8 @@ tags:
   - loss-prediction
   - rust
   - reinforcement-learning
-  - lstm
-  - dqn
+  - transformer
+  - ppo
 library_name: candle
 pipeline_tag: other
 ---
@@ -22,8 +22,8 @@ Machine learning models for [Oxidize](https://github.com/gagansuie/oxidize) - an
 
 | Model | Architecture | Purpose | Input | Output |
 |-------|--------------|---------|-------|--------|
-| **lstm_loss_predictor** | LSTM (64 hidden) | Predict packet loss 50-100ms ahead | 20×8 sequence | Loss probability |
-| **dqn_congestion** | DQN (128 hidden) | Optimize congestion window | 8-dim state | 6 actions |
+| **transformer_loss** | Transformer (d=64, 4 heads) | Predict packet loss 50-100ms ahead | 20×8 sequence | Loss probability |
+| **ppo_congestion** | PPO Actor-Critic (128 hidden) | Optimize congestion window | 8-dim state | Continuous CWND |
 
 ### Tier 2 - Advanced Optimization
 
@@ -34,10 +34,10 @@ Machine learning models for [Oxidize](https://github.com/gagansuie/oxidize) - an
 
 ## Architecture
 
-### LSTM Loss Predictor
+### Transformer Loss Predictor
 
 ```
-Input: [batch, 20, 8]  →  LSTM(64)  →  Linear(1)  →  Sigmoid  →  Loss probability
+Input: [batch, 20, 8]  →  MultiHeadAttention(d=64, h=4)  →  FFN  →  Linear(1)  →  Sigmoid  →  Loss probability
 ```
 
 **Features (8):**
@@ -50,10 +50,10 @@ Input: [batch, 20, 8]  →  LSTM(64)  →  Linear(1)  →  Sigmoid  →  Loss pr
 - Inter-packet gap
 - Time since last loss
 
-### DQN Congestion Controller
+### PPO Congestion Controller
 
 ```
-Input: [batch, 8]  →  Linear(128)  →  ReLU  →  Linear(128)  →  ReLU  →  Linear(6)  →  Q-values
+Input: [batch, 8]  →  Actor(128)  →  ReLU  →  Actor(128)  →  ReLU  →  (mean, log_std)  →  CWND multiplier
 ```
 
 **Actions (6):**

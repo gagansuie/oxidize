@@ -107,7 +107,7 @@ Deep Q-Learning agent that learns optimal congestion window adjustments.
 
 ### State Space (8 features)
 
-Same as LSTM predictor, plus throughput history.
+Same as Transformer predictor, plus throughput history.
 
 ### Exploration Strategy
 
@@ -278,7 +278,7 @@ let engine = MlEngine::new();  // Training collection enabled automatically
 Training runs **daily** via GitHub Actions (`.github/workflows/ml-training.yml`):
 1. Downloads all training data uploaded by servers from HF Hub
 2. Aggregates samples from multiple servers
-3. Trains LSTM + DQN models using Candle (pure Rust)
+3. Trains Transformer + PPO models using Candle (pure Rust)
 4. Pushes updated models to [gagansuie/oxidize-models](https://huggingface.co/gagansuie/oxidize-models)
 5. Archives processed training data
 
@@ -288,10 +288,8 @@ Manual trigger available: `workflow_dispatch` with `force_retrain` option.
 
 | Model | File | Format |
 |-------|------|--------|
-| Loss Predictor | `loss_predictor.onnx` | ONNX |
-| Congestion Controller | `congestion_controller.onnx` | ONNX |
-| Compression Oracle | `compression_oracle.onnx` | ONNX |
-| Path Selector | `path_selector.onnx` | ONNX |
+| Loss Predictor | `transformer_loss.safetensors` | SafeTensors |
+| Congestion Controller | `ppo_congestion.safetensors` | SafeTensors |
 
 ## Configuration
 
@@ -325,8 +323,8 @@ All ML inference runs on the hot path with minimal overhead:
 
 | Operation | Latency | Impact |
 |-----------|---------|--------|
-| LSTM inference | ~50µs | Once per 10ms window |
-| DQN inference | ~30µs | Once per RTT |
+| Transformer inference | ~10µs | Once per 10ms window |
+| PPO inference | ~10µs | Once per RTT |
 | Compression decision | ~5µs | Per packet |
 | Path selection | ~1µs | Per flow |
 
@@ -365,7 +363,7 @@ All five advanced ML features have been implemented in the `advanced_ml` module:
 
 - [x] **Online learning** - Real-time model updates from live traffic (`RealtimeOnlineLearner`)
 - [x] **Federated learning** - Privacy-preserving aggregation with differential privacy (`FederatedCoordinator`)
-- [x] **Transformer-based loss predictor** - Multi-head attention replaces LSTM (`TransformerPredictor`)
+- [x] **Transformer-based loss predictor** - Multi-head attention (`TransformerPredictor`)
 - [x] **Multi-agent RL** - Distributed congestion control with inter-agent communication (`MultiAgentCoordinator`)
 - [x] **A/B testing framework** - Statistical significance testing for model deployment (`ABTestingFramework`)
 

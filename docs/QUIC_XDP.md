@@ -78,7 +78,6 @@ The QUIC-XDP stack is a complete userspace QUIC implementation designed for kern
 | `ecn.rs` | Explicit Congestion Notification | Better congestion signals |
 | `ml_lookup.rs` | Pre-computed ML lookup tables | <100ns decisions |
 | `multipath.rs` | Multipath QUIC support | Bandwidth aggregation |
-| `onnx_ml.rs` | ONNX Runtime inference | <1µs inference |
 | `qat_crypto.rs` | Intel QAT crypto offload | 100+ Gbps crypto |
 
 ## Adaptive ML Engine

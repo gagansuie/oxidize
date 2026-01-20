@@ -39,7 +39,6 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::ml_lookup::MlLookupEngine;
-use super::onnx_ml::OnnxInference;
 use crate::model_hub::{HubConfig, ModelHub, ModelPaths};
 
 /// Network observation for online learning
@@ -135,10 +134,6 @@ pub struct AdaptiveMlEngine {
     /// Fast path: pre-computed lookup tables
     lookup: Arc<RwLock<MlLookupEngine>>,
 
-    /// Slow path: live ML inference for edge cases
-    live_cwnd_model: OnnxInference,
-    live_fec_model: OnnxInference,
-
     /// Online learning: observation buffer (circular, max 100K observations)
     observations: Arc<RwLock<VecDeque<Observation>>>,
     max_observations: usize,
@@ -216,8 +211,6 @@ impl AdaptiveMlEngine {
     pub fn new() -> Self {
         let mut engine = Self {
             lookup: Arc::new(RwLock::new(MlLookupEngine::new())),
-            live_cwnd_model: OnnxInference::new(super::onnx_ml::ModelType::CongestionController),
-            live_fec_model: OnnxInference::new(super::onnx_ml::ModelType::FecDecision),
             observations: Arc::new(RwLock::new(VecDeque::with_capacity(100_000))),
             max_observations: 100_000,
             cwnd_weights: Arc::new(RwLock::new(Vec::new())),
@@ -274,8 +267,8 @@ impl AdaptiveMlEngine {
     /// Load weights from local hf_repo directory
     fn load_from_local_repo(&mut self) {
         let local_paths = [
-            "hf_repo/lstm_loss_predictor.safetensors",
-            "hf_repo/dqn_congestion.safetensors",
+            "hf_repo/transformer_loss.safetensors",
+            "hf_repo/ppo_congestion.safetensors",
         ];
 
         for path in &local_paths {
@@ -289,11 +282,11 @@ impl AdaptiveMlEngine {
 
     /// Load weights from model paths
     fn load_weights_from_paths(&mut self, paths: &ModelPaths) {
-        if let Some(ref lstm_path) = paths.lstm {
-            self.load_safetensors_weights(lstm_path);
+        if let Some(ref transformer_path) = paths.transformer {
+            self.load_safetensors_weights(transformer_path);
         }
-        if let Some(ref dqn_path) = paths.dqn {
-            self.load_safetensors_weights(dqn_path);
+        if let Some(ref ppo_path) = paths.ppo {
+            self.load_safetensors_weights(ppo_path);
         }
     }
 
@@ -401,8 +394,11 @@ impl AdaptiveMlEngine {
             0.0,
         ];
 
-        // Get multiplier from ML
-        let multiplier = self.live_cwnd_model.infer(&features);
+        // Get multiplier from weights
+        let multiplier =
+            self.infer_cwnd_with_updated_weights(rtt_us, loss_rate, bandwidth_mbps, &features)
+                as f32
+                / 65536.0;
 
         // Base CWND from BDP
         let rtt_sec = rtt_us as f64 / 1_000_000.0;

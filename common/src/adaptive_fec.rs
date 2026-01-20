@@ -5,7 +5,7 @@
 //!
 //! ## Proactive FEC (ML-Powered)
 //! When integrated with the ML engine, this module can:
-//! - Accept loss predictions from LSTM model (50-100ms ahead)
+//! - Accept loss predictions from Transformer model (50-100ms ahead)
 //! - Pre-emptively increase FEC redundancy BEFORE loss occurs
 //! - Reduce unnecessary FEC on stable connections
 
@@ -239,7 +239,7 @@ impl AdaptiveFec {
     }
 
     /// Update with ML-predicted loss probability
-    /// This should be called by the ML integration layer with LSTM predictions
+    /// This should be called by the ML integration layer with Transformer predictions
     /// loss_probability: 0.0 to 1.0 representing predicted loss in next 50-100ms
     pub fn update_prediction(&mut self, loss_probability: f64) {
         self.predicted_loss = loss_probability.clamp(0.0, 1.0);

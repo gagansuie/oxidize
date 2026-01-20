@@ -174,8 +174,8 @@ impl RelayServer {
         info!("🤖 Attempting to download ML models from HuggingFace Hub...");
         match model_hub.download_models() {
             Ok(paths) => {
-                if let Some(lstm_path) = &paths.lstm {
-                    let model_dir = lstm_path.parent().unwrap_or(lstm_path);
+                if let Some(transformer_path) = &paths.transformer {
+                    let model_dir = transformer_path.parent().unwrap_or(transformer_path);
                     let loaded = ml_engine.try_load_models(model_dir);
                     if loaded == 4 {
                         info!(

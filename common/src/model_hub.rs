@@ -8,8 +8,8 @@
 //! Repository structure:
 //! ```text
 //! oxidize/congestion-models/
-//! ├── lstm_loss_predictor.safetensors
-//! ├── dqn_congestion.safetensors
+//! ├── transformer_loss.safetensors
+//! ├── ppo_congestion.safetensors
 //! ├── config.json
 //! └── training_data/
 //!     └── samples-YYYY-MM-DD.json
@@ -34,8 +34,8 @@ use crate::ml_optimized::{DrlExperience, LossSample};
 pub const DEFAULT_REPO: &str = "gagansuie/oxidize-models";
 
 /// Model file names
-pub const LSTM_MODEL_FILE: &str = "lstm_loss_predictor.safetensors";
-pub const DQN_MODEL_FILE: &str = "dqn_congestion.safetensors";
+pub const TRANSFORMER_MODEL_FILE: &str = "transformer_loss.safetensors";
+pub const PPO_MODEL_FILE: &str = "ppo_congestion.safetensors";
 pub const CONFIG_FILE: &str = "config.json";
 
 /// Model configuration stored on HF Hub
@@ -43,26 +43,25 @@ pub const CONFIG_FILE: &str = "config.json";
 pub struct ModelConfig {
     /// Model version (semver)
     pub version: String,
-    /// LSTM model info
-    pub lstm: LstmModelConfig,
-    /// DQN model info
-    pub dqn: DqnModelConfig,
+    /// Transformer model info
+    pub transformer: TransformerModelConfig,
+    /// PPO model info
+    pub ppo: PpoModelConfig,
     /// Training metadata
     pub training: TrainingMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LstmModelConfig {
-    pub input_size: usize,
-    pub hidden_size: usize,
+pub struct TransformerModelConfig {
+    pub d_model: usize,
+    pub n_heads: usize,
     pub sequence_length: usize,
     pub trained_samples: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DqnModelConfig {
+pub struct PpoModelConfig {
     pub state_size: usize,
-    pub action_size: usize,
     pub hidden_size: usize,
     pub trained_steps: u64,
 }
@@ -77,16 +76,15 @@ pub struct TrainingMetadata {
 impl Default for ModelConfig {
     fn default() -> Self {
         ModelConfig {
-            version: "0.1.0".into(),
-            lstm: LstmModelConfig {
-                input_size: 8,
-                hidden_size: 64,
+            version: "0.2.0".into(),
+            transformer: TransformerModelConfig {
+                d_model: 64,
+                n_heads: 4,
                 sequence_length: 20,
                 trained_samples: 0,
             },
-            dqn: DqnModelConfig {
+            ppo: PpoModelConfig {
                 state_size: 8,
-                action_size: 6,
                 hidden_size: 128,
                 trained_steps: 0,
             },
@@ -211,26 +209,26 @@ impl ModelHub {
 
         let repo = api.repo(Repo::model(self.config.repo_id.clone()));
 
-        // Download LSTM model
-        let lstm_path = match repo.get(LSTM_MODEL_FILE) {
+        // Download Transformer model
+        let transformer_path = match repo.get(TRANSFORMER_MODEL_FILE) {
             Ok(path) => {
-                debug!("Downloaded LSTM model: {:?}", path);
+                debug!("Downloaded Transformer model: {:?}", path);
                 Some(path)
             }
             Err(e) => {
-                warn!("LSTM model not found on hub: {}", e);
+                warn!("Transformer model not found on hub: {}", e);
                 None
             }
         };
 
-        // Download DQN model
-        let dqn_path = match repo.get(DQN_MODEL_FILE) {
+        // Download PPO model
+        let ppo_path = match repo.get(PPO_MODEL_FILE) {
             Ok(path) => {
-                debug!("Downloaded DQN model: {:?}", path);
+                debug!("Downloaded PPO model: {:?}", path);
                 Some(path)
             }
             Err(e) => {
-                warn!("DQN model not found on hub: {}", e);
+                warn!("PPO model not found on hub: {}", e);
                 None
             }
         };
@@ -251,8 +249,8 @@ impl ModelHub {
         info!("Model sync complete from {}", self.config.repo_id);
 
         Ok(ModelPaths {
-            lstm: lstm_path,
-            dqn: dqn_path,
+            transformer: transformer_path,
+            ppo: ppo_path,
             config: config_path,
         })
     }
@@ -264,13 +262,17 @@ impl ModelHub {
 
     /// Get local model paths (from cache)
     pub fn local_model_paths(&self) -> ModelPaths {
-        let lstm = self.config.cache_dir.join(LSTM_MODEL_FILE);
-        let dqn = self.config.cache_dir.join(DQN_MODEL_FILE);
+        let transformer = self.config.cache_dir.join(TRANSFORMER_MODEL_FILE);
+        let ppo = self.config.cache_dir.join(PPO_MODEL_FILE);
         let config = self.config.cache_dir.join(CONFIG_FILE);
 
         ModelPaths {
-            lstm: if lstm.exists() { Some(lstm) } else { None },
-            dqn: if dqn.exists() { Some(dqn) } else { None },
+            transformer: if transformer.exists() {
+                Some(transformer)
+            } else {
+                None
+            },
+            ppo: if ppo.exists() { Some(ppo) } else { None },
             config: if config.exists() { Some(config) } else { None },
         }
     }
@@ -408,8 +410,8 @@ impl ModelHub {
 /// Paths to downloaded models
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
-    pub lstm: Option<PathBuf>,
-    pub dqn: Option<PathBuf>,
+    pub transformer: Option<PathBuf>,
+    pub ppo: Option<PathBuf>,
     pub config: Option<PathBuf>,
 }
 
@@ -535,9 +537,9 @@ mod tests {
     #[test]
     fn test_model_config_default() {
         let config = ModelConfig::default();
-        assert_eq!(config.version, "0.1.0");
-        assert_eq!(config.lstm.input_size, 8);
-        assert_eq!(config.dqn.action_size, 6);
+        assert_eq!(config.version, "0.2.0");
+        assert_eq!(config.transformer.d_model, 64);
+        assert_eq!(config.ppo.state_size, 8);
     }
 
     #[test]
@@ -574,7 +576,7 @@ mod tests {
         });
 
         let paths = hub.local_model_paths();
-        assert!(paths.lstm.is_none());
-        assert!(paths.dqn.is_none());
+        assert!(paths.transformer.is_none());
+        assert!(paths.ppo.is_none());
     }
 }

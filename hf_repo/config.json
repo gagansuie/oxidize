@@ -1,44 +1,25 @@
 {
   "metadata": {
     "contributing_servers": 1,
-    "last_updated": "2026-01-23",
+    "last_updated": "2026-02-04",
     "total_samples": 10000
   },
   "models": {
     "tier1": {
-      "dqn_congestion_controller": {
-        "action_size": 6,
-        "description": "DRL-based congestion window optimization",
-        "file": "congestion_controller.onnx",
+      "ppo_congestion_controller": {
+        "description": "PPO-based continuous congestion window optimization",
+        "file": "ppo_congestion.safetensors",
         "hidden_size": 128,
-        "safetensors": "dqn_congestion.safetensors",
         "state_size": 8,
         "trained_steps": 5000
       },
-      "lstm_loss_predictor": {
-        "description": "LSTM-based packet loss prediction (50-100ms ahead)",
-        "file": "loss_predictor.onnx",
-        "hidden_size": 64,
-        "input_size": 8,
-        "safetensors": "lstm_loss_predictor.safetensors",
+      "transformer_loss_predictor": {
+        "d_model": 64,
+        "description": "Transformer-based packet loss prediction (50-100ms ahead)",
+        "file": "transformer_loss.safetensors",
+        "n_heads": 4,
         "sequence_length": 20,
         "trained_samples": 5000
-      }
-    },
-    "tier2": {
-      "compression_oracle": {
-        "description": "ML-based compression decision (entropy-aware)",
-        "file": "compression_oracle.onnx",
-        "input_size": 8,
-        "output_classes": 4,
-        "trained_samples": 0
-      },
-      "path_selector": {
-        "description": "Contextual multi-armed bandit for path selection",
-        "file": "path_selector.onnx",
-        "input_size": 29,
-        "output_paths": 4,
-        "trained_samples": 0
       }
     }
   },
@@ -48,5 +29,5 @@
     "loss_samples": "loss_samples.json",
     "path_selection_samples": "path_selection_samples.json"
   },
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

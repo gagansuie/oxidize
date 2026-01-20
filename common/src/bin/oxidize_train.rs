@@ -5,11 +5,9 @@
 //! Usage:
 //!   oxidize-train --input ./training_data --output ./models --epochs 100
 //!
-//! Models trained:
-//! - LSTM Loss Predictor (loss_predictor.onnx)
-//! - DQN Congestion Controller (congestion_controller.onnx)
-//! - Compression Oracle (compression_oracle.onnx)
-//! - Path Selector (path_selector.onnx)
+//! Models trained (SafeTensors format):
+//! - Transformer Loss Predictor (transformer_loss.safetensors)
+//! - PPO Congestion Controller (ppo_congestion.safetensors)
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +20,7 @@ use tracing::{info, warn};
 use oxidize_common::ml_optimized::{
     CompressionSample, DrlExperience, LossSample, PathSelectionSample,
 };
-use oxidize_common::ml_training::{DqnTrainer, LstmTrainer};
+use oxidize_common::ml_training::{PpoTrainer, TransformerTrainer};
 
 /// Oxidize ML Training CLI
 #[derive(Parser, Debug)]
@@ -38,13 +36,13 @@ struct Args {
     #[arg(short, long, default_value = "./models")]
     output: PathBuf,
 
-    /// Number of training epochs for LSTM
+    /// Number of training epochs for Transformer
     #[arg(long, default_value = "100")]
-    lstm_epochs: usize,
+    transformer_epochs: usize,
 
-    /// Number of training steps for DQN
+    /// Number of training steps for PPO
     #[arg(long, default_value = "1000")]
-    dqn_steps: usize,
+    ppo_steps: usize,
 
     /// Generate synthetic training data if no real data exists
     #[arg(long)]
@@ -57,10 +55,6 @@ struct Args {
     /// Minimum samples required to train (skip if fewer)
     #[arg(long, default_value = "100")]
     min_samples: usize,
-
-    /// Export to ONNX format (in addition to safetensors)
-    #[arg(long, default_value = "true")]
-    export_onnx: bool,
 
     /// Verbose output
     #[arg(short, long)]
@@ -112,31 +106,26 @@ fn main() -> Result<()> {
         data.path_samples.len()
     );
 
-    // Train LSTM Loss Predictor
+    // Train Transformer Loss Predictor
     if data.loss_samples.len() >= args.min_samples {
-        train_lstm(&data.loss_samples, &args.output, args.lstm_epochs)?;
+        train_transformer(&data.loss_samples, &args.output, args.transformer_epochs)?;
     } else {
         warn!(
-            "Skipping LSTM training: {} samples < {} minimum",
+            "Skipping Transformer training: {} samples < {} minimum",
             data.loss_samples.len(),
             args.min_samples
         );
     }
 
-    // Train DQN Congestion Controller
+    // Train PPO Congestion Controller
     if data.drl_experiences.len() >= args.min_samples {
-        train_dqn(&data.drl_experiences, &args.output, args.dqn_steps)?;
+        train_ppo(&data.drl_experiences, &args.output, args.ppo_steps)?;
     } else {
         warn!(
-            "Skipping DQN training: {} experiences < {} minimum",
+            "Skipping PPO training: {} experiences < {} minimum",
             data.drl_experiences.len(),
             args.min_samples
         );
-    }
-
-    // Export ONNX models
-    if args.export_onnx {
-        export_onnx_models(&args.output)?;
     }
 
     // Update config.json with training stats
@@ -351,12 +340,13 @@ fn generate_synthetic_data(data: &mut TrainingData, count: usize) {
     );
 }
 
-/// Train LSTM loss predictor
-fn train_lstm(samples: &[LossSample], output_dir: &Path, epochs: usize) -> Result<()> {
-    info!("Training LSTM Loss Predictor ({} epochs)...", epochs);
+/// Train Transformer loss predictor
+fn train_transformer(samples: &[LossSample], output_dir: &Path, epochs: usize) -> Result<()> {
+    info!("Training Transformer Loss Predictor ({} epochs)...", epochs);
 
-    let mut trainer = LstmTrainer::new(8, 64, 20)
-        .map_err(|e| anyhow::anyhow!("Failed to create LSTM trainer: {}", e))?;
+    // d_model=64, n_heads=4, seq_len=20
+    let mut trainer = TransformerTrainer::new(64, 4, 20)
+        .map_err(|e| anyhow::anyhow!("Failed to create Transformer trainer: {}", e))?;
 
     trainer
         .init_optimizer()
@@ -381,7 +371,7 @@ fn train_lstm(samples: &[LossSample], output_dir: &Path, epochs: usize) -> Resul
     for epoch in 0..epochs {
         let loss = trainer
             .train_batch(&labeled_samples)
-            .map_err(|e| anyhow::anyhow!("LSTM training failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Transformer training failed: {}", e))?;
 
         if loss > 0.0 {
             total_loss += loss;
@@ -399,35 +389,31 @@ fn train_lstm(samples: &[LossSample], output_dir: &Path, epochs: usize) -> Resul
     }
 
     // Save model
-    let model_path = output_dir.join("lstm_loss_predictor.safetensors");
+    let model_path = output_dir.join("transformer_loss.safetensors");
     trainer
         .save(&model_path)
-        .map_err(|e| anyhow::anyhow!("Failed to save LSTM model: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to save Transformer model: {}", e))?;
 
     let stats = trainer.stats();
     info!(
-        "LSTM training complete: {} epochs, final loss = {:.6}",
+        "Transformer training complete: {} epochs, final loss = {:.6}",
         stats.epochs_trained, stats.training_loss
     );
 
     Ok(())
 }
 
-/// Train DQN congestion controller
-fn train_dqn(experiences: &[DrlExperience], output_dir: &Path, steps: usize) -> Result<()> {
-    info!("Training DQN Congestion Controller ({} steps)...", steps);
+/// Train PPO congestion controller
+fn train_ppo(experiences: &[DrlExperience], output_dir: &Path, steps: usize) -> Result<()> {
+    info!("Training PPO Congestion Controller ({} steps)...", steps);
 
-    let mut trainer = DqnTrainer::new(8, 6, 128)
-        .map_err(|e| anyhow::anyhow!("Failed to create DQN trainer: {}", e))?;
+    // state_size=8, hidden_size=128
+    let mut trainer = PpoTrainer::new(8, 128)
+        .map_err(|e| anyhow::anyhow!("Failed to create PPO trainer: {}", e))?;
 
     trainer
         .init_optimizer()
         .map_err(|e| anyhow::anyhow!("Failed to init optimizer: {}", e))?;
-
-    // Initial sync of target network
-    trainer
-        .hard_update_target()
-        .map_err(|e| anyhow::anyhow!("Failed to sync target network: {}", e))?;
 
     let mut total_loss = 0.0f32;
     let mut loss_count = 0;
@@ -435,7 +421,7 @@ fn train_dqn(experiences: &[DrlExperience], output_dir: &Path, steps: usize) -> 
     for step in 0..steps {
         let loss = trainer
             .train_batch(experiences)
-            .map_err(|e| anyhow::anyhow!("DQN training failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("PPO training failed: {}", e))?;
 
         if loss > 0.0 {
             total_loss += loss;
@@ -453,183 +439,18 @@ fn train_dqn(experiences: &[DrlExperience], output_dir: &Path, steps: usize) -> 
     }
 
     // Save model
-    let model_path = output_dir.join("dqn_congestion.safetensors");
+    let model_path = output_dir.join("ppo_congestion.safetensors");
     trainer
         .save(&model_path)
-        .map_err(|e| anyhow::anyhow!("Failed to save DQN model: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to save PPO model: {}", e))?;
 
     let stats = trainer.stats();
     info!(
-        "DQN training complete: {} steps, final loss = {:.6}",
+        "PPO training complete: {} steps, final loss = {:.6}",
         stats.steps_trained, stats.training_loss
     );
 
     Ok(())
-}
-
-/// Export trained models to ONNX format
-fn export_onnx_models(output_dir: &Path) -> Result<()> {
-    info!("Exporting models to ONNX format...");
-
-    // For each safetensors model, create a matching ONNX file
-    // Note: Direct safetensors->ONNX conversion requires tracing the model
-    // For now, we create ONNX models directly with the same architecture
-
-    export_lstm_onnx(output_dir)?;
-    export_dqn_onnx(output_dir)?;
-    export_compression_onnx(output_dir)?;
-    export_path_selector_onnx(output_dir)?;
-
-    info!("ONNX export complete");
-    Ok(())
-}
-
-/// Export LSTM model to ONNX format
-fn export_lstm_onnx(output_dir: &Path) -> Result<()> {
-    use std::io::Write;
-
-    let onnx_path = output_dir.join("loss_predictor.onnx");
-
-    // Create a minimal valid ONNX model
-    // This is a simplified ONNX file that tract can load
-    let onnx_bytes = create_lstm_onnx_bytes()?;
-    let mut file = fs::File::create(&onnx_path)?;
-    file.write_all(&onnx_bytes)?;
-
-    info!("  Exported: loss_predictor.onnx");
-    Ok(())
-}
-
-/// Export DQN model to ONNX format  
-fn export_dqn_onnx(output_dir: &Path) -> Result<()> {
-    use std::io::Write;
-
-    let onnx_path = output_dir.join("congestion_controller.onnx");
-
-    let onnx_bytes = create_dqn_onnx_bytes()?;
-    let mut file = fs::File::create(&onnx_path)?;
-    file.write_all(&onnx_bytes)?;
-
-    info!("  Exported: congestion_controller.onnx");
-    Ok(())
-}
-
-/// Export compression oracle to ONNX format
-fn export_compression_onnx(output_dir: &Path) -> Result<()> {
-    use std::io::Write;
-
-    let onnx_path = output_dir.join("compression_oracle.onnx");
-
-    let onnx_bytes = create_compression_onnx_bytes()?;
-    let mut file = fs::File::create(&onnx_path)?;
-    file.write_all(&onnx_bytes)?;
-
-    info!("  Exported: compression_oracle.onnx");
-    Ok(())
-}
-
-/// Export path selector to ONNX format
-fn export_path_selector_onnx(output_dir: &Path) -> Result<()> {
-    use std::io::Write;
-
-    let onnx_path = output_dir.join("path_selector.onnx");
-
-    let onnx_bytes = create_path_selector_onnx_bytes()?;
-    let mut file = fs::File::create(&onnx_path)?;
-    file.write_all(&onnx_bytes)?;
-
-    info!("  Exported: path_selector.onnx");
-    Ok(())
-}
-
-/// Create LSTM ONNX model bytes
-/// Architecture: [batch, 20, 8] -> LSTM(64) -> Dense(1) -> Sigmoid
-fn create_lstm_onnx_bytes() -> Result<Vec<u8>> {
-    // We use a simplified feed-forward network that approximates LSTM behavior
-    // since creating a proper LSTM ONNX requires protobuf generation
-    create_mlp_onnx(20 * 8, &[64, 32, 1], true) // flatten input, use sigmoid output
-}
-
-/// Create DQN ONNX model bytes
-/// Architecture: [batch, 8] -> Dense(128) -> ReLU -> Dense(128) -> ReLU -> Dense(6)
-fn create_dqn_onnx_bytes() -> Result<Vec<u8>> {
-    create_mlp_onnx(8, &[128, 128, 6], false)
-}
-
-/// Create compression oracle ONNX model bytes
-/// Architecture: [batch, 8] -> Dense(32) -> ReLU -> Dense(4) -> Softmax
-fn create_compression_onnx_bytes() -> Result<Vec<u8>> {
-    create_mlp_onnx(8, &[32, 4], false)
-}
-
-/// Create path selector ONNX model bytes
-/// Architecture: [batch, 29] -> Dense(64) -> ReLU -> Dense(4)
-fn create_path_selector_onnx_bytes() -> Result<Vec<u8>> {
-    create_mlp_onnx(29, &[64, 4], false)
-}
-
-/// Create a simple MLP ONNX model
-/// This generates a minimal valid ONNX file that tract can load
-fn create_mlp_onnx(input_size: usize, layer_sizes: &[usize], use_sigmoid: bool) -> Result<Vec<u8>> {
-    use rand::Rng;
-
-    // Generate random weights for initialization
-    let mut rng = rand::thread_rng();
-    let mut weights_data = Vec::new();
-    let mut prev_size = input_size;
-
-    for &size in layer_sizes {
-        // Xavier initialization
-        let scale = (2.0 / (prev_size + size) as f32).sqrt();
-        for _ in 0..(prev_size * size) {
-            let w: f32 = rng.gen_range(-scale..scale);
-            weights_data.extend_from_slice(&w.to_le_bytes());
-        }
-        // Bias (zeros)
-        for _ in 0..size {
-            weights_data.extend_from_slice(&0.0f32.to_le_bytes());
-        }
-        prev_size = size;
-    }
-
-    // Create a simple ONNX-like structure that tract can parse
-    // This is a minimal binary format
-    let mut buffer = Vec::new();
-
-    // ONNX magic + version (simplified)
-    buffer.extend_from_slice(b"OXIDIZE_MODEL_V1");
-
-    // Model metadata
-    let metadata = OnnxMetadata {
-        input_size,
-        layer_sizes: layer_sizes.to_vec(),
-        use_sigmoid,
-        weights_offset: 64,
-        weights_size: weights_data.len(),
-    };
-
-    let metadata_json = serde_json::to_vec(&metadata)?;
-    buffer.extend_from_slice(&(metadata_json.len() as u32).to_le_bytes());
-    buffer.extend_from_slice(&metadata_json);
-
-    // Pad to weights offset
-    while buffer.len() < 64 {
-        buffer.push(0);
-    }
-
-    // Weights data
-    buffer.extend_from_slice(&weights_data);
-
-    Ok(buffer)
-}
-
-#[derive(Serialize, Deserialize)]
-struct OnnxMetadata {
-    input_size: usize,
-    layer_sizes: Vec<usize>,
-    use_sigmoid: bool,
-    weights_offset: usize,
-    weights_size: usize,
 }
 
 /// Update config.json with training statistics
@@ -637,42 +458,23 @@ fn update_config(output_dir: &Path, data: &TrainingData) -> Result<()> {
     let config_path = output_dir.join("config.json");
 
     let config = serde_json::json!({
-        "version": "0.1.0",
+        "version": "0.2.0",
         "models": {
             "tier1": {
-                "lstm_loss_predictor": {
-                    "description": "LSTM-based packet loss prediction (50-100ms ahead)",
-                    "file": "loss_predictor.onnx",
-                    "safetensors": "lstm_loss_predictor.safetensors",
-                    "input_size": 8,
-                    "hidden_size": 64,
+                "transformer_loss_predictor": {
+                    "description": "Transformer-based packet loss prediction (50-100ms ahead)",
+                    "file": "transformer_loss.safetensors",
+                    "d_model": 64,
+                    "n_heads": 4,
                     "sequence_length": 20,
                     "trained_samples": data.loss_samples.len()
                 },
-                "dqn_congestion_controller": {
-                    "description": "DRL-based congestion window optimization",
-                    "file": "congestion_controller.onnx",
-                    "safetensors": "dqn_congestion.safetensors",
+                "ppo_congestion_controller": {
+                    "description": "PPO-based continuous congestion window optimization",
+                    "file": "ppo_congestion.safetensors",
                     "state_size": 8,
-                    "action_size": 6,
                     "hidden_size": 128,
                     "trained_steps": data.drl_experiences.len()
-                }
-            },
-            "tier2": {
-                "compression_oracle": {
-                    "description": "ML-based compression decision (entropy-aware)",
-                    "file": "compression_oracle.onnx",
-                    "input_size": 8,
-                    "output_classes": 4,
-                    "trained_samples": data.compression_samples.len()
-                },
-                "path_selector": {
-                    "description": "Contextual multi-armed bandit for path selection",
-                    "file": "path_selector.onnx",
-                    "input_size": 29,
-                    "output_paths": 4,
-                    "trained_samples": data.path_samples.len()
                 }
             }
         },

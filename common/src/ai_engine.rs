@@ -1,7 +1,7 @@
 //! AI-Ready Heuristic Engine
 //!
-//! A trait-based decision engine that uses heuristics today but can be
-//! replaced with trained ML models (ONNX, tract, etc.) in the future.
+//! A trait-based decision engine that uses heuristics and can be
+//! augmented with trained ML models via candle/safetensors.
 //!
 //! Covers four AI pillars:
 //! 1. **Loss Prediction (DeepRS)** - Predict packet loss to proactively inject FEC
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 // ============================================================================
 
 /// Network state features for ML models
-/// These are the inputs an LSTM or DRL agent would need
+/// These are the inputs a Transformer or DRL agent would need
 #[derive(Debug, Clone, Default)]
 pub struct NetworkFeatures {
     /// Round-trip time in microseconds (smoothed)
@@ -211,7 +211,7 @@ pub struct FecDecision {
 }
 
 /// Trait for packet loss prediction
-/// Replace with LSTM for AI-enhanced version
+/// Replace with Transformer for AI-enhanced version
 pub trait LossPredictor: Send + Sync {
     /// Predict packet loss probability
     fn predict(&self, features: &NetworkFeatures, history: &[f32]) -> FecDecision;
@@ -430,7 +430,7 @@ impl CompressionOracle for HeuristicCompressionOracle {
 }
 
 /// Heuristic-based loss predictor
-/// Uses exponential smoothing instead of LSTM
+/// Uses exponential smoothing instead of Transformer
 pub struct HeuristicLossPredictor {
     /// Loss history window
     history: VecDeque<f32>,

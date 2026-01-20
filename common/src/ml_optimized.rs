@@ -6,8 +6,8 @@
 //! - SIMD-accelerated dot products (AVX2/NEON)
 //! - Rayon parallel batch inference
 //! - Speculative pre-computation (predict next N decisions)
-//! - Transformer-based loss prediction (replaces LSTM)
-//! - PPO continuous congestion control (replaces DQN)
+//! - Transformer-based loss prediction
+//! - PPO continuous congestion control
 //!
 //! ## Performance Targets
 //! - Inference latency: <5µs per decision (with SIMD)
@@ -353,7 +353,7 @@ impl SpeculativeCache {
 }
 
 // ============================================================================
-// Transformer-based Loss Predictor (replaces LSTM)
+// Transformer-based Loss Predictor
 // ============================================================================
 
 /// Lightweight Transformer for sequence prediction
@@ -452,10 +452,85 @@ impl MiniTransformer {
         // Sigmoid for probability
         1.0 / (1.0 + (-pred[0]).exp())
     }
+
+    /// Load trained weights from safetensors file
+    pub fn load_weights(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        let tensors = safetensors::SafeTensors::deserialize(&data)
+            .map_err(|e| format!("Failed to parse safetensors: {}", e))?;
+
+        for (name, tensor) in tensors.tensors() {
+            let weights: Vec<f32> = tensor
+                .data()
+                .chunks(4)
+                .filter_map(|b| b.try_into().ok())
+                .map(f32::from_le_bytes)
+                .collect();
+
+            // Match tensor names to layers
+            if name.contains("qkv") {
+                let weight_size = self.d_model * self.d_model * 3;
+                if weights.len() >= weight_size {
+                    self.qkv_proj = QuantizedLinear::new(
+                        &weights[..weight_size],
+                        &weights.get(weight_size..).unwrap_or(&[0.0f32; 1])
+                            [..self.d_model * 3.min(weights.len() - weight_size)],
+                        self.d_model,
+                        self.d_model * 3,
+                    );
+                }
+            } else if name.contains("out") && !name.contains("actor") {
+                let weight_size = self.d_model * self.d_model;
+                if weights.len() >= weight_size {
+                    self.out_proj = QuantizedLinear::new(
+                        &weights[..weight_size],
+                        &weights.get(weight_size..).unwrap_or(&[0.0f32; 1])
+                            [..self.d_model.min(weights.len() - weight_size)],
+                        self.d_model,
+                        self.d_model,
+                    );
+                }
+            } else if name.contains("ff1") {
+                let weight_size = self.d_model * self.d_model * 4;
+                if weights.len() >= weight_size {
+                    self.ff1 = QuantizedLinear::new(
+                        &weights[..weight_size],
+                        &weights.get(weight_size..).unwrap_or(&[0.0f32; 1])
+                            [..(self.d_model * 4).min(weights.len() - weight_size)],
+                        self.d_model,
+                        self.d_model * 4,
+                    );
+                }
+            } else if name.contains("ff2") {
+                let weight_size = self.d_model * 4 * self.d_model;
+                if weights.len() >= weight_size {
+                    self.ff2 = QuantizedLinear::new(
+                        &weights[..weight_size],
+                        &weights.get(weight_size..).unwrap_or(&[0.0f32; 1])
+                            [..self.d_model.min(weights.len() - weight_size)],
+                        self.d_model * 4,
+                        self.d_model,
+                    );
+                }
+            } else if name.contains("pred") {
+                if !weights.is_empty() {
+                    self.pred_head = QuantizedLinear::new(
+                        &weights[..self.d_model.min(weights.len())],
+                        &[weights.get(self.d_model).copied().unwrap_or(0.0)],
+                        self.d_model,
+                        1,
+                    );
+                }
+            }
+        }
+
+        tracing::info!("Loaded transformer weights from {:?}", path);
+        Ok(())
+    }
 }
 
 // ============================================================================
-// PPO Continuous Congestion Controller (replaces DQN)
+// PPO Continuous Congestion Controller
 // ============================================================================
 
 /// PPO-based continuous congestion control
@@ -533,6 +608,47 @@ impl PPOController {
             padded[i] = v;
         }
         self.value_net.forward(&padded)[0]
+    }
+
+    /// Load trained weights from safetensors file
+    pub fn load_weights(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        let tensors = safetensors::SafeTensors::deserialize(&data)
+            .map_err(|e| format!("Failed to parse safetensors: {}", e))?;
+
+        for (name, tensor) in tensors.tensors() {
+            let weights: Vec<f32> = tensor
+                .data()
+                .chunks(4)
+                .filter_map(|b| b.try_into().ok())
+                .map(f32::from_le_bytes)
+                .collect();
+
+            if name.contains("actor") && name.contains("out") {
+                // Actor output layer (mean)
+                if !weights.is_empty() {
+                    self.policy_mean = QuantizedLinear::new(
+                        &weights[..128.min(weights.len())],
+                        &[weights.get(128).copied().unwrap_or(0.0)],
+                        128,
+                        1,
+                    );
+                }
+            } else if name.contains("critic") && name.contains("out") {
+                // Critic output layer
+                if !weights.is_empty() {
+                    self.value_net = QuantizedLinear::new(
+                        &weights[..128.min(weights.len())],
+                        &[weights.get(128).copied().unwrap_or(0.0)],
+                        128,
+                        1,
+                    );
+                }
+            }
+        }
+
+        tracing::info!("Loaded PPO weights from {:?}", path);
+        Ok(())
     }
 }
 
