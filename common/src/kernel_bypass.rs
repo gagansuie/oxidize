@@ -1029,10 +1029,10 @@ impl BypassWorker {
 }
 
 // =============================================================================
-// Ultra DPDK Runtime
+// Kernel Bypass Runtime Configuration
 // =============================================================================
 
-/// Ultra-optimized DPDK runtime configuration
+/// Ultra-optimized kernel bypass runtime configuration
 #[derive(Debug, Clone)]
 pub struct UltraConfig {
     /// Number of worker cores

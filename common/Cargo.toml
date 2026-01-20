@@ -8,7 +8,7 @@ license = { workspace = true }
 [features]
 default = ["ai"]
 ai = ["dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
-# Note: AF_XDP/DPDK kernel bypass is always enabled on Linux (no feature flag needed)
+# Note: AF_XDP kernel bypass is always enabled on Linux (no feature flag needed)
 
 [[bin]]
 name = "oxidize-train"
@@ -44,7 +44,6 @@ socket2 = { workspace = true }
 quinn = { workspace = true }
 parking_lot = "0.12"  # Fast RwLock for QUIC-XDP connection table
 
-# DPDK uses FFI bindings directly (libdpdk must be installed on system)
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.27"  # Unix utilities (Linux, macOS, Android, iOS)

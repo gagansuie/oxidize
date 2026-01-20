@@ -4,7 +4,7 @@
 //! Provides 100x performance improvement over standard QUIC when available.
 //!
 //! # Fallback Behavior
-//! - On Linux with kernel-bypass feature: Uses AF_XDP QUIC runtime
+//! - On Linux: Uses AF_XDP QUIC runtime when available
 //! - Otherwise: Falls back to standard Quinn-based QUIC
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -310,9 +310,6 @@ pub fn check_capabilities() -> QuicCapabilities {
         #[cfg(not(target_os = "linux"))]
         af_xdp_available: false,
 
-        // io_uring removed - redundant with AF_XDP kernel bypass
-        io_uring_available: false,
-
         cpu_cores: std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(1),
@@ -325,7 +322,6 @@ pub fn check_capabilities() -> QuicCapabilities {
 #[derive(Debug)]
 pub struct QuicCapabilities {
     pub af_xdp_available: bool,
-    pub io_uring_available: bool,
     pub cpu_cores: usize,
     pub recommended_mode: QuicMode,
 }
@@ -333,9 +329,8 @@ pub struct QuicCapabilities {
 impl QuicCapabilities {
     pub fn summary(&self) -> String {
         format!(
-            "QUIC Capabilities: AF_XDP={}, io_uring={}, cores={}, recommended={:?}",
+            "QUIC Capabilities: AF_XDP={}, cores={}, recommended={:?}",
             if self.af_xdp_available { "yes" } else { "no" },
-            if self.io_uring_available { "yes" } else { "no" },
             self.cpu_cores,
             self.recommended_mode
         )
@@ -364,9 +359,6 @@ mod tests {
     fn test_mode_detection() {
         let mode = QuicXdpServer::detect_best_mode();
         // Should return something valid
-        assert!(matches!(
-            mode,
-            QuicMode::Standard | QuicMode::AfXdp | QuicMode::Dpdk
-        ));
+        assert!(matches!(mode, QuicMode::Standard | QuicMode::AfXdp));
     }
 }

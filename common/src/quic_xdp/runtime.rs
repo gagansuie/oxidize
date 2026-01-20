@@ -8,7 +8,6 @@
 //! - Per-queue worker threads with CPU pinning
 //! - Lock-free connection table
 //! - Batch processing (64+ packets)
-//! - io_uring for async completions
 //! - ML-augmented congestion control
 
 use super::connection::{CidGenerator, Connection, ConnectionTable};

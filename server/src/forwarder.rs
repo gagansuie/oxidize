@@ -2,7 +2,6 @@
 //!
 //! Handles forwarding decoded packets to their destinations AND receiving responses.
 //! Supports both UDP and TCP traffic tunneled through QUIC.
-//! For bare metal deployment, use DPDK feature for 40+ Gbps throughput.
 
 use anyhow::Result;
 use std::collections::HashMap;

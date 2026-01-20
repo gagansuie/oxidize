@@ -7,7 +7,6 @@
 #
 # Prerequisites:
 #   - Run vultr-setup.sh first
-#   - Optionally run vultr-bind-nic.sh for DPDK mode
 
 set -e
 
@@ -51,16 +50,9 @@ build_server() {
     
     cd "$OXIDIZE_DIR" || cd "$(dirname "$0")/.."
     
-    # Check if kernel-bypass feature should be enabled
-    local features=""
-    if [[ -f "/etc/oxidize/nic-binding-state" ]]; then
-        log_info "DPDK NIC binding detected, enabling kernel-bypass feature"
-        features="--features kernel-bypass"
-    fi
-    
     # Build release
     if command -v cargo &> /dev/null; then
-        RUSTFLAGS="-C target-cpu=native" cargo build --release -p relay-server $features
+        RUSTFLAGS="-C target-cpu=native" cargo build --release -p relay-server
     else
         log_error "Cargo not found. Install Rust first."
         exit 1
@@ -163,8 +155,7 @@ max_early_data_size = 4294967295
 enable_ai_engine = true
 
 # === Kernel Bypass (AF_XDP) ===
-# Enabled by default - uses AF_XDP for 100+ Gbps throughput
-# Falls back to io_uring if AF_XDP is not available
+# Enabled by default on Linux - uses AF_XDP for high throughput
 enable_kernel_bypass = true
 bypass_interface = "auto"    # Auto-detect or specify e.g. "enp1s0f0"
 bypass_queues = 4            # Number of RX/TX queues
@@ -225,15 +216,6 @@ setup_tls() {
 install_service() {
     log_info "Installing systemd service..."
     
-    # Detect if DPDK is configured
-    local dpdk_opts=""
-    if [[ -f "/etc/oxidize/nic-binding-state" ]]; then
-        local dpdk_pci=$(head -1 /etc/oxidize/nic-binding-state | awk '{print $1}')
-        if [[ -n "$dpdk_pci" ]]; then
-            dpdk_opts="--dpdk-pci $dpdk_pci"
-        fi
-    fi
-    
     cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
 Description=Oxidize Relay Server (Vultr Chicago)
@@ -245,7 +227,7 @@ Documentation=https://github.com/gagansuie/oxidize
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/bin/$BINARY_NAME --listen $LISTEN_ADDR --config $CONFIG_FILE $dpdk_opts
+ExecStart=/usr/local/bin/$BINARY_NAME --listen $LISTEN_ADDR --config $CONFIG_FILE
 Restart=always
 RestartSec=5
 
@@ -333,12 +315,7 @@ start_service() {
         echo "  Status:      systemctl status $SERVICE_NAME"
         echo ""
         
-        # Check if DPDK is enabled
-        if [[ -f "/etc/oxidize/nic-binding-state" ]]; then
-            echo "  Mode:        🚀 KERNEL BYPASS (DPDK)"
-        else
-            echo "  Mode:        Standard (kernel networking)"
-        fi
+        echo "  Mode:        AF_XDP kernel bypass (auto-detected)"
         echo ""
     else
         log_error "Failed to start Oxidize server"

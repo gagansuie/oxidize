@@ -567,7 +567,6 @@ impl RelayClient {
     }
 
     /// Run client with high-performance packet capture
-    /// For bare metal with DPDK, use the daemon instead
     #[allow(dead_code)]
     pub async fn run_high_perf(&self) -> Result<()> {
         info!("🚀 Starting high-performance client mode");

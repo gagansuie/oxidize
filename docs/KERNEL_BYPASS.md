@@ -1,35 +1,14 @@
-# 🚀 Kernel Bypass Mode (100+ Gbps)
+# 🚀 Kernel Bypass Mode (AF_XDP)
 
-Oxidize includes a tiered kernel bypass implementation for bare metal deployments.
+Oxidize includes AF_XDP kernel bypass for bare metal deployments.
 
-> **Status**: ✅ Fully implemented with automatic mode selection
-
-## Implementation Tiers
-
-| Tier | Technology | Throughput | Requirements | Status |
-|------|------------|------------|--------------|--------|
-| **1** | DPDK | 100+ Gbps | Multi-NIC + libdpdk | ✅ Ready (future 100GbE) |
-| **2** | AF_XDP | 10-40 Gbps | Kernel 4.18+ | ✅ Active (current) |
-
-## Auto-Selection Logic
-
-```rust
-// UnifiedBypass automatically selects the best available mode:
-// 1. Try DPDK first (requires NIC bound to VFIO + libdpdk)
-// 2. Use AF_XDP (requires root/CAP_NET_RAW)
-let bypass = UnifiedBypass::new(None)?;
-match bypass.mode() {
-    BypassMode::Dpdk => info!("100+ Gbps mode"),
-    BypassMode::AfXdp => info!("10-40 Gbps mode"),
-}
-```
+> **Status**: ✅ Fully implemented with automatic detection
 
 ## Overview
 
-| Mode | Throughput | Latency | Best For |
-|------|------------|---------|----------|
-| **AF_XDP** (Current) | 10-40 Gbps | 1-2 µs | 10GbE bare metal |
-| **DPDK** (Upgrade) | 100+ Gbps | <1 µs | 100GbE bare metal |
+| Technology | Throughput | Latency | Requirements |
+|------------|------------|---------|-------------|
+| **AF_XDP** | 10-40 Gbps | 1-2 µs | Linux kernel 4.18+, root/CAP_NET_RAW |
 
 ## How It Works
 
@@ -98,17 +77,17 @@ Application → User-space Driver (PMD) → NIC
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Performance Comparison
+## Performance
 
-| Metric | AF_XDP (Current) | DPDK (Upgrade) |
-|--------|------------------|----------------|
-| **Throughput** | 10-40 Gbps | 100+ Gbps |
-| **Latency** | 1-2 µs | <1 µs |
-| **Packets/sec** | 1-5M pps | 10-40M pps | 100M+ pps |
-| **CPU per packet** | ~500 cycles | ~100 cycles | ~50 cycles |
-| **System calls** | 1 per batch | 0 | 0 |
-| **NIC binding** | No | No | Yes (VFIO) |
-| **SSH access** | Yes | Yes | Requires 2nd NIC |
+| Metric | AF_XDP |
+|--------|--------|
+| **Throughput** | 10-40 Gbps |
+| **Latency** | 1-2 µs |
+| **Packets/sec** | 1-5M pps |
+| **CPU per packet** | ~100 cycles |
+| **System calls** | 1 per batch |
+| **NIC binding** | No (uses kernel driver) |
+| **SSH access** | Yes |
 
 ## Key Components
 
@@ -117,7 +96,7 @@ Application → User-space Driver (PMD) → NIC
 Single-producer single-consumer ring for zero-contention packet queuing:
 
 ```rust
-use oxidize_common::dpdk::{SpscRing, PacketBuffer};
+use oxidize_common::kernel_bypass::{SpscRing, PacketBuffer};
 
 // Create ring with 16K slots
 let ring: SpscRing<PacketBuffer> = SpscRing::new(16384);
@@ -136,7 +115,7 @@ if let Some(pkt) = ring.pop() {
 Pre-allocated packet buffers eliminate malloc in hot path:
 
 ```rust
-use oxidize_common::dpdk::{PacketPool, PacketBuffer};
+use oxidize_common::kernel_bypass::{PacketPool, PacketBuffer};
 
 // Create pool with 256K buffers
 let pool = PacketPool::new(262144, 0);
@@ -154,9 +133,9 @@ pool.free(buf);
 Each worker thread is pinned to a dedicated CPU core:
 
 ```rust
-use oxidize_common::dpdk::DpdkWorker;
+use oxidize_common::kernel_bypass::BypassWorker;
 
-let worker = DpdkWorker::new(core_id, queue_id, pool);
+let worker = BypassWorker::new(core_id, queue_id, pool);
 worker.pin_to_core()?; // Uses sched_setaffinity
 
 worker.run(|packet| {
@@ -171,7 +150,7 @@ worker.run(|packet| {
 AVX2/AVX-512 accelerated header parsing with prefetching:
 
 ```rust
-use oxidize_common::dpdk::SimdPacketParser;
+use oxidize_common::kernel_bypass::SimdPacketParser;
 
 // Parse with prefetch of next packet
 let parsed = SimdPacketParser::parse_fast(&packet_data);
@@ -190,7 +169,7 @@ SimdPacketParser::parse_batch(&packets, &mut results);
 Constant-time operations prevent timing attacks:
 
 ```rust
-use oxidize_common::dpdk::security;
+use oxidize_common::kernel_bypass::security;
 
 // Constant-time comparison (prevents timing attacks)
 let valid = security::constant_time_compare(&expected, &actual);
@@ -215,10 +194,10 @@ if limiter.allow() {
 ### UltraConfig (100x Mode)
 
 ```rust
-use oxidize_common::dpdk::{UltraConfig, UltraDpdkRuntime};
+use oxidize_common::kernel_bypass::{BypassConfig, UnifiedBypass};
 
-// Maximum throughput (100+ Gbps)
-let config = UltraConfig::max_throughput();
+// Maximum throughput configuration
+let config = BypassConfig::max_throughput();
 
 // Or balanced security + performance
 let config = UltraConfig::secure();
@@ -234,8 +213,8 @@ let config = UltraConfig {
     security_validation: true,     // Enable packet validation
 };
 
-let runtime = UltraDpdkRuntime::new(config)?;
-runtime.start();
+let bypass = UnifiedBypass::new(Some(config))?;
+bypass.start();
 ```
 
 ## Deployment
@@ -259,8 +238,8 @@ sudo modprobe vfio-pci
 # 3. Bind NIC to VFIO (find PCI address with lspci)
 echo "0000:01:00.0" | sudo tee /sys/bus/pci/drivers/vfio-pci/bind
 
-# 4. Build with kernel bypass
-cargo build --release --features kernel-bypass
+# 4. Build server (AF_XDP is always enabled on Linux)
+cargo build --release -p relay-server
 
 # 5. Run server
 sudo ./target/release/oxidize-server --listen 0.0.0.0:4433
@@ -268,7 +247,7 @@ sudo ./target/release/oxidize-server --listen 0.0.0.0:4433
 
 ## Bare Metal Provider Comparison
 
-For DPDK/kernel bypass, you need bare metal with direct NIC access. Here's how the top providers compare:
+For AF_XDP kernel bypass, you need bare metal. Here's how the top providers compare:
 
 ### Vultr vs OVHcloud
 
@@ -280,7 +259,7 @@ For DPDK/kernel bypass, you need bare metal with direct NIC access. Here's how t
 | **Global Locations** | 32 cities, 19 countries | ~30 DCs (US, EU, APAC) | **Vultr** |
 | **DDoS Protection** | Basic included | Robust included | **OVHcloud** |
 | **Provisioning** | Instant (minutes) | Minutes-hours | **Vultr** |
-| **DPDK NICs** | Intel (i350, x520, x710) | Intel/Mellanox on Scale+ | Tie |
+| **NICs** | Intel (i350, x520, x710) | Intel/Mellanox on Scale+ | Tie |
 
 ### Recommendation
 
@@ -291,15 +270,15 @@ For DPDK/kernel bypass, you need bare metal with direct NIC access. Here's how t
 | **Global Scale** | Vultr | More edge locations worldwide |
 | **Heavy Egress** | OVHcloud | Unlimited bandwidth saves on data transfer |
 
-### Vultr Bare Metal Options for DPDK
+### Vultr Bare Metal Options
 
 | Config | Price | Specs | Use Case |
 |--------|-------|-------|----------|
-| AMD EPYC 4245P | ~$185/mo | 6c/12t, 32GB, **25 Gbps** | Entry DPDK |
+| AMD EPYC 4245P | ~$185/mo | 6c/12t, 32GB, **25 Gbps** | Entry |
 | AMD EPYC 4345P | ~$250/mo | 8c/16t, 128GB, **25 Gbps** | Production |
 | AMD EPYC 7443P | ~$350/mo | 24c/48t, 256GB, **25 Gbps** | High-traffic |
 
-### OVHcloud Options for DPDK
+### OVHcloud Options
 
 | Config | Price | Specs | Use Case |
 |--------|-------|-------|----------|
@@ -321,8 +300,8 @@ If pre-profit, apply for startup credits to avoid infrastructure costs:
 
 Before choosing a provider, verify:
 
-- [ ] **VT-d / IOMMU** - Required for DPDK NIC passthrough
-- [ ] **Compatible NICs** - Intel i350/x520/x540/x710 or Mellanox ConnectX-4/5/6
+- [ ] **VT-d / IOMMU** - Recommended for best performance
+- [ ] **Compatible NICs** - Most Intel/Mellanox NICs work with AF_XDP
 - [ ] **Hugepages Support** - 2MB or 1GB huge pages in BIOS
 - [ ] **No Hypervisor Layer** - True bare metal, not "dedicated" VMs
 
@@ -335,7 +314,7 @@ Phase 1 (0-500 users):     Single Vultr node ($120/mo)
 Phase 2 (500-2000 users):  Upgrade to larger plan ($185-350/mo)
                            └── vbm-6c-32gb or vbm-8c-128gb
 
-Phase 3 (2000+ users):     Multi-region DPDK deployment
+Phase 3 (2000+ users):     Multi-region deployment
                            └── Add WEST/EU servers via CI/CD matrix
 ```
 
@@ -345,7 +324,7 @@ All Oxidize features work on top of kernel bypass:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  BBRv4 + ROHC + LZ4 + FEC + Deep Learning (ML)     │  ← All features enabled
+│  ROHC + LZ4 + FEC + Deep Learning (ML)             │  ← All features enabled
 ├─────────────────────────────────────────────────────┤
 │  Ultra Kernel Bypass Runtime (100x optimized)      │  ← Custom implementation
 ├─────────────────────────────────────────────────────┤
@@ -356,12 +335,11 @@ All Oxidize features work on top of kernel bypass:
 ## When To Use
 
 | Use Case | Recommended Mode | Technology |
-|----------|------------------|------------|
+|----------|------------------|-----------|
 | Small VPN (<500 users) | Single Vultr node | AF_XDP |
 | Gaming/Low Latency | Bare metal Vultr | AF_XDP |
 | High-traffic CDN | Bare metal Vultr | AF_XDP |
-| Enterprise (2000+ users) | Multi-NIC Vultr | DPDK |
-| Carrier-grade (100+ Gbps) | 100GbE + Multi-NIC | DPDK |
+| Enterprise (2000+ users) | Multi-node Vultr | AF_XDP |
 
 ## Monitoring
 

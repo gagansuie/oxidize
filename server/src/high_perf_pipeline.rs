@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
-// Kernel bypass is feature-gated - only available with --features kernel-bypass
+// Kernel bypass (AF_XDP) is always available on Linux
 #[cfg(target_os = "linux")]
 use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
 

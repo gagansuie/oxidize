@@ -424,16 +424,10 @@ jobs:
           target: x86_64-unknown-linux-gnu
           cache-prefix: vultr-server
 
-      # DPDK dependencies - uncomment when upgrading to 100GbE with multi-NIC
-      # - name: Install DPDK dependencies
-      #   run: |
-      #     sudo apt-get update -qq
-      #     sudo apt-get install -y dpdk-dev libelf-dev libnuma-dev pkg-config
-
-      - name: Build server binary (with kernel-bypass)
+      - name: Build server binary
         run: |
-          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release -p relay-server --features kernel-bypass
-          strip target/release/relay-server
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release -p relay-server
+          strip target/release/oxidize-server
         env:
           RUSTC_WRAPPER: ${{ steps.setup-rust.outputs.sccache-enabled == 'true' && 'sccache' || '' }}
 
@@ -466,7 +460,7 @@ jobs:
           
           # Upload binary
           scp -i ~/.ssh/vultr_key -o StrictHostKeyChecking=no \
-              target/release/relay-server \
+              target/release/oxidize-server \
               root@$HOST:/tmp/oxidize-server
           
           # Zero-downtime deploy

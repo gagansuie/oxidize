@@ -291,6 +291,6 @@ ip link set eth0 xdpgeneric obj xdp_prog.o
 
 ## See Also
 
-- [KERNEL_BYPASS.md](KERNEL_BYPASS.md) - AF_XDP and DPDK setup
+- [KERNEL_BYPASS.md](KERNEL_BYPASS.md) - AF_XDP kernel bypass setup
 - [ADVANCED_ML.md](ADVANCED_ML.md) - ML architecture details
 - [DEEP_LEARNING.md](DEEP_LEARNING.md) - Neural network training

@@ -8,8 +8,7 @@ Quick-start guide for deploying Oxidize on Vultr bare metal with **kernel bypass
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Kernel Bypass** | ✅ AF_XDP | Auto-selected, saturates 10GbE NIC |
-| **DPDK** | ⏳ Ready | Activates when 100GbE + multi-NIC available |
+| **Kernel Bypass** | ✅ AF_XDP | Auto-enabled on Linux, saturates 10GbE NIC |
 | **Zero-Downtime** | ✅ Active | SO_REUSEPORT + graceful shutdown |
 | **CI/CD** | ✅ Automated | Version bump → auto-deploy |
 | **Hugepages** | ✅ Configured | 4GB (2048 x 2MB pages) |
@@ -101,18 +100,9 @@ sudo ./scripts/vultr-deploy.sh
 
 Server will be running on port 4433 (QUIC/UDP).
 
-### 3. Enable Kernel Bypass (Optional, for max performance)
+### 3. Kernel Bypass
 
-```bash
-# List available NICs
-sudo ./scripts/vultr-bind-nic.sh --list
-
-# Bind secondary NIC to DPDK (NOT the management NIC!)
-sudo ./scripts/vultr-bind-nic.sh eth1  # or PCI address like 0000:01:00.0
-
-# Redeploy with kernel bypass
-sudo ./scripts/vultr-deploy.sh
-```
+AF_XDP kernel bypass is automatically enabled on Linux. No additional configuration needed.
 
 ## Server Management
 
@@ -208,18 +198,6 @@ sudo lsof -i :4433
 sudo kill -9 <PID>
 ```
 
-### DPDK NIC not working
-```bash
-# Check IOMMU is enabled
-dmesg | grep -i iommu
-
-# Check NIC binding
-sudo ./scripts/vultr-bind-nic.sh --list
-
-# Restore NIC to kernel driver
-sudo ./scripts/vultr-bind-nic.sh --unbind eth1
-```
-
 ### Performance issues
 ```bash
 # Check hugepages
@@ -237,7 +215,6 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
 | Script | Purpose |
 |--------|---------|
 | `vultr-setup.sh` | Initial bare metal setup (hugepages, VFIO, tuning) |
-| `vultr-bind-nic.sh` | Bind/unbind NICs to DPDK driver |
 | `vultr-deploy.sh` | Build, install, and manage Oxidize server |
 
 ## Scaling
@@ -299,7 +276,7 @@ Configure in Cloudflare → Traffic → Load Balancing.
 │  │           Oxidize Server               │            │
 │  │  ┌─────────────────────────────────┐   │            │
 │  │  │ QUIC/UDP :4433                  │   │            │
-│  │  │ BBRv4 + ROHC + LZ4 + FEC + ML   │   │            │
+│  │  │ ROHC + LZ4 + FEC + ML           │   │            │
 │  │  └─────────────────────────────────┘   │            │
 │  │  ┌─────────────────────────────────┐   │            │
 │  │  │ Metrics :9090                   │   │            │

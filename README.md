@@ -64,9 +64,8 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **Kernel Bypass** - DPDK (100+ Gbps) and AF_XDP (10-40 Gbps) for bare metal
-- **AF_XDP Active** - Zero-copy packet I/O on bare metal (Vultr), saturates 10GbE NICs
-- **DPDK Ready** - Full DPDK implementation for future 100GbE upgrades
+- **Kernel Bypass** - AF_XDP for bare metal (10-40 Gbps, saturates 10GbE NICs)
+- **Zero-Copy I/O** - Direct packet access via AF_XDP on bare metal (Vultr)
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
@@ -403,7 +402,6 @@ enable_priority_scheduler = true
 | **Transport** | Connection Migration (WiFi↔LTE) | ✅ Implemented |
 | **Transport** | Multi-path Aggregation | ✅ Implemented |
 | **Kernel Bypass** | AF_XDP (10-40 Gbps) | ✅ Implemented |
-| **Kernel Bypass** | DPDK Ready (100+ Gbps) | ✅ Implemented |
 | **Compression** | LZ4 (~4 GB/s) | ✅ Implemented |
 | **Compression** | ROHC Headers (44% reduction) | ✅ Implemented |
 | **Compression** | Per-Connection Dictionaries | ✅ Implemented |
@@ -574,7 +572,7 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (Transformer, PPO, UCB1)
 - [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - Kernel bypass (DPDK/AF_XDP)
+- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - Kernel bypass (AF_XDP)
 - [VULTR_DEPLOYMENT.md](docs/VULTR_DEPLOYMENT.md) - Bare metal deployment guide
 - [ZERO-DOWNTIME.md](docs/ZERO-DOWNTIME.md) - Zero-downtime deployment
 
@@ -628,8 +626,7 @@ cargo bench --package oxidize-common
 ╔════════════════════════════════════════════════════════════════╗
 ║              KERNEL BYPASS BENCHMARKS                          ║
 ╠════════════════════════════════════════════════════════════════╣
-║ AF_XDP Mode:         10-40 Gbps (current - saturates 10GbE)    ║
-║ DPDK Mode:           100+ Gbps (when upgraded to 100GbE NIC)   ║
+║ AF_XDP Mode:         10-40 Gbps (saturates 10GbE NICs)         ║
 ║ Per-Packet Latency:  <1µs (P99)                                ║
 ║ Zero-Copy:           No memcpy in hot path                     ║
 ║ Lock-Free Rings:     SPSC queues, no contention                ║
@@ -637,11 +634,11 @@ cargo bench --package oxidize-common
 ║ CPU Pinning:         Dedicated cores per queue                 ║
 ║ NUMA Aware:          Memory allocation close to CPU            ║
 ║ Huge Pages:          1GB/2MB pages for minimal TLB misses      ║
-║ Auto-Selection:      DPDK → AF_XDP                             ║
+║ Auto-Selection:      AF_XDP when available                     ║
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
-> **Note:** Kernel bypass requires `--features kernel-bypass` and bare metal (Vultr).
+> **Note:** Kernel bypass (AF_XDP) is automatically enabled on Linux bare metal.
 > See [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) and [VULTR_DEPLOYMENT.md](docs/VULTR_DEPLOYMENT.md).
 
 ## Uninstall

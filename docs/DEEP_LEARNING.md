@@ -337,7 +337,7 @@ Training runs in a background thread and never blocks the packet path.
 If models aren't loaded, all components fall back to fast heuristics:
 
 - **Loss Predictor**: Exponential weighted moving average
-- **Congestion Controller**: BBRv3-inspired algorithm
+- **Congestion Controller**: Standard congestion avoidance
 - **Compression Oracle**: Entropy threshold + magic byte detection
 - **Path Selector**: Round-robin with availability check
 
