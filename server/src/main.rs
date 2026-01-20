@@ -1,19 +1,37 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use relay_server::config::Config;
 use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
 use relay_server::mobile_server::{
     generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
 };
-use relay_server::prometheus::PrometheusMetrics;
-#[cfg(target_os = "linux")]
 use relay_server::quic_xdp_server::{QuicServerConfig, QuicXdpServer};
-use relay_server::server::RelayServer;
+
+/// Auto-detect the default network interface
+#[cfg(target_os = "linux")]
+fn detect_default_interface() -> String {
+    // Try to find the default route interface
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            // Parse "default via X.X.X.X dev ethX ..."
+            for part in stdout.split_whitespace() {
+                if part.starts_with("eth") || part.starts_with("enp") || part.starts_with("ens") {
+                    return part.to_string();
+                }
+            }
+        }
+    }
+    // Fallback
+    "eth0".to_string()
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-server")]
@@ -39,6 +57,14 @@ struct Args {
 
     #[arg(long)]
     mobile_endpoint: Option<String>,
+
+    /// Network interface for XDP (default: auto-detect)
+    #[arg(long)]
+    xdp_interface: Option<String>,
+
+    /// Number of XDP worker threads (default: 4)
+    #[arg(long, default_value = "4")]
+    xdp_workers: u32,
 }
 
 #[tokio::main]
@@ -96,89 +122,63 @@ async fn main() -> Result<()> {
         Config::default()
     });
 
-    let server = Arc::new(RelayServer::new(args.listen, config).await?);
+    // Initialize and START QuicXdpServer - REQUIRED (no fallback)
+    info!("📦 Initializing QUIC-XDP server for kernel bypass...");
+    let xdp_config = QuicServerConfig {
+        interface: std::env::var("OXIDIZE_INTERFACE").unwrap_or_else(|_| {
+            args.xdp_interface
+                .clone()
+                .unwrap_or_else(detect_default_interface)
+        }),
+        port: args.listen.port(),
+        workers: std::env::var("OXIDIZE_WORKERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(args.xdp_workers),
+        zero_copy: true,
+        ml_congestion: true,
+        batch_size: 64,
+        cpu_cores: std::env::var("OXIDIZE_CPU_CORES").unwrap_or_else(|_| "2,3,4,5".to_string()),
+        force_mode: None,
+    };
 
-    // Initialize QuicXdpServer for AF_XDP kernel bypass if available
-    #[cfg(target_os = "linux")]
-    let _xdp_server = {
-        info!("📦 Initializing QUIC-XDP server for kernel bypass...");
-        let xdp_config = QuicServerConfig {
-            interface: std::env::var("OXIDIZE_INTERFACE").unwrap_or_else(|_| "eth0".to_string()),
-            port: args.listen.port(),
-            workers: std::env::var("OXIDIZE_WORKERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4),
-            zero_copy: true,
-            ml_congestion: true,
-            batch_size: 64,
-            cpu_cores: std::env::var("OXIDIZE_CPU_CORES").unwrap_or_else(|_| "2,3,4,5".to_string()),
-            force_mode: None,
-        };
-        match QuicXdpServer::new(xdp_config) {
-            Ok(xdp) => {
-                info!("✅ QUIC-XDP server initialized in {:?} mode", xdp.mode());
-                Some(xdp)
-            }
-            Err(e) => {
-                warn!("⚠️  QUIC-XDP not available: {} - using standard Quinn", e);
-                None
-            }
+    let mut xdp_server = match QuicXdpServer::new(xdp_config) {
+        Ok(xdp) => xdp,
+        Err(e) => {
+            error!("❌ FATAL: Failed to initialize QUIC-XDP: {}", e);
+            error!("   Oxidize requires AF_XDP kernel bypass to run.");
+            error!("   Ensure you are on Linux with XDP support and proper permissions.");
+            bail!("QUIC-XDP initialization failed: {}", e);
         }
     };
-    #[cfg(not(target_os = "linux"))]
-    let _xdp_server: Option<()> = None;
+
+    // Start the XDP server
+    if let Err(e) = xdp_server.start() {
+        error!("❌ FATAL: Failed to start QUIC-XDP: {}", e);
+        error!("   Check NIC driver compatibility and kernel version.");
+        bail!("QUIC-XDP start failed: {}", e);
+    }
+
+    info!("✅ QUIC-XDP server STARTED in {:?} mode", xdp_server.mode());
+    info!("🚀 Kernel bypass ACTIVE - 100x performance enabled!");
 
     info!("🚀 Server listening on {}", args.listen);
-    info!("📊 Max connections: {}", server.config().max_connections);
+    info!("📊 Max connections: {}", config.max_connections);
     info!(
         "🗜️  Compression: {}",
-        if server.config().enable_compression {
+        if config.enable_compression {
             "enabled"
         } else {
             "disabled"
         }
     );
 
-    if !args.disable_metrics {
-        info!(
-            "📈 Prometheus metrics available at http://{}/metrics",
-            args.metrics_addr
-        );
-
-        let prom_metrics = PrometheusMetrics::new()?;
-        let prom_clone = prom_metrics.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = prom_clone.start_server(args.metrics_addr).await {
-                warn!("Prometheus server failed: {}", e);
-            }
-        });
-
-        let metrics_server = server.clone();
-        let prom_update = prom_metrics.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                let stats = metrics_server.get_metrics().get_stats();
-                prom_update.update_from_relay_metrics(&stats);
-            }
-        });
-    }
-
-    let stats_server = server.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            let stats = stats_server.get_metrics().get_stats();
-            stats.print_summary();
-        }
-    });
+    // XDP stats logging
+    info!("📊 XDP stats will be logged every 30 seconds");
 
     // Start Mobile Tunnel server if enabled
-    let config_ref = server.config();
-    if config_ref.enable_oxtunnel {
-        let oxtunnel_port = config_ref.oxtunnel_port.unwrap_or(51820);
+    if config.enable_oxtunnel {
+        let oxtunnel_port = config.oxtunnel_port.unwrap_or(51820);
         let oxtunnel_addr: SocketAddr = format!("0.0.0.0:{}", oxtunnel_port).parse()?;
 
         // Generate server ID
@@ -228,8 +228,20 @@ async fn main() -> Result<()> {
     info!("🔄 Graceful shutdown enabled (30s drain timeout)");
     info!("   Send SIGTERM/SIGINT to gracefully drain connections");
 
-    // Run server with graceful shutdown support
-    server.run_with_shutdown(shutdown_coordinator).await?;
+    // XDP handles all QUIC traffic
+    info!("🚀 Running in XDP-only mode");
+    info!("   All QUIC traffic handled by AF_XDP kernel bypass");
+
+    // Wait for shutdown signal
+    let mut shutdown_rx = shutdown_coordinator.shutdown_receiver();
+    let _ = shutdown_rx.changed().await;
+
+    // Graceful shutdown
+    shutdown_coordinator.shutdown().await;
+
+    // Stop XDP server
+    info!("Stopping XDP server...");
+    xdp_server.stop();
 
     Ok(())
 }

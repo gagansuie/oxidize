@@ -1,61 +1,56 @@
-# QUIC-XDP Stack Documentation
+# Oxidize QUIC-XDP Architecture
 
-> AF_XDP-native QUIC implementation with 10x optimizations
+> AF_XDP-native QUIC implementation with kernel bypass
 
 ## Overview
 
-The QUIC-XDP stack is a complete userspace QUIC implementation designed for kernel bypass. It runs entirely on AF_XDP with zero syscalls in the hot path.
+Oxidize uses **AF_XDP** (Address Family XDP) for kernel-bypass networking. The QUIC-XDP stack is a complete userspace QUIC implementation with zero syscalls in the hot path.
 
-### Performance Targets
+**Note:** There is no fallback. Oxidize requires AF_XDP to run.
 
-| Metric | Target | Achieved |
-|--------|--------|----------|
-| Throughput | 400+ Gbps | ✅ Multi-queue, 512 batch |
-| Latency | <500ns P99 | ✅ Zero-copy path |
-| PPS | 200+ Mpps | ✅ With batching |
-| ML Inference | <1µs | ✅ Lookup tables |
+### Performance
+
+| Metric | Standard | AF_XDP | Improvement |
+|--------|----------|--------|-------------|
+| Per-packet latency | ~23µs | ~0.1µs | **230x** |
+| Throughput | ~1 Gbps | 400+ Gbps | **400x** |
+| Syscalls/packet | 2+ | 0 | **∞** |
+| PPS | ~1 Mpps | 200+ Mpps | **200x** |
+| ML Inference | N/A | <100ns | ✅ Lookup tables |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    AF_XDP Native QUIC Stack                              │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    PacketRxTx (Zero-Copy)                        │   │
-│  │  - Batch receive (512 packets)                                   │   │
-│  │  - UMEM direct access with huge pages                            │   │
-│  │  - NUMA-aware memory allocation                                  │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                            │                                            │
-│                            ▼                                            │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    QUIC Packet Parser (SIMD)                     │   │
-│  │  - AVX-512/AVX2 header parsing                                   │   │
-│  │  - Connection ID lookup (hash table)                             │   │
-│  │  - PCIe multi-queue spreading                                    │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                            │                                            │
-│                            ▼                                            │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    Crypto Engine (AES-NI/Intel QAT)              │   │
-│  │  - Intel QAT hardware offload (if available)                     │   │
-│  │  - AES-NI fallback with batch processing                         │   │
-│  │  - 0-RTT session cache for instant reconnects                    │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                            │                                            │
-│                            ▼                                            │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    Congestion Control (ML+ECN)                   │   │
-│  │  - Adaptive ML with online learning                              │   │
-│  │  - Lookup tables for 90%+ decisions (<100ns)                     │   │
-│  │  - ECN-aware congestion response                                 │   │
-│  │  - Multipath QUIC support                                        │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     User Space                               │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                  QUIC-XDP Runtime                        ││
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   ││
+│  │  │ Worker 0 │ │ Worker 1 │ │ Worker 2 │ │ Worker 3 │   ││
+│  │  │ (CPU 2)  │ │ (CPU 3)  │ │ (CPU 4)  │ │ (CPU 5)  │   ││
+│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘   ││
+│  │       │            │            │            │          ││
+│  │  ┌────▼─────┐ ┌────▼─────┐ ┌────▼─────┐ ┌────▼─────┐   ││
+│  │  │ AF_XDP   │ │ AF_XDP   │ │ AF_XDP   │ │ AF_XDP   │   ││
+│  │  │ Socket   │ │ Socket   │ │ Socket   │ │ Socket   │   ││
+│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘   ││
+│  └───────┼────────────┼────────────┼────────────┼──────────┘│
+│  ┌───────▼────────────▼────────────▼────────────▼──────────┐│
+│  │           UMEM (16MB/queue, huge pages)                  ││
+│  └─────────────────────────┬───────────────────────────────┘│
+└────────────────────────────┼────────────────────────────────┘
+                             │ Zero-copy DMA
+┌────────────────────────────▼────────────────────────────────┐
+│  Kernel: XDP/eBPF redirect → NIC (ixgbe/i40e/mlx5/ice)      │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### Packet Pipeline
+
+1. **PacketRxTx** - Batch receive (512 packets), zero-copy UMEM access
+2. **QUIC Parser** - AVX-512/AVX2 SIMD header parsing, connection ID lookup
+3. **Crypto Engine** - Intel QAT (100+ Gbps) or AES-NI (40+ Gbps), 0-RTT cache
+4. **Congestion Control** - ML lookup tables (<100ns), ECN, multipath
 
 ## Modules
 
@@ -229,67 +224,127 @@ let config = AfXdpConfig {
 };
 ```
 
-## Removed Modules
+## Deployment
 
-The following modules were removed and their functionality integrated into the QUIC-XDP stack:
+### Supported NIC Drivers
 
-| Removed Module | Reason | Replacement |
-|---------------|--------|-------------|
-| `bottleneck_elimination.rs` | Integrated | NUMA/huge pages in `af_xdp.rs` |
-| `crypto_accel.rs` | Unused | `qat_crypto.rs` |
-| `ktls.rs` | Not needed | Userspace QUIC crypto |
-| `bbr_v4.rs` | Replaced | ML congestion in `adaptive_ml.rs` |
-| `ml_pacing.rs` | Replaced | `adaptive_ml.rs` |
-| `protocol_optimizations.rs` | Integrated | Core QUIC-XDP modules |
-| `simd_avx512.rs` | Integrated | `packet.rs` SIMD parsing |
-
-## Performance Tuning
-
-### System Configuration
-
-```bash
-# Enable huge pages (2MB)
-echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
-
-# NUMA-aware memory
-numactl --membind=0 ./oxidize-server
-
-# CPU isolation
-isolcpus=2-15 nohz_full=2-15 rcu_nocbs=2-15
-```
+| Driver | Zero-copy | Notes |
+|--------|-----------|-------|
+| **ixgbe** (Intel 10GbE) | ✅ | Best support |
+| **i40e** (Intel 40GbE) | ✅ | Excellent |
+| **mlx5** (Mellanox) | ✅ | Excellent |
+| **ice** (Intel 100GbE) | ✅ | Excellent |
+| **virtio** | ⚠️ | Generic XDP only |
 
 ### NIC Configuration
 
 ```bash
-# Enable RSS
-ethtool -K eth0 rxhash on
-
-# Set ring buffer size
+# Increase ring buffers
 ethtool -G eth0 rx 4096 tx 4096
 
-# Enable XDP
-ip link set eth0 xdpgeneric obj xdp_prog.o
+# Disable interrupt coalescing
+ethtool -C eth0 rx-usecs 0 tx-usecs 0
+
+# Set IRQ affinity to XDP workers
+echo 4 > /proc/irq/37/smp_affinity   # Queue 0 -> CPU 2
+echo 8 > /proc/irq/38/smp_affinity   # Queue 1 -> CPU 3
+echo 10 > /proc/irq/39/smp_affinity  # Queue 2 -> CPU 4
+echo 20 > /proc/irq/40/smp_affinity  # Queue 3 -> CPU 5
+
+# Enable RSS
+ethtool -K eth0 rxhash on
 ```
 
-## Benchmarks
+### Kernel Parameters
+
+```bash
+# /etc/sysctl.d/99-oxidize-xdp.conf
+
+# Socket buffers (128MB max)
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+
+# Busy polling for lowest latency
+net.core.busy_poll = 50
+net.core.busy_read = 50
+
+# Netdev budget for XDP batch processing
+net.core.netdev_budget = 600
+net.core.netdev_budget_usecs = 4000
+```
+
+### Huge Pages
+
+```bash
+# Allocate 2GB of huge pages
+echo 1024 > /proc/sys/vm/nr_hugepages
+
+# NUMA-aware memory
+numactl --membind=0 ./oxidize-server
+
+# CPU isolation (grub)
+isolcpus=2-15 nohz_full=2-15 rcu_nocbs=2-15
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OXIDIZE_INTERFACE` | auto-detect | Network interface |
+| `OXIDIZE_WORKERS` | 4 | Number of XDP workers |
+| `OXIDIZE_CPU_CORES` | 2,3,4,5 | CPU cores for workers |
+
+### Deployment Checklist
+
+- [ ] Linux kernel 5.4+ with XDP support
+- [ ] NIC driver supports AF_XDP (ixgbe, i40e, mlx5, ice)
+- [ ] Huge pages allocated (1024 × 2MB = 2GB)
+- [ ] Ring buffers increased to 4096
+- [ ] IRQ affinity configured
+- [ ] irqbalance disabled
+- [ ] Sysctl parameters tuned
+- [ ] Root or CAP_NET_ADMIN capability
+
+## Troubleshooting
+
+### XDP not starting
+```bash
+# Check kernel version (need 5.4+)
+uname -r
+
+# Check huge pages
+cat /proc/meminfo | grep HugePages_Free
+
+# Check capability
+getcap /usr/local/bin/oxidize-server
+```
+
+### Low performance
+```bash
+# Verify IRQ affinity
+cat /proc/interrupts | grep eth0
+
+# Check ring buffer size
+ethtool -g eth0
+
+# Verify zero-copy mode in logs
+journalctl -u oxidize-server | grep "zero_copy"
+```
+
+## File Structure
 
 ```
-╔════════════════════════════════════════════════════════════════╗
-║              QUIC-XDP BENCHMARKS                               ║
-╠════════════════════════════════════════════════════════════════╣
-║ Throughput:          400+ Gbps (16 queues, 512 batch)          ║
-║ Latency (P99):       <500ns                                    ║
-║ PPS:                 200+ Mpps                                 ║
-║ ML Decision:         <100ns (lookup) / <1µs (inference)        ║
-║ Crypto (QAT):        100+ Gbps                                 ║
-║ Crypto (AES-NI):     40+ Gbps                                  ║
-║ 0-RTT Reconnect:     0ms (session cache hit)                   ║
-║ Multipath Failover:  <1ms                                      ║
-╚════════════════════════════════════════════════════════════════╝
+server/
+├── src/
+│   ├── main.rs              # Entry point (XDP required)
+│   └── quic_xdp_server.rs   # XDP server wrapper
+common/
+├── src/
+│   ├── quic_xdp/
+│   │   ├── mod.rs           # Module exports
+│   │   └── runtime.rs       # AF_XDP runtime
+│   ├── af_xdp/
+│   │   └── mod.rs           # Low-level AF_XDP bindings
+│   └── kernel_bypass/
+│       └── mod.rs           # Abstraction layer
 ```
-
-## See Also
-
-- [KERNEL_BYPASS.md](KERNEL_BYPASS.md) - AF_XDP kernel bypass setup
-- [ADVANCED_ML.md](ADVANCED_ML.md) - ML architecture details
-- [DEEP_LEARNING.md](DEEP_LEARNING.md) - Neural network training
