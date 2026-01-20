@@ -625,11 +625,13 @@ impl RelayServer {
                     trace!("Datagram received: {} bytes", datagram.len());
                     metrics.record_received(datagram.len() as u64);
 
-                    // Parse minimal header: connection_id (8) + sequence (8) + payload
-                    if datagram.len() < 16 {
+                    // Parse header: connection_id (8) + sequence (8) + compressed_flag (1) + payload
+                    if datagram.len() < 17 {
                         trace!("Datagram too small ({}), skipping", datagram.len());
                         continue;
                     }
+
+                    let compressed_flag = datagram[16];
 
                     // Update ML engine with network telemetry (10x optimized)
                     #[allow(clippy::manual_is_multiple_of)]
@@ -672,12 +674,33 @@ impl RelayServer {
                     }
 
                     // Use the datagram_conn_id for response routing (ignore client's conn_id)
-                    // Sequence is bytes 8-16 (unused for now, could track for stats)
-                    let payload = &datagram[16..];
+                    // Header: conn_id (8) + sequence (8) + compressed (1) = 17 bytes
+                    let raw_payload = &datagram[17..];
+
+                    // Decompress if needed
+                    let payload = if compressed_flag == 1 {
+                        match oxidize_common::decompress_data(raw_payload) {
+                            Ok(decompressed) => {
+                                trace!(
+                                    "Decompressed {} -> {} bytes",
+                                    raw_payload.len(),
+                                    decompressed.len()
+                                );
+                                decompressed
+                            }
+                            Err(e) => {
+                                trace!("Decompression failed: {}, using raw", e);
+                                raw_payload.to_vec()
+                            }
+                        }
+                    } else {
+                        raw_payload.to_vec()
+                    };
+
                     trace!("Forwarding payload: {} bytes", payload.len());
 
                     // Forward directly to destination - no framing overhead
-                    if let Err(e) = forwarder.forward(datagram_conn_id, payload.to_vec()).await {
+                    if let Err(e) = forwarder.forward(datagram_conn_id, payload).await {
                         trace!("Datagram forward error: {}", e);
                         loss_count += 1;
                     }

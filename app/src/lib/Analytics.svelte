@@ -112,15 +112,26 @@
             storedData.totalBytes += bytesDelta;
         }
 
+        // Calculate time saved: (direct - relay) * packets
+        // Only count if relay is actually faster than direct
         if (
             point.direct_latency_ms > 0 &&
             point.latency_ms > 0 &&
+            point.latency_ms < point.direct_latency_ms &&
             packetsDelta > 0
         ) {
             const timeSaved =
                 (point.direct_latency_ms - point.latency_ms) * packetsDelta;
-            storedData.totalTimeSaved += Math.max(0, timeSaved);
+            storedData.totalTimeSaved += timeSaved;
         }
+
+        // Debug: log latency values to console
+        console.log("recordSession:", {
+            direct: point.direct_latency_ms,
+            relay: point.latency_ms,
+            packets: packetsDelta,
+            totalTimeSaved: storedData.totalTimeSaved,
+        });
 
         // ML metrics now come from backend - no simulation needed
 
@@ -480,6 +491,11 @@
                         >{formatMs(storedData.totalTimeSaved)}</span
                     >
                     <span class="time-saved-label">Total latency saved</span>
+                    {#if storedData.totalTimeSaved === 0 && storedData.history.length > 0}
+                        <span class="time-saved-note"
+                            >Relay adds routing overhead</span
+                        >
+                    {/if}
                 </div>
             </div>
         </div>
@@ -1431,6 +1447,12 @@
     .time-saved-label {
         font-size: 0.75rem;
         color: #888;
+    }
+
+    .time-saved-note {
+        font-size: 0.65rem;
+        color: #666;
+        font-style: italic;
     }
 
     /* ML Cards */

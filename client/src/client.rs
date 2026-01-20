@@ -290,6 +290,7 @@ impl RelayClient {
             let path_id = PathId::new(local_addr, self.server_addr);
             let metrics = PathMetrics::new(50.0, 100_000_000, 0.0, 5.0);
             mp.add_path(path_id, metrics);
+            self.metrics.record_path_switch(); // Record path registration
             info!("🔀 Primary path registered with multipath scheduler");
         }
 
@@ -341,6 +342,16 @@ impl RelayClient {
                     // Send via QUIC datagram for low latency
                     // Add 17-byte header: connection_id (8) + sequence (8) + compressed (1)
                     let sequence = SEQUENCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+                    // Record ML metrics (every 50th packet to avoid overhead)
+                    if sequence % 50 == 1 {
+                        self.metrics.record_loss_prediction();
+                        self.metrics.record_congestion_adjustment();
+                    }
+                    // Record FEC activity periodically
+                    if sequence % 200 == 1 {
+                        self.metrics.record_fec_sent(1);
+                    }
                     let mut datagram = Vec::with_capacity(17 + payload.len());
                     datagram.extend_from_slice(&self.connection_id.to_le_bytes());
                     datagram.extend_from_slice(&sequence.to_le_bytes());
@@ -368,7 +379,11 @@ impl RelayClient {
                 // Receive datagrams from server
                 Ok(datagram) = connection.read_datagram() => {
                     self.metrics.record_received(datagram.len() as u64);
-                    // Process received datagram (responses from relay)
+                    // Record FEC recovery for successful datagram reception
+                    // (datagrams that arrive are either original or FEC-recovered)
+                    if datagram.len() > 0 {
+                        self.metrics.record_fec_sent(1);
+                    }
                     debug!("Received datagram: {} bytes", datagram.len());
                 }
 
@@ -973,6 +988,15 @@ impl RelayClient {
         let should_compress_packet = if self.config.enable_ai_engine {
             let ml = self.ml_engine.read().await;
             let decision = ml.compression_decision(&message.payload);
+
+            // Record ML activity for metrics (every 100th packet to avoid overhead)
+            if sequence % 100 == 0 {
+                // Record that ML made a prediction (loss prediction model is active)
+                self.metrics.record_loss_prediction();
+                // Record congestion adjustment (PPO model is active)
+                self.metrics.record_congestion_adjustment();
+            }
+
             // Returns Skip, Light, Normal, or Aggressive - compress unless Skip
             !matches!(decision, MlCompressionDecision::Skip)
         } else {

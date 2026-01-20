@@ -65,6 +65,8 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub original_ip: Mutex<Option<String>>,
     pub direct_latency_ms: Mutex<Option<u32>>,
+    pub cached_relay_latency: Mutex<Option<u32>>,
+    pub last_latency_check: Mutex<Option<std::time::Instant>>,
 }
 
 // Relay server endpoint (used for ping test)
@@ -124,8 +126,8 @@ pub async fn connect(
         *orig_ip = original_ip.clone();
     }
 
-    // Measure direct latency BEFORE connecting (for latency comparison)
-    let direct_latency = ping_relay().await.ok();
+    // Measure direct latency BEFORE connecting (baseline internet latency to Cloudflare)
+    let direct_latency = ping_direct().await.ok();
     {
         let mut direct_lat = state.direct_latency_ms.lock().await;
         *direct_lat = direct_latency;
@@ -262,14 +264,76 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
 
     // Get stored original IP and direct latency from state
     let original_ip = state.original_ip.lock().await.clone();
-    let direct_latency_ms = *state.direct_latency_ms.lock().await;
+
+    // Get or measure direct latency (baseline to Cloudflare)
+    let direct_latency_ms = {
+        let cached = *state.direct_latency_ms.lock().await;
+        if cached.is_some() {
+            cached
+        } else {
+            // Measure baseline latency - use longer timeout since this is important
+            match tokio::time::timeout(std::time::Duration::from_millis(1500), ping_direct()).await
+            {
+                Ok(Ok(l)) => {
+                    let mut direct_lat = state.direct_latency_ms.lock().await;
+                    *direct_lat = Some(l);
+                    tracing::debug!("Direct latency measured: {}ms", l);
+                    Some(l)
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Direct ping failed: {}", e);
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!("Direct ping timed out");
+                    None
+                }
+            }
+        }
+    };
 
     if connected {
         // Fetch the relay server's external IP (this is what UDP traffic appears as)
         let server_ip = get_server_ip().await.ok();
 
-        // Measure current relay latency
-        let relay_latency = ping_relay().await.ok();
+        // Use cached latency, refresh every 5 seconds OR if cache is empty
+        let relay_latency = {
+            let last_check = *state.last_latency_check.lock().await;
+            let cached = *state.cached_relay_latency.lock().await;
+
+            // Force refresh if cache is empty or every 5 seconds
+            let should_refresh = cached.is_none()
+                || match last_check {
+                    Some(t) => t.elapsed().as_secs() >= 5,
+                    None => true,
+                };
+
+            if should_refresh {
+                // Try to get latency with reasonable timeout
+                match tokio::time::timeout(std::time::Duration::from_millis(1500), ping_relay())
+                    .await
+                {
+                    Ok(Ok(l)) => {
+                        let mut cached_mut = state.cached_relay_latency.lock().await;
+                        let mut last_check_mut = state.last_latency_check.lock().await;
+                        *cached_mut = Some(l);
+                        *last_check_mut = Some(std::time::Instant::now());
+                        tracing::debug!("Relay latency measured: {}ms", l);
+                        Some(l)
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("Relay ping failed: {}", e);
+                        cached // Return cached value if available
+                    }
+                    Err(_) => {
+                        tracing::warn!("Relay ping timed out");
+                        cached // Return cached value if available
+                    }
+                }
+            } else {
+                cached
+            }
+        };
 
         return Ok(ConnectionStatus {
             connected: true,
@@ -508,57 +572,70 @@ pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Ping relay using UDP socket timing (compatible with QUIC server)
+/// Ping a reference endpoint (Cloudflare) to measure baseline internet latency
+async fn ping_direct() -> Result<u32, String> {
+    use std::time::Instant;
+    use tokio::net::TcpStream;
+
+    let start = Instant::now();
+
+    // Try to connect to Cloudflare DNS (1.1.1.1:443) as baseline
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(1000),
+        TcpStream::connect("1.1.1.1:443"),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(_)) => {
+            let latency = start.elapsed().as_millis() as u32;
+            Ok(latency.max(1))
+        }
+        Ok(Err(e)) => Err(format!("Connect failed: {}", e)),
+        Err(_) => Err("Timeout".to_string()),
+    }
+}
+
+/// Ping relay by measuring TCP connect time (reliable method)
 #[tauri::command]
 pub async fn ping_relay() -> Result<u32, String> {
     use std::time::Instant;
-    use tokio::net::UdpSocket;
+    use tokio::net::TcpStream;
 
+    // Resolve the relay host
     let server_addr: SocketAddr = format!("{}:{}", RELAY_HOST, RELAY_PORT)
         .to_socket_addrs()
         .map_err(|e| format!("Failed to resolve: {}", e))?
         .next()
         .ok_or_else(|| "No address found".to_string())?;
 
-    // Use UDP socket to measure RTT - send a small packet and measure response time
-    // This works with QUIC servers since QUIC is UDP-based
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
-
-    socket
-        .connect(server_addr)
-        .await
-        .map_err(|e| format!("Failed to connect: {}", e))?;
-
-    // Send a minimal QUIC-like initial packet (version negotiation trigger)
-    // The server will respond with version negotiation or initial packet
     let start = Instant::now();
-    let probe_packet = [0u8; 1200]; // Minimum QUIC packet size
 
-    if let Err(e) = socket.send(&probe_packet).await {
-        tracing::warn!("UDP send failed: {}", e);
-        return Err(format!("Send failed: {}", e));
-    }
+    // Try TCP connect - even if it fails/resets, we get RTT measurement
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(2000),
+        TcpStream::connect(server_addr),
+    )
+    .await;
 
-    // Wait for any response (or timeout)
-    let mut buf = [0u8; 2048];
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(2), socket.recv(&mut buf)).await;
-
-    let latency = match result {
+    match result {
         Ok(Ok(_)) => {
-            // Got a response - measure RTT
-            start.elapsed().as_millis() as u32
+            // Connection succeeded
+            let latency = start.elapsed().as_millis() as u32;
+            Ok(latency.max(1))
         }
-        Ok(Err(_)) | Err(_) => {
-            // No response, but we can still estimate based on send time
-            // Use half the elapsed time as an estimate
-            (start.elapsed().as_millis() / 2).max(1) as u32
+        Ok(Err(_)) => {
+            // Connection refused/reset - but we still got a response, so RTT is valid
+            let latency = start.elapsed().as_millis() as u32;
+            if latency < 1000 {
+                // Got a quick rejection = we have RTT
+                Ok(latency.max(1))
+            } else {
+                Err("Connection failed".to_string())
+            }
         }
-    };
-
-    Ok(latency)
+        Err(_) => Err("Timeout".to_string()),
+    }
 }
 
 #[tauri::command]

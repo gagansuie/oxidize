@@ -85,14 +85,23 @@ impl SharedForwarder {
     async fn response_listener(self: Arc<Self>) {
         let mut buf = vec![0u8; 65536];
         info!("Response listener started");
+        let mut response_count: u64 = 0;
+        let mut last_log = std::time::Instant::now();
 
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((len, src_addr)) => {
+                    response_count += 1;
                     self.stats.packets_received.fetch_add(1, Ordering::Relaxed);
                     self.stats
                         .bytes_received
                         .fetch_add(len as u64, Ordering::Relaxed);
+
+                    // Log periodically to see if we're receiving responses
+                    if last_log.elapsed().as_secs() >= 10 {
+                        info!("📥 Forwarder received {} responses total", response_count);
+                        last_log = std::time::Instant::now();
+                    }
 
                     // Look up which connection this response belongs to
                     let mapping = {
@@ -117,7 +126,14 @@ impl SharedForwarder {
                                     "Failed to send response to conn {}: {}",
                                     mapping.conn_id, e
                                 );
+                            } else {
+                                debug!(
+                                    "✅ Routed {} bytes response to conn {}",
+                                    len, mapping.conn_id
+                                );
                             }
+                        } else {
+                            debug!("No channel for conn {}", mapping.conn_id);
                         }
                     } else {
                         debug!("No mapping for response from {}", src_addr);
@@ -257,11 +273,18 @@ impl SharedForwarder {
                     let payload = &packet[payload_offset..];
                     match self.socket.send_to(payload, dst_addr).await {
                         Ok(n) => {
-                            self.stats.packets_forwarded.fetch_add(1, Ordering::Relaxed);
+                            let count =
+                                self.stats.packets_forwarded.fetch_add(1, Ordering::Relaxed);
                             self.stats
                                 .bytes_forwarded
                                 .fetch_add(n as u64, Ordering::Relaxed);
-                            debug!("UDP: {} bytes to {}", n, dst_addr);
+                            // Log every 1000th packet to see forwarding activity
+                            if count % 1000 == 0 {
+                                info!(
+                                    "📤 Forwarded {} UDP packets (latest: {} bytes to {})",
+                                    count, n, dst_addr
+                                );
+                            }
                         }
                         Err(e) => {
                             self.stats.forward_errors.fetch_add(1, Ordering::Relaxed);
