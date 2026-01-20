@@ -42,6 +42,7 @@ pub struct TransformerModel {
     ff1: Linear,
     ff2: Linear,
     pred_head: Linear,
+    #[allow(dead_code)]
     device: Device,
 }
 
@@ -193,9 +194,7 @@ impl TransformerTrainer {
                 // Get features and pad to d_model
                 let features = sample.to_features();
                 inputs.extend_from_slice(&features);
-                for _ in features.len()..self.d_model {
-                    inputs.push(0.0);
-                }
+                inputs.resize(inputs.len() + self.d_model - features.len(), 0.0);
             }
             targets.push(samples[start + self.seq_len - 1].future_loss);
         }
@@ -324,8 +323,10 @@ pub struct PpoTrainer {
     gamma: f32,        // Discount factor
     gae_lambda: f32,   // GAE lambda
     clip_epsilon: f32, // PPO clip range
-    value_coef: f32,   // Value loss coefficient
-    entropy_coef: f32, // Entropy bonus coefficient
+    #[allow(dead_code)]
+    value_coef: f32, // Value loss coefficient (for future entropy regularization)
+    #[allow(dead_code)]
+    entropy_coef: f32, // Entropy bonus coefficient (for future exploration)
 
     // Training state
     training_loss: f32,
@@ -420,12 +421,12 @@ impl PpoTrainer {
             gae = delta + self.gamma * self.gae_lambda * gae;
             advantages[i] = gae;
         }
-        let advantages_t = Tensor::from_vec(advantages, batch_size, &self.device)?;
+        let _advantages_t = Tensor::from_vec(advantages, batch_size, &self.device)?;
 
         // Get current policy output
         let actor_out = self.model.actor_forward(&states_t)?;
         let mean = actor_out.narrow(1, 0, 1)?;
-        let log_std = actor_out.narrow(1, 1, 1)?;
+        let _log_std = actor_out.narrow(1, 1, 1)?;
 
         // Simplified PPO: actor loss = -mean * advantage, critic loss = MSE
         // Get value predictions

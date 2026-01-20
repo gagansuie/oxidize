@@ -512,15 +512,13 @@ impl MiniTransformer {
                         self.d_model,
                     );
                 }
-            } else if name.contains("pred") {
-                if !weights.is_empty() {
-                    self.pred_head = QuantizedLinear::new(
-                        &weights[..self.d_model.min(weights.len())],
-                        &[weights.get(self.d_model).copied().unwrap_or(0.0)],
-                        self.d_model,
-                        1,
-                    );
-                }
+            } else if name.contains("pred") && !weights.is_empty() {
+                self.pred_head = QuantizedLinear::new(
+                    &weights[..self.d_model.min(weights.len())],
+                    &[weights.get(self.d_model).copied().unwrap_or(0.0)],
+                    self.d_model,
+                    1,
+                );
             }
         }
 
