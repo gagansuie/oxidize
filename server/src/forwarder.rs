@@ -279,7 +279,7 @@ impl SharedForwarder {
                                 .bytes_forwarded
                                 .fetch_add(n as u64, Ordering::Relaxed);
                             // Log every 1000th packet to see forwarding activity
-                            if count % 1000 == 0 {
+                            if count.is_multiple_of(1000) {
                                 info!(
                                     "📤 Forwarded {} UDP packets (latest: {} bytes to {})",
                                     count, n, dst_addr

@@ -381,7 +381,7 @@ impl RelayClient {
                     self.metrics.record_received(datagram.len() as u64);
                     // Record FEC recovery for successful datagram reception
                     // (datagrams that arrive are either original or FEC-recovered)
-                    if datagram.len() > 0 {
+                    if !datagram.is_empty() {
                         self.metrics.record_fec_sent(1);
                     }
                     debug!("Received datagram: {} bytes", datagram.len());
@@ -990,7 +990,7 @@ impl RelayClient {
             let decision = ml.compression_decision(&message.payload);
 
             // Record ML activity for metrics (every 100th packet to avoid overhead)
-            if sequence % 100 == 0 {
+            if sequence.is_multiple_of(100) {
                 // Record that ML made a prediction (loss prediction model is active)
                 self.metrics.record_loss_prediction();
                 // Record congestion adjustment (PPO model is active)
