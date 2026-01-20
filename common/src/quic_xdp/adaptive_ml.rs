@@ -702,8 +702,14 @@ impl AdaptiveMlEngine {
         let weights = self.cwnd_weights.read().unwrap();
 
         if weights.is_empty() {
-            // Fall back to base inference
-            return self.infer_cwnd_live(rtt_us, loss_rate, bandwidth_mbps);
+            // Fall back to BDP-based CWND (no recursion to avoid stack overflow)
+            let rtt_sec = rtt_us as f64 / 1_000_000.0;
+            let bw_bytes = bandwidth_mbps * 125_000.0;
+            let bdp = (bw_bytes * rtt_sec) as u64;
+            let loss_factor = 1.0 - (loss_rate as f64).min(0.5);
+            return ((bdp as f64 * loss_factor) as u64)
+                .max(4 * 1460)
+                .min(128 * 1024 * 1024);
         }
 
         // Simple weighted sum
