@@ -11,7 +11,6 @@
     interface HistoricalDataPoint {
         timestamp: number;
         latency_ms: number;
-        direct_latency_ms: number;
         bytes_transferred: number;
         compression_saved: number;
         packets: number;
@@ -22,7 +21,6 @@
         history: HistoricalDataPoint[];
         totalSessions: number;
         totalBytes: number;
-        totalTimeSaved: number;
         firstUsed: number;
     }
 
@@ -33,7 +31,6 @@
         history: [],
         totalSessions: 0,
         totalBytes: 0,
-        totalTimeSaved: 0,
         firstUsed: Date.now(),
     });
 
@@ -98,7 +95,6 @@
         const point: HistoricalDataPoint = {
             timestamp: Date.now(),
             latency_ms: status.latency_ms ?? 0,
-            direct_latency_ms: status.direct_latency_ms ?? 0,
             bytes_transferred: bytesDelta > 0 ? bytesDelta : currentBytes,
             compression_saved: status.compression_saved,
             packets: packetsDelta > 0 ? packetsDelta : currentPackets,
@@ -111,29 +107,6 @@
         if (bytesDelta > 0) {
             storedData.totalBytes += bytesDelta;
         }
-
-        // Calculate time saved: (direct - relay) * packets
-        // Only count if relay is actually faster than direct
-        if (
-            point.direct_latency_ms > 0 &&
-            point.latency_ms > 0 &&
-            point.latency_ms < point.direct_latency_ms &&
-            packetsDelta > 0
-        ) {
-            const timeSaved =
-                (point.direct_latency_ms - point.latency_ms) * packetsDelta;
-            storedData.totalTimeSaved += timeSaved;
-        }
-
-        // Debug: log latency values to console
-        console.log("recordSession:", {
-            direct: point.direct_latency_ms,
-            relay: point.latency_ms,
-            packets: packetsDelta,
-            totalTimeSaved: storedData.totalTimeSaved,
-        });
-
-        // ML metrics now come from backend - no simulation needed
 
         saveStoredData();
     }
@@ -193,13 +166,6 @@
         return `${s}s`;
     }
 
-    function formatMs(ms: number): string {
-        if (ms >= 3600000) return (ms / 3600000).toFixed(1) + "h";
-        if (ms >= 60000) return (ms / 60000).toFixed(1) + "m";
-        if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
-        return ms.toFixed(0) + "ms";
-    }
-
     function calcCompressionRatio(): string {
         const total = status.bytes_sent + status.bytes_received;
         if (total === 0 || status.compression_saved === 0) return "0%";
@@ -209,19 +175,6 @@
         return ratio.toFixed(1) + "%";
     }
 
-    function calcLatencyImprovement(): {
-        diff: number;
-        percent: number;
-        improved: boolean;
-    } | null {
-        if (status.latency_ms == null || status.direct_latency_ms == null)
-            return null;
-        if (status.direct_latency_ms === 0) return null;
-        const diff = status.direct_latency_ms - status.latency_ms;
-        const percent = Math.round((diff / status.direct_latency_ms) * 100);
-        return { diff, percent: Math.abs(percent), improved: diff > 0 };
-    }
-
     function getDaysSinceStart(): number {
         return Math.max(
             1,
@@ -229,23 +182,6 @@
                 (Date.now() - storedData.firstUsed) / (24 * 60 * 60 * 1000),
             ),
         );
-    }
-
-    function getAverageLatencyImprovement(): number {
-        const validPoints = storedData.history.filter(
-            (p) => p.direct_latency_ms > 0 && p.latency_ms > 0,
-        );
-        if (validPoints.length === 0) return 0;
-        const avgImprovement =
-            validPoints.reduce((sum, p) => {
-                return (
-                    sum +
-                    ((p.direct_latency_ms - p.latency_ms) /
-                        p.direct_latency_ms) *
-                        100
-                );
-            }, 0) / validPoints.length;
-        return Math.round(avgImprovement);
     }
 
     function generateTrendPath(
@@ -278,10 +214,8 @@
         return `${linePath} L 100 ${height} L 0 ${height} Z`;
     }
 
-    const latencyInfo = $derived(calcLatencyImprovement());
     const compressionRatio = $derived(calcCompressionRatio());
     const daysSinceStart = $derived(getDaysSinceStart());
-    const avgLatencyImprovement = $derived(getAverageLatencyImprovement());
     const latencyTrendData = $derived(
         storedData.history.slice(-20).map((p) => p.latency_ms),
     );
@@ -336,14 +270,6 @@
                     <span class="summary-value">{storedData.totalSessions}</span
                     >
                     <span class="summary-label">Sessions</span>
-                </div>
-                <div class="summary-card accent">
-                    <span class="summary-value"
-                        >{avgLatencyImprovement > 0
-                            ? `-${avgLatencyImprovement}`
-                            : avgLatencyImprovement}%</span
-                    >
-                    <span class="summary-label">Avg Latency</span>
                 </div>
                 <div class="summary-card">
                     <span class="summary-value"
@@ -472,32 +398,6 @@
             {:else}
                 <p class="no-data">Connect more to build trend data</p>
             {/if}
-        </div>
-
-        <!-- Time Saved -->
-        <div class="section highlight">
-            <div class="time-saved">
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                >
-                    <circle cx="12" cy="12" r="10" />
-                    <polyline points="12 6 12 12 16 14" />
-                </svg>
-                <div class="time-saved-info">
-                    <span class="time-saved-value"
-                        >{formatMs(storedData.totalTimeSaved)}</span
-                    >
-                    <span class="time-saved-label">Total latency saved</span>
-                    {#if storedData.totalTimeSaved === 0 && storedData.history.length > 0}
-                        <span class="time-saved-note"
-                            >Relay adds routing overhead</span
-                        >
-                    {/if}
-                </div>
-            </div>
         </div>
     {:else if activeView === "ml"}
         <!-- ML Impact View -->
@@ -693,7 +593,7 @@
             <p>Connect to a server to see live analytics</p>
         </div>
     {:else}
-        <!-- Latency Comparison Card -->
+        <!-- Connection Latency -->
         <div class="section">
             <h3 class="section-title">
                 <svg
@@ -704,78 +604,15 @@
                 >
                     <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
                 </svg>
-                Latency Performance
+                Connection Latency
             </h3>
-            <div class="latency-comparison">
-                <div class="latency-bar-container">
-                    <div class="latency-row">
-                        <span class="latency-label">Direct</span>
-                        <div class="latency-bar-wrapper">
-                            <div
-                                class="latency-bar direct"
-                                style="width: {status.direct_latency_ms
-                                    ? '100%'
-                                    : '0%'}"
-                            ></div>
-                        </div>
-                        <span class="latency-value"
-                            >{status.direct_latency_ms ?? "--"}ms</span
-                        >
-                    </div>
-                    <div class="latency-row">
-                        <span class="latency-label">Oxidize</span>
-                        <div class="latency-bar-wrapper">
-                            <div
-                                class="latency-bar relay"
-                                style="width: {status.latency_ms &&
-                                status.direct_latency_ms
-                                    ? Math.min(
-                                          (status.latency_ms /
-                                              status.direct_latency_ms) *
-                                              100,
-                                          100,
-                                      ) + '%'
-                                    : '0%'}"
-                            ></div>
-                        </div>
-                        <span class="latency-value"
-                            >{status.latency_ms ?? "--"}ms</span
-                        >
-                    </div>
-                </div>
-                {#if latencyInfo}
-                    <div
-                        class="latency-summary"
-                        class:improved={latencyInfo.improved}
+            <div class="latency-display">
+                <div class="latency-value-large">
+                    {status.latency_ms ?? "--"}<span class="latency-unit"
+                        >ms</span
                     >
-                        <span class="summary-icon">
-                            {#if latencyInfo.improved}
-                                <svg
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                >
-                                    <path d="M12 19V5M5 12l7-7 7 7" />
-                                </svg>
-                            {:else}
-                                <svg
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                >
-                                    <path d="M12 5v14M19 12l-7 7-7-7" />
-                                </svg>
-                            {/if}
-                        </span>
-                        <span class="summary-text">
-                            {latencyInfo.improved ? "Faster" : "Slower"} by {Math.abs(
-                                latencyInfo.diff,
-                            )}ms ({latencyInfo.percent}%)
-                        </span>
-                    </div>
-                {/if}
+                </div>
+                <span class="latency-label">Round-trip to relay server</span>
             </div>
         </div>
 

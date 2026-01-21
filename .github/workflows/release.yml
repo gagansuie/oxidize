@@ -439,12 +439,13 @@ jobs:
               target/release/oxidize-server \
               ubuntu@$LATITUDE_HOST:/tmp/oxidize-server
           
-          # Zero-downtime deploy
+          # Zero-downtime deploy with systemd
           ssh -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no ubuntu@$LATITUDE_HOST << 'REMOTE'
             set -e
             BINARY=/tmp/oxidize-server
             INSTALL=/opt/oxidize/oxidize-server
             BACKUP_DIR=/opt/oxidize/backup
+            SERVICE=oxidize
             
             # Create directories
             sudo mkdir -p /opt/oxidize $BACKUP_DIR
@@ -455,23 +456,24 @@ jobs:
             # Keep only last 3 backups
             sudo ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | tail -n +4 | sudo xargs rm -f 2>/dev/null || true
             
-            # Stop existing server gracefully
-            sudo pkill -TERM -f oxidize-server 2>/dev/null || true
-            sleep 2
-            sudo pkill -9 -f oxidize-server 2>/dev/null || true
+            # Stop service gracefully
+            if systemctl is-active --quiet $SERVICE 2>/dev/null; then
+              sudo systemctl stop $SERVICE
+              echo "→ Stopped $SERVICE service"
+            fi
             
             # Atomic swap
             sudo chmod +x $BINARY
             sudo mv $BINARY $INSTALL
             
-            # Start server
-            sudo bash -c "nohup $INSTALL --listen 0.0.0.0:4433 > /var/log/oxidize.log 2>&1 &"
+            # Start via systemd
+            sudo systemctl start $SERVICE
             
             # Health check with retry
             for i in 1 2 3 4 5; do
               sleep 2
-              if sudo ss -ulnp | grep -q ':4433'; then
-                echo "✓ Server listening on port 4433"
+              if systemctl is-active --quiet $SERVICE && sudo ss -ulnp | grep -q ':4433'; then
+                echo "✓ Service running and listening on port 4433"
                 exit 0
               fi
               echo "Retry $i..."
@@ -479,10 +481,11 @@ jobs:
             
             # Rollback on failure
             echo "❌ Health check failed, rolling back..."
+            sudo journalctl -u $SERVICE -n 20 --no-pager || true
             LATEST_BACKUP=$(sudo ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | head -1)
             if [[ -f "$LATEST_BACKUP" ]]; then
               sudo cp "$LATEST_BACKUP" $INSTALL
-              sudo bash -c "nohup $INSTALL --listen 0.0.0.0:4433 > /var/log/oxidize.log 2>&1 &"
+              sudo systemctl start $SERVICE
               echo "↩️ Rolled back to previous version"
             fi
             exit 1

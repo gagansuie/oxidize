@@ -18,7 +18,6 @@ pub struct ConnectionStatus {
     pub packets_received: u64,
     pub compression_saved: u64,
     pub latency_ms: Option<u32>,
-    pub direct_latency_ms: Option<u32>,
     // ML metrics from backend
     pub fec_recovered: u64,
     pub fec_sent: u64,
@@ -64,7 +63,6 @@ pub struct AppConfig {
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub original_ip: Mutex<Option<String>>,
-    pub direct_latency_ms: Mutex<Option<u32>>,
     pub cached_relay_latency: Mutex<Option<u32>>,
     pub last_latency_check: Mutex<Option<std::time::Instant>>,
 }
@@ -126,13 +124,6 @@ pub async fn connect(
         *orig_ip = original_ip.clone();
     }
 
-    // Measure direct latency BEFORE connecting (baseline internet latency to Cloudflare)
-    let direct_latency = ping_direct().await.ok();
-    {
-        let mut direct_lat = state.direct_latency_ms.lock().await;
-        *direct_lat = direct_latency;
-    }
-
     tracing::info!("Connecting via daemon with NFQUEUE packet capture");
     daemon_connect(server_id.clone()).await?;
 
@@ -156,7 +147,6 @@ pub async fn connect(
         packets_received: 0,
         compression_saved: 0,
         latency_ms: relay_latency,
-        direct_latency_ms: direct_latency,
         fec_recovered: 0,
         fec_sent: 0,
         loss_predictions: 0,
@@ -183,7 +173,6 @@ pub async fn disconnect() -> Result<ConnectionStatus, String> {
             packets_received: 0,
             compression_saved: 0,
             latency_ms: None,
-            direct_latency_ms: None,
             fec_recovered: 0,
             fec_sent: 0,
             loss_predictions: 0,
@@ -220,7 +209,6 @@ pub async fn disconnect() -> Result<ConnectionStatus, String> {
         packets_received,
         compression_saved,
         latency_ms: None,
-        direct_latency_ms: None,
         fec_recovered: response["data"]["fec_recovered"].as_u64().unwrap_or(0),
         fec_sent: response["data"]["fec_sent"].as_u64().unwrap_or(0),
         loss_predictions: response["data"]["loss_predictions"].as_u64().unwrap_or(0),
@@ -247,7 +235,6 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
             packets_received: 0,
             compression_saved: 0,
             latency_ms: None,
-            direct_latency_ms: None,
             fec_recovered: 0,
             fec_sent: 0,
             loss_predictions: 0,
@@ -262,35 +249,8 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Get stored original IP and direct latency from state
+    // Get stored original IP from state
     let original_ip = state.original_ip.lock().await.clone();
-
-    // Get or measure direct latency (baseline to Cloudflare)
-    let direct_latency_ms = {
-        let cached = *state.direct_latency_ms.lock().await;
-        if cached.is_some() {
-            cached
-        } else {
-            // Measure baseline latency - use longer timeout since this is important
-            match tokio::time::timeout(std::time::Duration::from_millis(1500), ping_direct()).await
-            {
-                Ok(Ok(l)) => {
-                    let mut direct_lat = state.direct_latency_ms.lock().await;
-                    *direct_lat = Some(l);
-                    tracing::debug!("Direct latency measured: {}ms", l);
-                    Some(l)
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("Direct ping failed: {}", e);
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!("Direct ping timed out");
-                    None
-                }
-            }
-        }
-    };
 
     if connected {
         // Fetch the relay server's external IP (this is what UDP traffic appears as)
@@ -365,7 +325,6 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
             latency_ms: relay_latency,
-            direct_latency_ms,
             fec_recovered: data
                 .get("fec_recovered")
                 .and_then(|v| v.as_u64())
@@ -398,7 +357,6 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
         packets_received: 0,
         compression_saved: 0,
         latency_ms: None,
-        direct_latency_ms: None,
         fec_recovered: 0,
         fec_sent: 0,
         loss_predictions: 0,
@@ -570,30 +528,6 @@ pub async fn get_config(state: tauri::State<'_, AppState>) -> Result<AppConfig, 
 #[tauri::command]
 pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
-}
-
-/// Ping a reference endpoint (Cloudflare) to measure baseline internet latency
-async fn ping_direct() -> Result<u32, String> {
-    use std::time::Instant;
-    use tokio::net::TcpStream;
-
-    let start = Instant::now();
-
-    // Try to connect to Cloudflare DNS (1.1.1.1:443) as baseline
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(1000),
-        TcpStream::connect("1.1.1.1:443"),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(_)) => {
-            let latency = start.elapsed().as_millis() as u32;
-            Ok(latency.max(1))
-        }
-        Ok(Err(e)) => Err(format!("Connect failed: {}", e)),
-        Err(_) => Err("Timeout".to_string()),
-    }
 }
 
 /// Ping relay by measuring TCP connect time (reliable method)

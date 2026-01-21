@@ -31,7 +31,6 @@
     packets_received: 0,
     compression_saved: 0,
     latency_ms: null,
-    direct_latency_ms: null,
     fec_recovered: 0,
     fec_sent: 0,
     loss_predictions: 0,
