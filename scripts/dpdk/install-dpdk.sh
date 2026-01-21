@@ -173,7 +173,16 @@ fi
 
 wget -q "https://fast.dpdk.org/rel/dpdk-${DPDK_VERSION}.tar.xz" -O dpdk.tar.xz
 tar xf dpdk.tar.xz
-mv "dpdk-${DPDK_VERSION}" dpdk
+# Handle both naming conventions (dpdk-X.Y.Z and dpdk-stable-X.Y.Z)
+if [[ -d "dpdk-stable-${DPDK_VERSION}" ]]; then
+    mv "dpdk-stable-${DPDK_VERSION}" dpdk
+elif [[ -d "dpdk-${DPDK_VERSION}" ]]; then
+    mv "dpdk-${DPDK_VERSION}" dpdk
+else
+    log_error "DPDK directory not found after extraction"
+    ls -la
+    exit 1
+fi
 rm dpdk.tar.xz
 
 log_success "DPDK ${DPDK_VERSION} downloaded to ${DPDK_DIR}"

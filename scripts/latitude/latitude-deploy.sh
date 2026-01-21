@@ -39,6 +39,7 @@ while [[ $# -gt 0 ]]; do
         --install) ACTION="install" ;;
         --config) ACTION="config" ;;
         --tls) ACTION="tls" ;;
+        --dpdk) ACTION="dpdk" ;;
         --restart) ACTION="restart" ;;
         --status) ACTION="status" ;;
         --health) ACTION="health" ;;
@@ -57,6 +58,7 @@ if [[ -z "$ACTION" ]]; then
     echo "  --install  Install binary and systemd service"
     echo "  --config   Generate configuration file"
     echo "  --tls      Setup TLS certificates"
+    echo "  --dpdk     Setup DPDK kernel bypass (bind data NIC)"
     echo "  --restart  Restart Oxidize service"
     echo "  --status   Show service status"
     echo "  --health   Run health check"
@@ -287,6 +289,61 @@ do_tls() {
 }
 
 # ============================================
+# DPDK Setup
+# ============================================
+do_dpdk() {
+    log_info "Setting up DPDK kernel bypass..."
+    
+    # Check if DPDK is installed
+    if ! command -v dpdk-devbind.py &> /dev/null; then
+        log_info "Installing DPDK..."
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [[ -f "$SCRIPT_DIR/../dpdk/install-dpdk.sh" ]]; then
+            bash "$SCRIPT_DIR/../dpdk/install-dpdk.sh"
+        else
+            log_warn "DPDK install script not found, skipping"
+            return 0
+        fi
+    fi
+    
+    # Load NIC config
+    if [[ -f "$CONFIG_DIR/nic-config.env" ]]; then
+        source "$CONFIG_DIR/nic-config.env"
+    else
+        log_warn "NIC config not found, skipping DPDK binding"
+        return 0
+    fi
+    
+    # Get data NIC PCI address
+    DATA_PCI=$(ethtool -i "$DATA_NIC" 2>/dev/null | grep "bus-info" | awk '{print $2}')
+    if [[ -z "$DATA_PCI" ]]; then
+        log_warn "Could not determine PCI address for $DATA_NIC"
+        return 0
+    fi
+    
+    # Check if already bound to DPDK
+    if dpdk-devbind.py --status-dev net | grep -q "$DATA_PCI.*drv=vfio-pci"; then
+        log_success "DPDK: $DATA_NIC ($DATA_PCI) already bound to vfio-pci"
+        return 0
+    fi
+    
+    # Load VFIO module
+    modprobe vfio-pci
+    echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode 2>/dev/null || true
+    
+    # Bring down interface and bind to DPDK
+    log_info "Binding $DATA_NIC ($DATA_PCI) to DPDK..."
+    ip link set "$DATA_NIC" down 2>/dev/null || true
+    dpdk-devbind.py -b vfio-pci "$DATA_PCI" || {
+        log_warn "Failed to bind NIC to DPDK, continuing with kernel driver"
+        ip link set "$DATA_NIC" up 2>/dev/null || true
+        return 0
+    }
+    
+    log_success "DPDK: $DATA_NIC bound to vfio-pci"
+}
+
+# ============================================
 # Firewall
 # ============================================
 do_firewall() {
@@ -380,6 +437,9 @@ do_full() {
     do_tls
     echo ""
     
+    do_dpdk
+    echo ""
+    
     do_firewall
     echo ""
     
@@ -406,6 +466,7 @@ case $ACTION in
     install) do_install ;;
     config) do_config ;;
     tls) do_tls ;;
+    dpdk) do_dpdk ;;
     restart) do_restart ;;
     status) do_status ;;
     health) do_health ;;

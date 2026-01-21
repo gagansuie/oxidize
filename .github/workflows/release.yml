@@ -439,13 +439,14 @@ jobs:
               target/release/oxidize-server \
               ubuntu@$LATITUDE_HOST:/tmp/oxidize-server
           
-          # Zero-downtime deploy with systemd
+          # Zero-downtime deploy with systemd + DPDK
           ssh -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no ubuntu@$LATITUDE_HOST << 'REMOTE'
             set -e
             BINARY=/tmp/oxidize-server
             INSTALL=/opt/oxidize/oxidize-server
             BACKUP_DIR=/opt/oxidize/backup
             SERVICE=oxidize
+            CONFIG_DIR=/etc/oxidize
             
             # Create directories
             sudo mkdir -p /opt/oxidize $BACKUP_DIR
@@ -465,6 +466,22 @@ jobs:
             # Atomic swap
             sudo chmod +x $BINARY
             sudo mv $BINARY $INSTALL
+            
+            # Ensure DPDK is set up (idempotent)
+            if command -v dpdk-devbind.py &> /dev/null; then
+              echo "→ Checking DPDK binding..."
+              if [[ -f "$CONFIG_DIR/nic-config.env" ]]; then
+                source "$CONFIG_DIR/nic-config.env"
+                DATA_PCI=$(ethtool -i "$DATA_NIC" 2>/dev/null | grep "bus-info" | awk '{print $2}' || true)
+                if [[ -n "$DATA_PCI" ]] && ! dpdk-devbind.py --status-dev net | grep -q "$DATA_PCI.*drv=vfio-pci"; then
+                  echo "→ Binding $DATA_NIC to DPDK..."
+                  sudo modprobe vfio-pci
+                  echo 1 | sudo tee /sys/module/vfio/parameters/enable_unsafe_noiommu_mode > /dev/null 2>&1 || true
+                  sudo ip link set "$DATA_NIC" down 2>/dev/null || true
+                  sudo dpdk-devbind.py -b vfio-pci "$DATA_PCI" 2>/dev/null || echo "DPDK bind skipped"
+                fi
+              fi
+            fi
             
             # Start via systemd
             sudo systemctl start $SERVICE

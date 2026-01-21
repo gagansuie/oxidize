@@ -244,7 +244,7 @@ impl QuicEndpoint {
             };
 
             // Generate server connection ID
-            let scid: Vec<u8> = (0..8).map(|_| rand::random()).collect();
+            let scid: Vec<u8> = (0..8).map(|_| rand::random::<u8>()).collect();
 
             let mut conn = DpdkConnection::new(header.dcid.clone(), scid, remote_addr);
             conn.derive_initial_secrets();
@@ -277,7 +277,7 @@ impl QuicEndpoint {
         client_header: &QuicHeader,
     ) -> Result<()> {
         // Generate server connection ID
-        let scid: Vec<u8> = (0..8).map(|_| rand::random()).collect();
+        let scid: Vec<u8> = (0..8).map(|_| rand::random::<u8>()).collect();
 
         // Create TLS session and get ServerHello
         let server_hello = self.create_tls_session_and_get_hello(&client_header.dcid)?;
