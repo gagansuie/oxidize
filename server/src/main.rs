@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+use oxidize_common::quic_dpdk::{EndpointConfig, QuicEndpoint};
 use relay_server::config::Config;
 use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
 use relay_server::mobile_server::{
     generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
 };
-use relay_server::quic_xdp_server::{QuicServerConfig, QuicXdpServer};
 
 /// Auto-detect the default network interface
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn detect_default_interface() -> String {
     // Try to find the default route interface
     if let Ok(output) = std::process::Command::new("ip")
@@ -57,14 +58,6 @@ struct Args {
 
     #[arg(long)]
     mobile_endpoint: Option<String>,
-
-    /// Network interface for XDP (default: auto-detect)
-    #[arg(long)]
-    xdp_interface: Option<String>,
-
-    /// Number of XDP worker threads (default: 4)
-    #[arg(long, default_value = "4")]
-    xdp_workers: u32,
 }
 
 #[tokio::main]
@@ -122,45 +115,24 @@ async fn main() -> Result<()> {
         Config::default()
     });
 
-    // Initialize and START QuicXdpServer - REQUIRED (no fallback)
-    info!("📦 Initializing QUIC-XDP server for kernel bypass...");
-    let xdp_config = QuicServerConfig {
-        interface: std::env::var("OXIDIZE_INTERFACE").unwrap_or_else(|_| {
-            args.xdp_interface
-                .clone()
-                .unwrap_or_else(detect_default_interface)
-        }),
-        port: args.listen.port(),
-        workers: std::env::var("OXIDIZE_WORKERS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(args.xdp_workers),
-        zero_copy: true,
-        ml_congestion: true,
-        batch_size: 64,
-        cpu_cores: std::env::var("OXIDIZE_CPU_CORES").unwrap_or_else(|_| "2,3,4,5".to_string()),
-        force_mode: None,
+    // Initialize QUIC endpoint (cross-platform, no Quinn dependency)
+    let endpoint_config = EndpointConfig {
+        listen_addr: args.listen,
+        max_connections: config.max_connections,
+        idle_timeout: Duration::from_secs(config.connection_timeout),
+        enable_0rtt: config.enable_0rtt,
+        ..Default::default()
     };
 
-    let mut xdp_server = match QuicXdpServer::new(xdp_config) {
-        Ok(xdp) => xdp,
+    let endpoint = match QuicEndpoint::new(endpoint_config) {
+        Ok(ep) => Arc::new(ep),
         Err(e) => {
-            error!("❌ FATAL: Failed to initialize QUIC-XDP: {}", e);
-            error!("   Oxidize requires AF_XDP kernel bypass to run.");
-            error!("   Ensure you are on Linux with XDP support and proper permissions.");
-            bail!("QUIC-XDP initialization failed: {}", e);
+            error!("❌ FATAL: Failed to initialize QUIC endpoint: {}", e);
+            bail!("QUIC endpoint initialization failed: {}", e);
         }
     };
 
-    // Start the XDP server
-    if let Err(e) = xdp_server.start() {
-        error!("❌ FATAL: Failed to start QUIC-XDP: {}", e);
-        error!("   Check NIC driver compatibility and kernel version.");
-        bail!("QUIC-XDP start failed: {}", e);
-    }
-
-    info!("✅ QUIC-XDP server STARTED in {:?} mode", xdp_server.mode());
-    info!("🚀 Kernel bypass ACTIVE - 100x performance enabled!");
+    info!("✅ QUIC endpoint initialized on {}", args.listen);
 
     info!("🚀 Server listening on {}", args.listen);
     info!("📊 Max connections: {}", config.max_connections);
@@ -173,8 +145,8 @@ async fn main() -> Result<()> {
         }
     );
 
-    // XDP stats logging
-    info!("📊 XDP stats will be logged every 30 seconds");
+    // Stats logging
+    info!("📊 Server stats will be logged every 30 seconds");
 
     // Start Mobile Tunnel server if enabled
     if config.enable_oxtunnel {
@@ -228,20 +200,29 @@ async fn main() -> Result<()> {
     info!("🔄 Graceful shutdown enabled (30s drain timeout)");
     info!("   Send SIGTERM/SIGINT to gracefully drain connections");
 
-    // XDP handles all QUIC traffic
-    info!("🚀 Running in XDP-only mode");
-    info!("   All QUIC traffic handled by AF_XDP kernel bypass");
+    // Start the QUIC endpoint in a background task
+    info!("🚀 Starting QUIC endpoint...");
 
-    // Wait for shutdown signal
+    // Use tokio::select! to run endpoint and wait for shutdown concurrently
     let mut shutdown_rx = shutdown_coordinator.shutdown_receiver();
-    let _ = shutdown_rx.changed().await;
+
+    tokio::select! {
+        result = endpoint.run() => {
+            if let Err(e) = result {
+                error!("QUIC endpoint error: {}", e);
+            }
+        }
+        _ = shutdown_rx.changed() => {
+            info!("Shutdown signal received");
+        }
+    }
 
     // Graceful shutdown
     shutdown_coordinator.shutdown().await;
 
-    // Stop XDP server
-    info!("Stopping XDP server...");
-    xdp_server.stop();
+    // Stop QUIC endpoint
+    info!("Stopping QUIC endpoint...");
+    endpoint.stop();
 
     Ok(())
 }

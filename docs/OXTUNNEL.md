@@ -244,14 +244,34 @@ OxTunnel is specifically optimized for mobile:
 
 | Platform | Capture | Protocols | Transport | Status |
 |----------|---------|-----------|-----------|--------|
-| Linux (server) | - | TCP + UDP | QUIC/UDP | ✅ Full support |
-| Linux (client) | NFQUEUE | TCP + UDP | QUIC | ✅ Full support |
-| macOS | PF/Utun | TCP + UDP | QUIC | ✅ Full support |
-| Windows | WinDivert | TCP + UDP | QUIC | ✅ Full support |
-| Android | VpnService | TCP + UDP | QUIC/UDP | ✅ Full support |
-| iOS | NEPacketTunnel | TCP + UDP | QUIC/UDP | ✅ Full support |
+| Linux (server) | - | TCP + UDP + ICMP | QUIC/UDP | ✅ Full support |
+| Linux (client) | NFQUEUE | TCP + UDP + ICMP | QUIC | ✅ Full support |
+| macOS | PF/Utun | TCP + UDP + ICMP | QUIC | ✅ Full support |
+| Windows | WinDivert | TCP + UDP + ICMP | QUIC | ✅ Full support |
+| Android | VpnService | TCP + UDP + ICMP | QUIC/UDP | ✅ Full support |
+| iOS | NEPacketTunnel | TCP + UDP + ICMP | QUIC/UDP | ✅ Full support |
 
 **All platforms use the same OxTunnel protocol** with platform-specific packet capture and unified QUIC transport.
+
+## ICMP (Ping) Support
+
+OxTunnel supports ICMP Echo Request/Reply (ping) for both IPv4 and IPv6:
+
+| Protocol | Type | Status |
+|----------|------|--------|
+| ICMP (IPv4) | Echo Request (8) / Reply (0) | ✅ Full support |
+| ICMPv6 | Echo Request (128) / Reply (129) | ✅ Full support |
+
+**Server Requirements:**
+```bash
+# Enable unprivileged ICMP for all users (IPv4)
+sudo sysctl -w net.ipv4.ping_group_range="0 65535"
+
+# Or grant CAP_NET_RAW capability
+sudo setcap cap_net_raw+ep /path/to/oxidize-server
+```
+
+The server creates raw ICMP sockets and tracks Echo Request/Reply pairs using (id, seq, dst_ip) as keys for proper response routing back to clients.
 
 ## TCP over QUIC Architecture
 
@@ -381,10 +401,10 @@ let udp_config = UnifiedTransportConfig {
 
 - [x] **QUIC transport** - Unified QUIC for all platforms ✅
 - [x] **Unified protocol** - Same OxTunnel on desktop and mobile ✅
-- [x] **AF_XDP acceleration** - Kernel bypass for 10-40 Gbps (bare metal) ✅
+- [x] **DPDK acceleration** - Kernel bypass for 100+ Gbps (bare metal) ✅
 - [x] **0-RTT resumption** - Instant reconnects with session tickets + anti-replay protection ✅
-- [ ] **Multi-path support** - Aggregate WiFi + LTE
-- [ ] **Hardware crypto** - AES-NI/ARMv8 acceleration
+- [x] **Multi-path support** - Aggregate WiFi + LTE ✅
+- [x] **Hardware crypto** - AES-NI/ARMv8 via ring crate ✅
 
 ---
 

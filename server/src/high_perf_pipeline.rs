@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
-// Kernel bypass (AF_XDP) is always available on Linux
+// Kernel bypass is available on Linux
 #[cfg(target_os = "linux")]
 use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
 
@@ -188,7 +188,7 @@ impl HighPerfPipeline {
         #[cfg(not(target_os = "linux"))]
         let bypass: Option<()> = None;
 
-        // Try to initialize unified bypass (AF_XDP with fallback)
+        // Try to initialize unified bypass
         #[cfg(target_os = "linux")]
         let unified_bypass = match UnifiedBypass::new(None) {
             Ok(ub) => {
@@ -278,7 +278,7 @@ impl HighPerfPipeline {
     ) -> Vec<BypassPacket> {
         let start = Instant::now();
         let mut output = Vec::with_capacity(packets.len());
-        let _worker_id = worker_id; // ML congestion control in quic_xdp
+        let _worker_id = worker_id;
         let stats = Arc::clone(&self.stats);
         let quic_port = self.config.quic_port;
         let enable_rohc = self.config.enable_rohc;

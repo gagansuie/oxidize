@@ -375,43 +375,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # deploy-fly:
-  #   name: Deploy to Fly.io
-  #   needs: release
-  #   runs-on: ubuntu-latest
-  #   if: needs.release.outputs.release_created == 'true'
-    
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-
-  #     - name: Setup Fly.io CLI
-  #       uses: superfly/flyctl-actions/setup-flyctl@master
-
-  #     - name: Deploy to Fly.io
-  #       run: flyctl deploy --remote-only --strategy bluegreen
-  #       env:
-  #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-  #     - name: Verify deployment
-  #       run: |
-  #         sleep 10
-  #         flyctl status
-  #         echo "✅ Deployed to Fly.io"
-  #       env:
-  #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-  deploy-vultr:
-    name: Deploy to Vultr Bare Metal
+  deploy-latitude:
+    name: Deploy to Latitude.sh Bare Metal
     needs: release
     runs-on: ubuntu-latest
     if: needs.release.outputs.release_created == 'true'
-    strategy:
-      matrix:
-        # Add more servers here for horizontal scaling
-        # Each server needs VULTR_HOST_<NAME> and VULTR_SSH_KEY secrets
-        server: [PRIMARY]
-      fail-fast: false
     
     steps:
       - name: Checkout code
@@ -422,7 +390,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           target: x86_64-unknown-linux-gnu
-          cache-prefix: vultr-server
+          cache-prefix: latitude-server
 
       - name: Build server binary
         run: |
@@ -431,66 +399,79 @@ jobs:
         env:
           RUSTC_WRAPPER: ${{ steps.setup-rust.outputs.sccache-enabled == 'true' && 'sccache' || '' }}
 
-      - name: Deploy to Vultr ${{ matrix.server }}
+      - name: Deploy to Latitude.sh
         env:
-          # Primary server (Chicago)
-          VULTR_HOST_PRIMARY: ${{ secrets.VULTR_HOST }}
-          VULTR_SSH_KEY: ${{ secrets.VULTR_SSH_KEY }}
-          # Add more regions for horizontal scaling:
-          # VULTR_HOST_WEST: ${{ secrets.VULTR_HOST_WEST }}
-          # VULTR_HOST_EU: ${{ secrets.VULTR_HOST_EU }}
+          LATITUDE_API_TOKEN: ${{ secrets.LATITUDE_API_TOKEN }}
+          LATITUDE_SSH_KEY: ${{ secrets.LATITUDE_SSH_KEY }}
+          LATITUDE_PROJECT_ID: ${{ secrets.LATITUDE_PROJECT_ID }}
         run: |
-          # Get host for this matrix server
-          HOST_VAR="VULTR_HOST_${{ matrix.server }}"
-          HOST="${!HOST_VAR}"
-          
           # Skip if secrets not configured
-          if [[ -z "$HOST" ]] || [[ -z "$VULTR_SSH_KEY" ]]; then
-            echo "⏭️ Vultr ${{ matrix.server }} not configured, skipping"
+          if [[ -z "$LATITUDE_API_TOKEN" ]] || [[ -z "$LATITUDE_SSH_KEY" ]]; then
+            echo "⏭️ Latitude.sh not configured, skipping"
             exit 0
           fi
           
+          # Fetch server IPs from Latitude.sh API
+          echo "→ Fetching servers from Latitude.sh API..."
+          SERVERS_JSON=$(curl -s -H "Authorization: Bearer $LATITUDE_API_TOKEN" \
+            "https://api.latitude.sh/servers?filter[project]=${LATITUDE_PROJECT_ID:-}")
+          
+          # Extract running server IPs
+          LATITUDE_HOST=$(echo "$SERVERS_JSON" | jq -r '.data[] | select(.attributes.status == "on") | .attributes.primary_ipv4' | head -1)
+          
+          if [[ -z "$LATITUDE_HOST" ]] || [[ "$LATITUDE_HOST" == "null" ]]; then
+            echo "❌ No running Latitude.sh servers found"
+            exit 1
+          fi
+          
+          echo "→ Found server: $LATITUDE_HOST"
+          
           # Setup SSH
           mkdir -p ~/.ssh
-          echo "$VULTR_SSH_KEY" > ~/.ssh/vultr_key
-          chmod 600 ~/.ssh/vultr_key
-          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          echo "$LATITUDE_SSH_KEY" > ~/.ssh/latitude_key
+          chmod 600 ~/.ssh/latitude_key
+          ssh-keyscan -H $LATITUDE_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
           
-          echo "→ Deploying to Vultr ${{ matrix.server }} ($HOST)..."
+          echo "→ Deploying to Latitude.sh ($LATITUDE_HOST)..."
           
           # Upload binary
-          scp -i ~/.ssh/vultr_key -o StrictHostKeyChecking=no \
+          scp -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no \
               target/release/oxidize-server \
-              root@$HOST:/tmp/oxidize-server
+              ubuntu@$LATITUDE_HOST:/tmp/oxidize-server
           
           # Zero-downtime deploy
-          ssh -i ~/.ssh/vultr_key -o StrictHostKeyChecking=no root@$HOST << 'REMOTE'
+          ssh -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no ubuntu@$LATITUDE_HOST << 'REMOTE'
             set -e
             BINARY=/tmp/oxidize-server
-            INSTALL=/usr/local/bin/oxidize-server
-            BACKUP_DIR=/usr/local/bin/backup
+            INSTALL=/opt/oxidize/oxidize-server
+            BACKUP_DIR=/opt/oxidize/backup
             
-            # Create backup dir
-            mkdir -p $BACKUP_DIR
+            # Create directories
+            sudo mkdir -p /opt/oxidize $BACKUP_DIR
             
             # Backup current binary
-            [[ -f $INSTALL ]] && cp $INSTALL $BACKUP_DIR/oxidize-server.$(date +%s)
+            [[ -f $INSTALL ]] && sudo cp $INSTALL $BACKUP_DIR/oxidize-server.$(date +%s)
             
             # Keep only last 3 backups
-            ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+            sudo ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | tail -n +4 | sudo xargs rm -f 2>/dev/null || true
+            
+            # Stop existing server gracefully
+            sudo pkill -TERM -f oxidize-server 2>/dev/null || true
+            sleep 2
+            sudo pkill -9 -f oxidize-server 2>/dev/null || true
             
             # Atomic swap
-            chmod +x $BINARY
-            mv $BINARY $INSTALL
+            sudo chmod +x $BINARY
+            sudo mv $BINARY $INSTALL
             
-            # Graceful restart
-            systemctl reload-or-restart oxidize-server
+            # Start server
+            sudo bash -c "nohup $INSTALL --listen 0.0.0.0:4433 > /var/log/oxidize.log 2>&1 &"
             
             # Health check with retry
-            for i in 1 2 3; do
+            for i in 1 2 3 4 5; do
               sleep 2
-              if curl -sf http://localhost:9090/health; then
-                echo "✓ Health check passed"
+              if sudo ss -ulnp | grep -q ':4433'; then
+                echo "✓ Server listening on port 4433"
                 exit 0
               fi
               echo "Retry $i..."
@@ -498,14 +479,14 @@ jobs:
             
             # Rollback on failure
             echo "❌ Health check failed, rolling back..."
-            LATEST_BACKUP=$(ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | head -1)
+            LATEST_BACKUP=$(sudo ls -t $BACKUP_DIR/oxidize-server.* 2>/dev/null | head -1)
             if [[ -f "$LATEST_BACKUP" ]]; then
-              cp "$LATEST_BACKUP" $INSTALL
-              systemctl restart oxidize-server
+              sudo cp "$LATEST_BACKUP" $INSTALL
+              sudo bash -c "nohup $INSTALL --listen 0.0.0.0:4433 > /var/log/oxidize.log 2>&1 &"
               echo "↩️ Rolled back to previous version"
             fi
             exit 1
           REMOTE
           
-          echo "✅ Deployed to Vultr ${{ matrix.server }}"
-          rm -f ~/.ssh/vultr_key
+          echo "✅ Deployed to Latitude.sh"
+          rm -f ~/.ssh/latitude_key

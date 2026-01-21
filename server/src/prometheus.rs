@@ -222,8 +222,11 @@ impl PrometheusMetrics {
             }
             "/ip" => {
                 // Return server's external IP for client display
-                // On Fly.io, FLY_PUBLIC_IP contains the instance's public IPv4
-                let ip = std::env::var("FLY_PUBLIC_IP").unwrap_or_else(|_| "unknown".to_string());
+                // Check common environment variables for public IP
+                let ip = std::env::var("PUBLIC_IP")
+                    .or_else(|_| std::env::var("SERVER_IP"))
+                    .or_else(|_| std::env::var("EXTERNAL_IP"))
+                    .unwrap_or_else(|_| "unknown".to_string());
                 let json = format!(r#"{{"ip":"{}"}}"#, ip);
                 Ok(Response::builder()
                     .status(StatusCode::OK)

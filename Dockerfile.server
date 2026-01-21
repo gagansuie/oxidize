@@ -1,4 +1,4 @@
-# Oxidize Relay Server - Fly.io Dockerfile
+# Oxidize Relay Server - Docker Image
 # Multi-stage build for minimal image size
 
 # Build stage

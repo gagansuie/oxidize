@@ -6,9 +6,9 @@ authors = { workspace = true }
 license = { workspace = true }
 
 [features]
-default = ["ai"]
+default = ["ai", "dpdk"]
 ai = ["dep:candle-core", "dep:candle-nn", "dep:safetensors", "dep:hf-hub"]  # Deep learning driven engine with training + HF Hub sync
-# Note: AF_XDP kernel bypass is always enabled on Linux (no feature flag needed)
+dpdk = []  # DPDK kernel bypass - enabled by default, requires libdpdk on Linux for full functionality
 
 [[bin]]
 name = "oxidize-train"
@@ -33,6 +33,8 @@ reed-solomon-erasure = { workspace = true }
 rayon = { workspace = true }
 libc = "0.2"
 ring = { workspace = true }  # Hardware-accelerated crypto
+rustls = { workspace = true }  # TLS 1.3 for QUIC handshake
+rcgen = { workspace = true }  # Self-signed cert generation
 candle-core = { workspace = true, optional = true }
 candle-nn = { workspace = true, optional = true }
 safetensors = { workspace = true, optional = true }
@@ -42,7 +44,7 @@ clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 socket2 = { workspace = true }
 quinn = { workspace = true }
-parking_lot = "0.12"  # Fast RwLock for QUIC-XDP connection table
+parking_lot = "0.12"  # Fast RwLock for QUIC connection table
 
 
 [target.'cfg(unix)'.dependencies]

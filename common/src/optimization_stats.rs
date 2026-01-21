@@ -1,7 +1,6 @@
 //! Unified Optimization Statistics
 //!
 //! Aggregates stats from all optimization modules for monitoring and analytics.
-//! Simplified after removing legacy modules - stats now come from quic_xdp ML engine.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,12 +24,12 @@ pub struct OptimizationStats {
     pub dpi_flows_identified: u64,
     pub dpi_cache_hit_rate: f32,
 
-    // ML Stats (from quic_xdp ML engine)
+    // ML Stats
     pub ml_predictions_made: u64,
     pub ml_cwnd_adjustments: u64,
     pub ml_loss_probability: f32,
 
-    // SIMD Stats (from quic_xdp parser)
+    // SIMD Stats
     pub simd_packets_parsed: u64,
 }
 

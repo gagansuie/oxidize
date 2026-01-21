@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Vultr Bare Metal Setup Script for Oxidize
-# Configures hugepages, VFIO, and dependencies for AF_XDP kernel bypass
+# Configures hugepages, VFIO, and dependencies for DPDK kernel bypass
 #
 # Usage: sudo ./vultr-setup.sh
 #
@@ -31,7 +31,7 @@ fi
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║     VULTR BARE METAL SETUP FOR OXIDIZE                    ║"
-echo "║     AF_XDP Kernel Bypass Configuration                    ║"
+echo "║     DPDK Kernel Bypass Configuration                      ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -172,7 +172,7 @@ modprobe uio || true
 modprobe uio_pci_generic || true
 
 # Make persistent
-cat > /etc/modules-load.d/oxidize-afxdp.conf << EOF
+cat > /etc/modules-load.d/oxidize-dpdk.conf << EOF
 vfio-pci
 uio
 uio_pci_generic
@@ -225,7 +225,7 @@ log_success "Directories created"
 log_info "Applying system tuning..."
 
 cat > /etc/sysctl.d/99-oxidize-performance.conf << EOF
-# Oxidize Performance Tuning for AF_XDP Kernel Bypass
+# Oxidize Performance Tuning for DPDK Kernel Bypass
 
 # Network buffers
 net.core.rmem_max = 134217728
@@ -306,7 +306,7 @@ echo ""
 if [[ -n "${NEEDS_REBOOT:-}" ]]; then
     echo ""
     log_warn "═══════════════════════════════════════════════════════════"
-    log_warn "  REBOOT REQUIRED to enable IOMMU for AF_XDP"
+    log_warn "  REBOOT REQUIRED to enable IOMMU for DPDK"
     log_warn "  Run: sudo reboot"
     log_warn "═══════════════════════════════════════════════════════════"
     echo ""

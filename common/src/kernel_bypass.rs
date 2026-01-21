@@ -45,11 +45,7 @@
 //! └────────────────────────────────────────────────────────────────────────┘
 //! ```
 
-#![allow(dead_code)] // Kernel bypass implementation with AF_XDP backend
-
-// Re-export AF_XDP for external use
-#[cfg(target_os = "linux")]
-pub use crate::af_xdp::{AfXdpConfig, AfXdpRuntime, AfXdpSocket};
+#![allow(dead_code)] // Kernel bypass implementation
 #[allow(unused_imports)]
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::UnsafeCell;
@@ -1382,64 +1378,29 @@ impl BypassProcessor {
 // Unified Kernel Bypass Interface
 // =============================================================================
 
-/// Unified kernel bypass using AF_XDP (10-40 Gbps) with userspace fallback
+/// Unified kernel bypass using optimized userspace processing
 pub struct UnifiedBypass {
-    #[cfg(target_os = "linux")]
-    af_xdp: Option<crate::af_xdp::AfXdpRuntime>,
     fallback_runtime: Option<KernelBypassRuntime>,
     mode: BypassMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BypassMode {
-    /// AF_XDP kernel bypass (10-40 Gbps)
-    AfXdp,
-    /// Fallback to optimized userspace
+    /// Optimized userspace processing
     Userspace,
     /// Disabled (standard networking)
     Disabled,
 }
 
 impl UnifiedBypass {
-    /// Create a new unified bypass, auto-detecting best mode
-    /// Priority: AF_XDP > userspace
+    /// Create a new unified bypass
     #[cfg(target_os = "linux")]
-    pub fn new(interface: Option<&str>) -> std::io::Result<Self> {
-        // Try AF_XDP (10-40 Gbps)
-        if crate::af_xdp::AfXdpRuntime::is_available() {
-            let config = if let Some(iface) = interface {
-                crate::af_xdp::AfXdpConfig {
-                    interface: iface.to_string(),
-                    ..crate::af_xdp::AfXdpConfig::default()
-                }
-            } else {
-                crate::af_xdp::AfXdpConfig::auto_detect()?
-            };
-
-            match crate::af_xdp::AfXdpRuntime::new(config) {
-                Ok(runtime) => {
-                    info!("AF_XDP kernel bypass initialized (10-40 Gbps mode)");
-                    return Ok(Self {
-                        af_xdp: Some(runtime),
-                        fallback_runtime: None,
-                        mode: BypassMode::AfXdp,
-                    });
-                }
-                Err(e) => {
-                    warn!(
-                        "AF_XDP initialization failed: {}, falling back to userspace",
-                        e
-                    );
-                }
-            }
-        }
-
-        // Fallback to optimized userspace
+    pub fn new(_interface: Option<&str>) -> std::io::Result<Self> {
+        // Use optimized userspace processing
         let runtime = KernelBypassRuntime::new(UltraConfig::default())?;
         info!("Using optimized userspace mode");
 
         Ok(Self {
-            af_xdp: None,
             fallback_runtime: Some(runtime),
             mode: BypassMode::Userspace,
         })
@@ -1458,49 +1419,24 @@ impl UnifiedBypass {
         self.mode
     }
 
-    /// Check if running in full kernel bypass mode
+    /// Check if running in kernel bypass mode
     pub fn is_kernel_bypass(&self) -> bool {
-        self.mode == BypassMode::AfXdp
+        self.mode == BypassMode::Userspace
     }
 
     /// Start the bypass runtime with a packet handler
-    #[cfg(target_os = "linux")]
-    pub fn start<F>(&mut self, handler: F) -> std::io::Result<()>
-    where
-        F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + Clone + 'static,
-    {
-        match self.mode {
-            BypassMode::AfXdp => {
-                if let Some(ref mut runtime) = self.af_xdp {
-                    runtime.start(handler)?;
-                }
-            }
-            BypassMode::Userspace => {
-                if let Some(ref runtime) = self.fallback_runtime {
-                    runtime.start();
-                }
-            }
-            BypassMode::Disabled => {}
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
     pub fn start<F>(&mut self, _handler: F) -> std::io::Result<()>
     where
         F: Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + Clone + 'static,
     {
+        if let Some(ref runtime) = self.fallback_runtime {
+            runtime.start();
+        }
         Ok(())
     }
 
     /// Stop the bypass runtime
     pub fn stop(&mut self) {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(ref mut runtime) = self.af_xdp {
-                runtime.stop();
-            }
-        }
         if let Some(ref runtime) = self.fallback_runtime {
             runtime.stop();
         }
@@ -1508,12 +1444,6 @@ impl UnifiedBypass {
 
     /// Get statistics summary
     pub fn stats_summary(&self) -> String {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(ref runtime) = self.af_xdp {
-                return runtime.stats_summary();
-            }
-        }
         if let Some(ref runtime) = self.fallback_runtime {
             return runtime.stats_summary();
         }

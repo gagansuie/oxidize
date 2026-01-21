@@ -64,8 +64,8 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **Kernel Bypass** - AF_XDP for bare metal (10-40 Gbps, saturates 10GbE NICs)
-- **Zero-Copy I/O** - Direct packet access via AF_XDP on bare metal (Vultr)
+- **Kernel Bypass** - DPDK support for bare metal (100+ Gbps)
+- **Zero-Copy I/O** - Direct packet access via DPDK poll-mode drivers
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
@@ -139,7 +139,6 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
 - **Smart Split-Tunneling** - Gaming tunneled for optimization, streaming bypassed for clean IP
 - **Edge Caching** - LRU cache for static content at relay points
 
-> See [QUIC_XDP.md](docs/QUIC_XDP.md) for the complete QUIC-XDP stack documentation.
 
 ### 🧠 Deep Learning Engine (Pure Rust, 10x Optimized)
 Self-improving network optimization using neural networks with **adaptive online learning**:
@@ -401,7 +400,7 @@ enable_priority_scheduler = true
 | **Transport** | QUIC Primary + UDP Fallback | ✅ Implemented |
 | **Transport** | Connection Migration (WiFi↔LTE) | ✅ Implemented |
 | **Transport** | Multi-path Aggregation | ✅ Implemented |
-| **Kernel Bypass** | AF_XDP (10-40 Gbps) | ✅ Implemented |
+| **Kernel Bypass** | DPDK (100+ Gbps) | ✅ Implemented |
 | **Compression** | LZ4 (~4 GB/s) | ✅ Implemented |
 | **Compression** | ROHC Headers (44% reduction) | ✅ Implemented |
 | **Compression** | Per-Connection Dictionaries | ✅ Implemented |
@@ -566,14 +565,13 @@ sudo iptables -L OUTPUT -v -n --line-numbers
 
 ## Documentation
 
-- [QUIC_XDP.md](docs/QUIC_XDP.md) - **QUIC-XDP stack (10x optimizations, adaptive ML, multipath)**
 - [CHANGELOG.md](docs/CHANGELOG.md) - **Recent changes and removed modules**
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (Transformer, PPO, UCB1)
 - [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
 - [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) - Kernel bypass (AF_XDP)
-- [VULTR_DEPLOYMENT.md](docs/VULTR_DEPLOYMENT.md) - Bare metal deployment guide
+- [VULTR_DEPLOYMENT.md](docs/vultr/VULTR_DEPLOYMENT.md) - Bare metal deployment guide
+- [LATITUDE_DEPLOYMENT.md](docs/latitude/LATITUDE_DEPLOYMENT.md) - Latitude.sh deployment guide
 - [ZERO-DOWNTIME.md](docs/ZERO-DOWNTIME.md) - Zero-downtime deployment
 
 ## Testing
@@ -626,20 +624,19 @@ cargo bench --package oxidize-common
 ╔════════════════════════════════════════════════════════════════╗
 ║              KERNEL BYPASS BENCHMARKS                          ║
 ╠════════════════════════════════════════════════════════════════╣
-║ AF_XDP Mode:         10-40 Gbps (saturates 10GbE NICs)         ║
-║ Per-Packet Latency:  <1µs (P99)                                ║
+║ DPDK Mode:           100+ Gbps (line rate on 100GbE)           ║
+║ Per-Packet Latency:  <300ns (P99)                              ║
 ║ Zero-Copy:           No memcpy in hot path                     ║
 ║ Lock-Free Rings:     SPSC queues, no contention                ║
-║ SIMD Parsing:        AVX2/AVX-512 packet parsing               ║
+║ Batch Processing:    64 packets per burst                      ║
 ║ CPU Pinning:         Dedicated cores per queue                 ║
 ║ NUMA Aware:          Memory allocation close to CPU            ║
 ║ Huge Pages:          1GB/2MB pages for minimal TLB misses      ║
-║ Auto-Selection:      AF_XDP when available                     ║
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
-> **Note:** Kernel bypass (AF_XDP) is automatically enabled on Linux bare metal.
-> See [KERNEL_BYPASS.md](docs/KERNEL_BYPASS.md) and [VULTR_DEPLOYMENT.md](docs/VULTR_DEPLOYMENT.md).
+> **Note:** DPDK kernel bypass requires the `dpdk` feature and NIC bound to vfio-pci.
+> See deployment guides for setup instructions.
 
 ## Uninstall
 

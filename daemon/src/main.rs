@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
 use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService};
-// AF_XDP kernel bypass for bare metal packet capture (always enabled on Linux)
-#[cfg(target_os = "linux")]
-use oxidize_common::quic_xdp::{QuicXdpConfig, QuicXdpRuntime};
 use relay_client::{ClientConfig, RelayClient};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -65,50 +62,6 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Oxidize Daemon starting...");
-
-    // AF_XDP kernel bypass mode - initialize QuicXdpRuntime (always on Linux)
-    #[cfg(target_os = "linux")]
-    let _xdp_runtime = {
-        info!("📦 Initializing AF_XDP kernel bypass mode...");
-        let xdp_config = QuicXdpConfig {
-            interface: std::env::var("OXIDIZE_INTERFACE").unwrap_or_else(|_| "eth0".to_string()),
-            num_queues: std::env::var("OXIDIZE_QUEUES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4),
-            zero_copy: true,
-            port: 4433,
-            batch_size: 64,
-            ml_congestion: true,
-            cpu_cores: std::env::var("OXIDIZE_CPU_CORES").unwrap_or_else(|_| "2,3,4,5".to_string()),
-            ..Default::default()
-        };
-        match QuicXdpRuntime::new(xdp_config) {
-            Ok(mut runtime) => {
-                if let Err(e) = runtime.start() {
-                    warn!(
-                        "⚠️  Failed to start AF_XDP runtime: {} - falling back to standard mode",
-                        e
-                    );
-                    None
-                } else {
-                    info!(
-                        "✅ AF_XDP kernel bypass active - {} queues",
-                        runtime.connection_count()
-                    );
-                    Some(runtime)
-                }
-            }
-            Err(e) => {
-                warn!("⚠️  AF_XDP not available: {} - using standard mode", e);
-                None
-            }
-        }
-    };
-    #[cfg(not(target_os = "linux"))]
-    {
-        warn!("⚠️  AF_XDP kernel bypass only available on Linux - using standard mode");
-    }
 
     let state = Arc::new(Mutex::new(DaemonState::default()));
 

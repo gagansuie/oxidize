@@ -1,5 +1,5 @@
 // ============================================================================
-// BARE METAL AF_XDP OPTIMIZED - Maximum Throughput, Minimum Latency
+// OXIDIZE - High Performance QUIC Relay with DPDK Support
 // ============================================================================
 
 // Core performance modules
@@ -28,7 +28,7 @@ pub mod prefetch;
 pub mod priority_scheduler;
 pub mod traffic_classifier;
 
-// OxTunnel protocol (runs over QUIC-XDP)
+// OxTunnel protocol (runs over QUIC)
 pub mod oxtunnel_client;
 pub mod oxtunnel_protocol;
 pub mod rohc;
@@ -41,27 +41,20 @@ pub mod relay_mesh;
 // Benchmark utilities
 pub mod benchmark;
 
-// Kernel Bypass - 100x optimized with custom implementations (100+ Gbps)
-// Provides: BypassConfig, BypassPacket, BypassProcessor
-// Plus: UltraConfig, KernelBypassRuntime, PacketBuffer, SpscRing (100x optimized)
+// Kernel Bypass - DPDK-based for maximum throughput (Linux only)
 #[cfg(target_os = "linux")]
 pub mod kernel_bypass;
 
-// AF_XDP - Real NIC integration for 10-40 Gbps (Linux only)
-// Provides: AfXdpSocket, AfXdpRuntime, AfXdpConfig
-#[cfg(target_os = "linux")]
-pub mod af_xdp;
-
-// QUIC-XDP - Native AF_XDP QUIC implementation for 100x performance (Linux only)
-// Provides: QuicXdpRuntime, QuicXdpConfig, QuicXdpStats, Connection, Stream
-// Complete userspace QUIC stack running on kernel bypass with:
-// - Zero-copy packet processing via UMEM (no syscalls in hot path)
-// - SIMD-accelerated parsing
+// QUIC-DPDK - Cross-platform QUIC implementation with optional DPDK acceleration
+// Provides: QuicEndpoint, EndpointConfig, EndpointStats
+// Features:
+// - Cross-platform UDP socket layer (works on Linux, macOS, Windows)
+// - Optional DPDK poll-mode drivers for 100+ Gbps (Linux with dpdk feature)
+// - Custom QUIC v1 (RFC 9000) implementation
+// - Zero-copy packet processing
 // - Hardware crypto (AES-NI)
 // - ML-augmented congestion control
-// - Batch processing (64+ packets)
-#[cfg(target_os = "linux")]
-pub mod quic_xdp;
+pub mod quic_dpdk;
 
 // Core optimizations
 pub mod low_latency;

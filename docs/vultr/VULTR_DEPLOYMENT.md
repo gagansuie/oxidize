@@ -8,7 +8,7 @@ Quick-start guide for deploying Oxidize on Vultr bare metal with **kernel bypass
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Kernel Bypass** | ✅ AF_XDP | Auto-enabled on Linux, saturates 10GbE NIC |
+| **Kernel Bypass** | ✅ DPDK | Optional, for 100+ Gbps performance |
 | **Zero-Downtime** | ✅ Active | SO_REUSEPORT + graceful shutdown |
 | **CI/CD** | ✅ Automated | Version bump → auto-deploy |
 | **Hugepages** | ✅ Configured | 4GB (2048 x 2MB pages) |
@@ -102,7 +102,7 @@ Server will be running on port 4433 (QUIC/UDP).
 
 ### 3. Kernel Bypass
 
-AF_XDP kernel bypass is automatically enabled on Linux. No additional configuration needed.
+DPDK kernel bypass is available for maximum performance. Requires NIC bound to vfio-pci driver.
 
 ## Server Management
 
