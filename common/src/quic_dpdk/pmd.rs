@@ -226,16 +226,14 @@ impl DpdkPort {
 
         let mut ptrs: Vec<*mut rte_mbuf> = mbufs.iter().map(|m| m.as_ptr()).collect();
 
-        let nb_tx = unsafe {
+        unsafe {
             rte_eth_tx_burst(
                 self.port_id,
                 queue_id,
                 ptrs.as_mut_ptr(),
                 mbufs.len() as u16,
             )
-        };
-
-        nb_tx
+        }
     }
 
     #[cfg(not(feature = "dpdk"))]

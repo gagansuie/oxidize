@@ -81,10 +81,7 @@ impl DpdkPmdSocket {
         let mut mac_addr = rte_ether_addr { addr_bytes: [0; 6] };
         unsafe {
             if rte_eth_macaddr_get(port_id, &mut mac_addr) != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Failed to get MAC address",
-                ));
+                return Err(io::Error::other("Failed to get MAC address"));
             }
         }
 
@@ -468,10 +465,22 @@ impl QuicSocket {
     }
 }
 
+// SAFETY: QuicSocket is Send+Sync because:
+// - For Std variant: std::net::UdpSocket is Send+Sync
+// - For Dpdk variant: DPDK queues are designed for single-threaded access per queue,
+//   but the socket itself can be safely sent between threads. The raw pointers point
+//   to DPDK-managed memory that outlives the socket.
+unsafe impl Send for QuicSocket {}
+unsafe impl Sync for QuicSocket {}
+
 /// Async wrapper for QuicSocket using tokio
 pub struct AsyncQuicSocket {
     inner: Arc<QuicSocket>,
 }
+
+// SAFETY: AsyncQuicSocket is Send+Sync because QuicSocket is Send+Sync
+unsafe impl Send for AsyncQuicSocket {}
+unsafe impl Sync for AsyncQuicSocket {}
 
 impl AsyncQuicSocket {
     pub fn new(socket: QuicSocket) -> Self {

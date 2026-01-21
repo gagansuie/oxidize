@@ -413,14 +413,32 @@ jobs:
           
           # Fetch server IPs from Latitude.sh API
           echo "→ Fetching servers from Latitude.sh API..."
-          SERVERS_JSON=$(curl -s -H "Authorization: Bearer $LATITUDE_API_TOKEN" \
-            "https://api.latitude.sh/servers?filter[project]=${LATITUDE_PROJECT_ID:-}")
+          
+          # Build API URL (use project filter if project ID is set)
+          API_URL="https://api.latitude.sh/servers"
+          if [[ -n "$LATITUDE_PROJECT_ID" ]]; then
+            API_URL="${API_URL}?filter%5Bproject%5D=${LATITUDE_PROJECT_ID}"
+          fi
+          
+          # Fetch with error handling
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/latitude_response.json \
+            -H "Authorization: Bearer $LATITUDE_API_TOKEN" \
+            "$API_URL")
+          
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "❌ Latitude.sh API returned HTTP $HTTP_CODE"
+            cat /tmp/latitude_response.json 2>/dev/null || true
+            exit 1
+          fi
+          
+          SERVERS_JSON=$(cat /tmp/latitude_response.json)
           
           # Extract running server IPs
           LATITUDE_HOST=$(echo "$SERVERS_JSON" | jq -r '.data[] | select(.attributes.status == "on") | .attributes.primary_ipv4' | head -1)
           
           if [[ -z "$LATITUDE_HOST" ]] || [[ "$LATITUDE_HOST" == "null" ]]; then
             echo "❌ No running Latitude.sh servers found"
+            echo "API response: $SERVERS_JSON"
             exit 1
           fi
           
