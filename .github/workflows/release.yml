@@ -401,64 +401,30 @@ jobs:
 
       - name: Deploy to Latitude.sh
         env:
-          LATITUDE_API_TOKEN: ${{ secrets.LATITUDE_API_TOKEN }}
           LATITUDE_SSH_KEY: ${{ secrets.LATITUDE_SSH_KEY }}
-          LATITUDE_PROJECT_ID: ${{ secrets.LATITUDE_PROJECT_ID }}
+          LATITUDE_SERVER_IP: ${{ secrets.LATITUDE_SERVER_IP }}
         run: |
-          # Skip if secrets not configured
-          if [[ -z "$LATITUDE_API_TOKEN" ]] || [[ -z "$LATITUDE_SSH_KEY" ]]; then
+          # Skip if not configured
+          if [[ -z "$LATITUDE_SSH_KEY" ]] || [[ -z "$LATITUDE_SERVER_IP" ]]; then
             echo "⏭️ Latitude.sh not configured, skipping"
             exit 0
           fi
-          
-          # Fetch server IPs from Latitude.sh API
-          echo "→ Fetching servers from Latitude.sh API..."
-          
-          # Build API URL (use project filter if project ID is set)
-          API_URL="https://api.latitude.sh/servers"
-          if [[ -n "$LATITUDE_PROJECT_ID" ]]; then
-            API_URL="${API_URL}?filter%5Bproject%5D=${LATITUDE_PROJECT_ID}"
-          fi
-          
-          # Fetch with error handling
-          HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/latitude_response.json \
-            -H "Authorization: Bearer $LATITUDE_API_TOKEN" \
-            "$API_URL")
-          
-          if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "❌ Latitude.sh API returned HTTP $HTTP_CODE"
-            cat /tmp/latitude_response.json 2>/dev/null || true
-            exit 1
-          fi
-          
-          SERVERS_JSON=$(cat /tmp/latitude_response.json)
-          
-          # Extract running server IPs
-          LATITUDE_HOST=$(echo "$SERVERS_JSON" | jq -r '.data[] | select(.attributes.status == "on") | .attributes.primary_ipv4' | head -1)
-          
-          if [[ -z "$LATITUDE_HOST" ]] || [[ "$LATITUDE_HOST" == "null" ]]; then
-            echo "❌ No running Latitude.sh servers found"
-            echo "API response: $SERVERS_JSON"
-            exit 1
-          fi
-          
-          echo "→ Found server: $LATITUDE_HOST"
           
           # Setup SSH
           mkdir -p ~/.ssh
           echo "$LATITUDE_SSH_KEY" > ~/.ssh/latitude_key
           chmod 600 ~/.ssh/latitude_key
-          ssh-keyscan -H $LATITUDE_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H $LATITUDE_SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null || true
           
-          echo "→ Deploying to Latitude.sh ($LATITUDE_HOST)..."
+          echo "→ Deploying to Latitude.sh ($LATITUDE_SERVER_IP)..."
           
           # Upload binary
-          scp -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no \
+          scp -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no -o ConnectTimeout=60 \
               target/release/oxidize-server \
-              ubuntu@$LATITUDE_HOST:/tmp/oxidize-server
+              ubuntu@$LATITUDE_SERVER_IP:/tmp/oxidize-server
           
           # Zero-downtime deploy with systemd + DPDK
-          ssh -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no ubuntu@$LATITUDE_HOST << 'REMOTE'
+          ssh -i ~/.ssh/latitude_key -o StrictHostKeyChecking=no -o ConnectTimeout=60 ubuntu@$LATITUDE_SERVER_IP << 'REMOTE'
             set -e
             BINARY=/tmp/oxidize-server
             INSTALL=/opt/oxidize/oxidize-server
