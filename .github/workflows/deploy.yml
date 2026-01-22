@@ -102,14 +102,23 @@ jobs:
           PROJECT_ID=$(curl -sf "https://api.latitude.sh/projects" \
             -H "Authorization: Bearer $LATITUDE_API_KEY" | jq -r '.data[0].id')
           echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          echo "Project ID: $PROJECT_ID"
           
-          # Get first SSH key ID
-          SSH_KEY_ID=$(curl -sf "https://api.latitude.sh/ssh_keys" \
+          # Get first SSH key ID (requires project ID)
+          SSH_KEY_ID=$(curl -sf "https://api.latitude.sh/projects/$PROJECT_ID/ssh_keys" \
             -H "Authorization: Bearer $LATITUDE_API_KEY" | jq -r '.data[0].id')
           echo "ssh_key_id=$SSH_KEY_ID" >> $GITHUB_OUTPUT
-          
-          echo "Project ID: $PROJECT_ID"
           echo "SSH Key ID: $SSH_KEY_ID"
+          
+          # Validate IDs are not empty
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+            echo "ERROR: Failed to fetch project ID"
+            exit 1
+          fi
+          if [ -z "$SSH_KEY_ID" ] || [ "$SSH_KEY_ID" = "null" ]; then
+            echo "ERROR: Failed to fetch SSH key ID. Make sure an SSH key exists in the project."
+            exit 1
+          fi
 
       - name: Terraform Init
         working-directory: infrastructure/terraform
