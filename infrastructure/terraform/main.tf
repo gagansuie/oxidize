@@ -44,9 +44,10 @@ resource "latitudesh_server" "relay" {
     "managed_by:terraform"
   ]
 
-  # lifecycle {
-  #   prevent_destroy = true
-  # }
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [ssh_keys]
+  }
 }
 
 output "server_ips" {
