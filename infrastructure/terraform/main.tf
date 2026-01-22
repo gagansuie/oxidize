@@ -38,11 +38,11 @@ resource "latitudesh_server" "relay" {
   hostname         = each.value.name
   ssh_keys         = [var.latitude_ssh_key_id]
 
-  tags = {
-    environment = var.environment
-    region      = each.value.region
-    managed_by  = "terraform"
-  }
+  tags = [
+    "environment:${var.environment}",
+    "region:${each.value.region}",
+    "managed_by:terraform"
+  ]
 
   lifecycle {
     prevent_destroy = true
