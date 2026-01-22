@@ -84,32 +84,8 @@ resource "cloudflare_record" "relay_regional_a" {
   proxied = false  # Must be false for QUIC/UDP
 }
 
-# Fetch IPv6 from Latitude API (provider doesn't expose it)
-data "external" "server_ipv6" {
-  for_each = latitudesh_server.relay
-
-  program = ["bash", "-c", <<-EOF
-    IPV6=$(curl -sf "https://api.latitude.sh/servers/${each.value.id}" \
-      -H "Authorization: Bearer ${var.latitude_api_key}" | \
-      jq -r '.data.ip_addresses[] | select(.family == "IPv6" and .primary == true) | .address // empty')
-    echo "{\"ipv6\": \"$IPV6\"}"
-  EOF
-  ]
-
-  depends_on = [latitudesh_server.relay]
-}
-
-# Regional IPv6 AAAA records
-resource "cloudflare_record" "relay_regional_aaaa" {
-  for_each = { for name, data in data.external.server_ipv6 : name => data if data.result.ipv6 != "" }
-
-  zone_id = data.cloudflare_zone.oxd.id
-  name    = "${var.servers[index(var.servers.*.name, each.key)].site}.relay"
-  content = each.value.result.ipv6
-  type    = "AAAA"
-  ttl     = 300
-  proxied = false
-}
+# Note: IPv6 AAAA records created via workflow after server provisioning
+# (latitudesh provider doesn't expose IPv6, and external data can't be used with for_each)
 
 # Main relay.oxd.sh points to all servers (global round-robin)
 resource "cloudflare_record" "relay_main_a" {
@@ -119,18 +95,6 @@ resource "cloudflare_record" "relay_main_a" {
   name    = "relay"
   content = each.value.primary_ipv4
   type    = "A"
-  ttl     = 300
-  proxied = false
-}
-
-# Main IPv6 AAAA records
-resource "cloudflare_record" "relay_main_aaaa" {
-  for_each = { for name, data in data.external.server_ipv6 : name => data if data.result.ipv6 != "" }
-
-  zone_id = data.cloudflare_zone.oxd.id
-  name    = "relay"
-  content = each.value.result.ipv6
-  type    = "AAAA"
   ttl     = 300
   proxied = false
 }

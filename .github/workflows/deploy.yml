@@ -34,8 +34,6 @@ env:
   CARGO_TERM_COLOR: always
   TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
   TF_VAR_latitude_api_key: ${{ secrets.LATITUDE_API_KEY }}
-  TF_VAR_latitude_project_id: ${{ secrets.LATITUDE_PROJECT_ID }}
-  TF_VAR_latitude_ssh_key_id: ${{ secrets.LATITUDE_SSH_KEY_ID }}
   TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   ANSIBLE_HOST_KEY_CHECKING: 'False'
 
@@ -95,22 +93,49 @@ jobs:
           terraform_wrapper: false
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
+      - name: Fetch Latitude IDs
+        id: latitude
+        env:
+          LATITUDE_API_KEY: ${{ secrets.LATITUDE_API_KEY }}
+        run: |
+          # Get first project ID
+          PROJECT_ID=$(curl -sf "https://api.latitude.sh/projects" \
+            -H "Authorization: Bearer $LATITUDE_API_KEY" | jq -r '.data[0].id')
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+          
+          # Get first SSH key ID
+          SSH_KEY_ID=$(curl -sf "https://api.latitude.sh/ssh_keys" \
+            -H "Authorization: Bearer $LATITUDE_API_KEY" | jq -r '.data[0].id')
+          echo "ssh_key_id=$SSH_KEY_ID" >> $GITHUB_OUTPUT
+          
+          echo "Project ID: $PROJECT_ID"
+          echo "SSH Key ID: $SSH_KEY_ID"
+
       - name: Terraform Init
         working-directory: infrastructure/terraform
         run: terraform init
 
       - name: Terraform Plan
         working-directory: infrastructure/terraform
+        env:
+          TF_VAR_latitude_project_id: ${{ steps.latitude.outputs.project_id }}
+          TF_VAR_latitude_ssh_key_id: ${{ steps.latitude.outputs.ssh_key_id }}
         run: terraform plan -out=tfplan
 
       - name: Terraform Apply
         if: inputs.action != 'destroy'
         working-directory: infrastructure/terraform
+        env:
+          TF_VAR_latitude_project_id: ${{ steps.latitude.outputs.project_id }}
+          TF_VAR_latitude_ssh_key_id: ${{ steps.latitude.outputs.ssh_key_id }}
         run: terraform apply -auto-approve tfplan
 
       - name: Terraform Destroy
         if: inputs.action == 'destroy'
         working-directory: infrastructure/terraform
+        env:
+          TF_VAR_latitude_project_id: ${{ steps.latitude.outputs.project_id }}
+          TF_VAR_latitude_ssh_key_id: ${{ steps.latitude.outputs.ssh_key_id }}
         run: terraform destroy -auto-approve
 
       - name: Get Terraform Outputs
@@ -128,6 +153,45 @@ jobs:
           
           DNS_RECORDS=$(terraform output -json dns_records)
           echo "dns_records=$DNS_RECORDS" >> $GITHUB_OUTPUT
+
+      - name: Create IPv6 AAAA Records
+        if: inputs.action != 'destroy'
+        env:
+          LATITUDE_API_KEY: ${{ secrets.LATITUDE_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          # Get server IDs from Terraform state
+          cd infrastructure/terraform
+          
+          for SERVER_NAME in $(terraform output -json server_ips | jq -r 'keys[]'); do
+            # Get server ID from state
+            SERVER_ID=$(terraform state show "latitudesh_server.relay[\"$SERVER_NAME\"]" | grep "^    id" | awk '{print $3}' | tr -d '"')
+            SITE=$(terraform state show "latitudesh_server.relay[\"$SERVER_NAME\"]" | grep "^    site" | awk '{print $3}' | tr -d '"')
+            
+            # Fetch IPv6 from Latitude API
+            IPV6=$(curl -sf "https://api.latitude.sh/servers/$SERVER_ID" \
+              -H "Authorization: Bearer $LATITUDE_API_KEY" | \
+              jq -r '.data.ip_addresses[] | select(.family == "IPv6" and .primary == true) | .address // empty')
+            
+            if [ -n "$IPV6" ]; then
+              echo "Creating AAAA records for $SERVER_NAME: $IPV6"
+              
+              # Regional AAAA record (e.g., chi.relay.oxd.sh)
+              curl -sf -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "{\"type\":\"AAAA\",\"name\":\"$SITE.relay\",\"content\":\"$IPV6\",\"ttl\":300,\"proxied\":false}" || true
+              
+              # Main AAAA record (relay.oxd.sh)
+              curl -sf -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "{\"type\":\"AAAA\",\"name\":\"relay\",\"content\":\"$IPV6\",\"ttl\":300,\"proxied\":false}" || true
+            else
+              echo "No IPv6 found for $SERVER_NAME"
+            fi
+          done
 
   # ============================================
   # Ansible: Configure & Deploy
