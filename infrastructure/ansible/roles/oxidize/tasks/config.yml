@@ -1,0 +1,49 @@
+---
+- name: Check if config exists
+  stat:
+    path: /etc/oxidize/server.toml
+  register: config_exists
+
+- name: Load NIC configuration
+  slurp:
+    src: /etc/oxidize/nic-config.env
+  register: nic_config_raw
+  when: not config_exists.stat.exists
+  ignore_errors: yes
+
+- name: Parse NIC configuration
+  set_fact:
+    nic_config: "{{ dict(nic_config_raw.content | b64decode | split('\n') | select | map('split', '=') | list) }}"
+  when: nic_config_raw.content is defined
+
+- name: Get public IP for config
+  uri:
+    url: https://ifconfig.me
+    return_content: yes
+    timeout: 10
+  register: public_ip
+  when: not config_exists.stat.exists
+
+- name: Get CPU count
+  command: nproc
+  register: cpu_count
+  changed_when: false
+
+- name: Get hugepages count
+  slurp:
+    src: /proc/sys/vm/nr_hugepages
+  register: hugepages_raw
+  ignore_errors: yes
+
+- name: Set hugepages fact
+  set_fact:
+    hugepages_count: "{{ hugepages_raw.content | b64decode | trim | default('0') }}"
+  when: hugepages_raw.content is defined
+
+- name: Generate server configuration
+  template:
+    src: server.toml.j2
+    dest: /etc/oxidize/server.toml
+    mode: '0644'
+  become: yes
+  when: not config_exists.stat.exists

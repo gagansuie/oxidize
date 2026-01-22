@@ -41,55 +41,161 @@ Quick-start guide for deploying Oxidize on Latitude.sh bare metal with **DPDK ke
 - Full 10Gbps dedicated to QUIC relay traffic
 - Zero kernel overhead on data NIC
 
-## Quick Start
+## Quick Start (Terraform + Ansible)
 
-### 1. Provision Server on Latitude.sh
+Infrastructure is managed with **Terraform** (provisioning) and **Ansible** (configuration).
 
-1. Go to [latitude.sh/dashboard](https://www.latitude.sh/dashboard/signup)
-2. Select **Chicago** location
-3. Choose **m4.metal.small** ($189/mo) or **f4.metal.small** ($291/mo)
-4. Select **Ubuntu 22.04** or **24.04**
-5. Add your SSH key
-6. Deploy
+### 1. Add Server to Terraform
 
-### 2. Initial Server Setup
+Edit `infrastructure/terraform/servers.auto.tfvars`:
+
+```hcl
+servers = [
+  {
+    name    = "chicago-1"
+    region  = "chicago"
+    site    = "chi"
+    plan    = "m4-metal-small"
+    os      = "ubuntu_22_04_x64_lts"
+    enabled = true
+  },
+
+  # Add more servers:
+  {
+    name    = "chicago-2"
+    region  = "chicago"
+    site    = "chi"
+    plan    = "m4-metal-small"
+    os      = "ubuntu_22_04_x64_lts"
+    enabled = true
+  },
+
+  {
+    name    = "frankfurt-1"
+    region  = "frankfurt"
+    site    = "fra"
+    plan    = "m4-metal-small"
+    os      = "ubuntu_22_04_x64_lts"
+    enabled = true
+  },
+]
+```
+
+**Site codes:** `chi` (Chicago), `nyc` (New York), `fra` (Frankfurt), `ams` (Amsterdam), `syd` (Sydney)
+
+### 2. Add GitHub Secrets
+
+Go to: `github.com/gagansuie/oxidize` → Settings → Secrets → Actions
+
+| Secret | Value |
+|--------|-------|
+| `LATITUDE_API_KEY` | API key (from [dashboard](https://www.latitude.sh/dashboard/account/api-keys)) |
+| `LATITUDE_SSH_KEY` | SSH private key (`~/.ssh/latitude_oxidize`) |
+| `TF_API_TOKEN` | Terraform Cloud API token (see below) |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with DNS edit permissions (see below) |
+
+### Cloudflare API Token (one-time)
+
+1. Go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
+2. Create Token → **Edit zone DNS** template
+3. Zone Resources: Include → Specific zone → `oxd.sh`
+4. Create Token → Copy and add as `CLOUDFLARE_API_TOKEN` secret
+
+### Terraform Cloud Setup (one-time)
+
+1. Create account at [app.terraform.io](https://app.terraform.io)
+2. Create organization: `gagansuie`
+3. Create workspace: `oxidize-infrastructure` (CLI-driven)
+4. In workspace settings → General → Execution Mode: **Local**
+5. Go to User Settings → Tokens → Create API token
+6. Add token as `TF_API_TOKEN` secret in GitHub
+
+### 3. Push to Main
+
+The workflow automatically:
+
+1. **Terraform:** Provision servers on Latitude.sh
+2. **Ansible Setup:** Install DPDK, hugepages, UFW, system tuning
+3. **Ansible Deploy:** Upload binary, start service, health check
+
+### 4. Workflow Options
 
 ```bash
-# SSH into server
-ssh root@YOUR_SERVER_IP
+# Full deploy (provision + setup + deploy)
+gh workflow run deploy.yml
 
-# Clone repository
+# Just deploy binary (servers already configured)
+gh workflow run deploy.yml -f action=deploy
+
+# Run full setup on existing servers
+gh workflow run deploy.yml -f action=setup
+
+# Provision new servers only
+gh workflow run deploy.yml -f action=provision
+
+# Destroy all servers (careful!)
+gh workflow run deploy.yml -f action=destroy
+```
+
+### 5. Local Development
+
+```bash
+cd infrastructure/terraform
+export TF_VAR_latitude_api_key="your-api-key"
+terraform init
+terraform plan
+terraform apply
+
+cd ../ansible
+ansible-playbook -i inventory/terraform.py playbooks/setup.yml
+ansible-playbook -i inventory/terraform.py playbooks/deploy.yml
+```
+
+### 6. Check Status
+
+```bash
+ssh ubuntu@SERVER_IP
+
+systemctl status oxidize        # Service status
+journalctl -u oxidize -f        # Logs
+dpdk-devbind.py --status-dev net  # DPDK NIC status
+ss -ulnp | grep 4433            # Port check
+```
+
+## Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Terraform     │ ──▶ │     Ansible     │ ──▶ │    Oxidize      │
+│  (Provision)    │     │   (Configure)   │     │   (Running)     │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+  - Create servers       - Install DPDK         - QUIC relay
+  - Manage state         - Configure hugepages  - Kernel bypass
+  - Output IPs           - Setup UFW            - Health checks
+```
+
+**Ansible Roles:**
+- `common` - Base packages, UFW, system tuning
+- `dpdk` - IOMMU, hugepages, DPDK install, NIC binding
+- `oxidize` - TLS certs, config, systemd service, deployment
+
+## Manual Deployment (Optional)
+
+For manual setup without GitHub Actions:
+
+```bash
+ssh ubuntu@YOUR_SERVER_IP
+
 git clone https://github.com/gagansuie/oxidize.git
 cd oxidize
 
-# Run setup script (configures hugepages, IOMMU, dual NICs)
+# Full setup + deploy
 sudo ./scripts/latitude/latitude-setup.sh
-
-# Reboot if IOMMU was configured
 sudo reboot
-```
-
-### 3. Deploy Oxidize
-
-```bash
-# After reboot, SSH back in
-cd oxidize
-
-# Full deployment (build, install, configure, TLS, start)
+sudo ./scripts/dpdk/install-dpdk.sh
+sudo ./scripts/dpdk/setup-hugepages.sh
+sudo ./scripts/dpdk/bind-nic.sh <data_nic>
 sudo ./scripts/latitude/latitude-deploy.sh --full
-```
-
-### 4. Verify Deployment
-
-```bash
-# Check status
-sudo ./scripts/latitude/latitude-deploy.sh --status
-
-# Health check
-sudo ./scripts/latitude/latitude-deploy.sh --health
-
-# View logs
-sudo ./scripts/latitude/latitude-deploy.sh --logs
 ```
 
 ## Configuration
@@ -236,6 +342,60 @@ ss -ulnp | grep 4433
 ufw status
 ```
 
+## DNS Configuration (Cloudflare)
+
+After deployment, you need to add DNS records for your relay domain.
+
+### Single Server
+
+Add these records to Cloudflare for `oxd.sh`:
+
+| Type | Name | Value | Proxy |
+|------|------|-------|-------|
+| A | relay | `<IPv4 from Terraform output>` | DNS only (gray cloud) |
+| AAAA | relay | `<IPv6 from Terraform output>` | DNS only (gray cloud) |
+
+**Important:** Proxy must be OFF (gray cloud) for QUIC/UDP traffic.
+
+### Multiple Servers (Regional Subdomains)
+
+For multi-region deployments, use regional subdomains:
+
+| Type | Name | Value | Description |
+|------|------|-------|-------------|
+| A | chi.relay | `<Chicago IPv4>` | Chicago relay |
+| AAAA | chi.relay | `<Chicago IPv6>` | Chicago relay |
+| A | nyc.relay | `<New York IPv4>` | New York relay |
+| A | fra.relay | `<Frankfurt IPv4>` | Frankfurt relay |
+
+**Client configuration:** Clients can specify which relay to use or auto-select nearest.
+
+### Getting Server IPs
+
+After Terraform runs, get IPs from:
+
+```bash
+# Via Terraform
+cd infrastructure/terraform
+terraform output server_ips
+
+# Via Latitude API
+curl -s "https://api.latitude.sh/servers" \
+  -H "Authorization: Bearer $LATITUDE_API_KEY" | \
+  jq '.data[] | {hostname: .hostname, ipv4: .primary_ipv4, ipv6: .primary_ipv6}'
+
+# Or check GitHub Actions workflow summary
+```
+
+### DNS Propagation
+
+After adding records, verify propagation:
+
+```bash
+dig relay.oxd.sh +short
+dig chi.relay.oxd.sh +short
+```
+
 ## Scaling
 
 ### Vertical (Same Server)
@@ -247,12 +407,12 @@ ufw status
 
 Deploy additional servers in different locations:
 
-| Location | Latency Target |
-|----------|---------------|
-| Chicago | US Midwest |
-| Los Angeles | US West |
-| Miami | US Southeast |
-| Ashburn | US East |
+| Location | Subdomain | Latency Target |
+|----------|-----------|----------------|
+| Chicago | chi.relay.oxd.sh | US Midwest |
+| New York | nyc.relay.oxd.sh | US East |
+| Los Angeles | lax.relay.oxd.sh | US West |
+| Frankfurt | fra.relay.oxd.sh | Europe |
 
 ## Cost Comparison
 

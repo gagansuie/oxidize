@@ -1,0 +1,28 @@
+[server]
+listen_addr = "0.0.0.0:4433"
+public_ip = "{{ public_ip.content | default('0.0.0.0') }}"
+cert_path = "/etc/oxidize/certs/server.crt"
+key_path = "/etc/oxidize/certs/server.key"
+
+[network]
+interface = "{{ nic_config.MGMT_NIC | default('eth0') }}"
+kernel_bypass = "{{ 'dpdk' if nic_config.DPDK_MODE | default('false') == 'true' else 'none' }}"
+workers = {{ cpu_count.stdout | default('4') }}
+zero_copy = {{ 'true' if nic_config.DPDK_MODE | default('false') == 'true' else 'false' }}
+dpdk_pci = "{{ nic_config.DATA_PCI | default('') }}"
+
+[performance]
+hugepages = {{ 'true' if (hugepages_count | default('0') | int) > 0 else 'false' }}
+rx_ring_size = 4096
+tx_ring_size = 4096
+batch_size = 64
+
+[quic]
+max_idle_timeout_ms = 30000
+initial_rtt_ms = 100
+max_udp_payload_size = 1350
+max_concurrent_streams = 100
+max_connections = 10000
+
+[logging]
+level = "info"

@@ -1,0 +1,31 @@
+---
+- name: Check if TLS certificate exists
+  stat:
+    path: /etc/oxidize/certs/server.crt
+  register: tls_cert
+
+- name: Get public IP
+  uri:
+    url: https://ifconfig.me
+    return_content: yes
+    timeout: 10
+  register: public_ip
+  when: not tls_cert.stat.exists
+
+- name: Generate TLS certificate
+  command: >
+    openssl req -x509 -newkey rsa:4096
+    -keyout /etc/oxidize/certs/server.key
+    -out /etc/oxidize/certs/server.crt
+    -days 365 -nodes
+    -subj "/CN={{ public_ip.content }}/O=Oxidize/C=US"
+    -addext "subjectAltName=IP:{{ public_ip.content }},DNS:localhost"
+  become: yes
+  when: not tls_cert.stat.exists
+
+- name: Set certificate permissions
+  file:
+    path: /etc/oxidize/certs/server.key
+    mode: '0600'
+  become: yes
+  when: not tls_cert.stat.exists

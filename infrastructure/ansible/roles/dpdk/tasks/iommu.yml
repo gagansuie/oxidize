@@ -1,0 +1,39 @@
+---
+- name: Check if IOMMU is enabled
+  shell: dmesg | grep -i iommu | grep -i enabled || true
+  register: iommu_status
+  changed_when: false
+
+- name: Configure IOMMU in GRUB
+  lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on amd_iommu=on iommu=pt"'
+    backup: yes
+  become: yes
+  register: grub_updated
+  when: iommu_status.stdout == ""
+
+- name: Update GRUB
+  command: update-grub
+  become: yes
+  when: grub_updated.changed | default(false)
+
+- name: Load vfio-pci module
+  modprobe:
+    name: vfio-pci
+    state: present
+  become: yes
+  ignore_errors: yes
+
+- name: Ensure vfio-pci loads on boot
+  lineinfile:
+    path: /etc/modules-load.d/vfio.conf
+    line: vfio-pci
+    create: yes
+  become: yes
+
+- name: Set reboot required fact
+  set_fact:
+    reboot_required: true
+  when: grub_updated.changed | default(false)

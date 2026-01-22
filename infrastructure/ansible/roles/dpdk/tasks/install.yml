@@ -1,0 +1,66 @@
+---
+- name: Create DPDK build directory
+  file:
+    path: /tmp/dpdk-build
+    state: directory
+  become: yes
+
+- name: Download DPDK 23.11
+  get_url:
+    url: https://fast.dpdk.org/rel/dpdk-23.11.1.tar.xz
+    dest: /tmp/dpdk-build/dpdk-23.11.1.tar.xz
+  become: yes
+
+- name: Extract DPDK
+  unarchive:
+    src: /tmp/dpdk-build/dpdk-23.11.1.tar.xz
+    dest: /tmp/dpdk-build
+    remote_src: yes
+  become: yes
+
+- name: Configure DPDK with meson
+  command:
+    cmd: meson setup build --prefix=/opt/dpdk -Dplatform=native -Ddisable_drivers=raw/*,crypto/*,compress/*,regex/*,ml/*
+    chdir: /tmp/dpdk-build/dpdk-23.11.1
+    creates: /tmp/dpdk-build/dpdk-23.11.1/build/build.ninja
+  become: yes
+
+- name: Build DPDK
+  command:
+    cmd: ninja -C build
+    chdir: /tmp/dpdk-build/dpdk-23.11.1
+  become: yes
+
+- name: Install DPDK
+  command:
+    cmd: ninja -C build install
+    chdir: /tmp/dpdk-build/dpdk-23.11.1
+  become: yes
+
+- name: Update ldconfig
+  command: ldconfig
+  become: yes
+
+- name: Add DPDK to PATH
+  lineinfile:
+    path: /etc/environment
+    regexp: '^PATH='
+    line: 'PATH="/opt/dpdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+  become: yes
+
+- name: Create symlink for dpdk-devbind
+  file:
+    src: /opt/dpdk/bin/dpdk-devbind.py
+    dest: /usr/local/bin/dpdk-devbind.py
+    state: link
+  become: yes
+
+- name: Set dpdk_just_installed fact
+  set_fact:
+    dpdk_just_installed: true
+
+- name: Clean up build directory
+  file:
+    path: /tmp/dpdk-build
+    state: absent
+  become: yes

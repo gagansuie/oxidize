@@ -1,0 +1,70 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  become: yes
+
+- name: Install base packages
+  apt:
+    name:
+      - build-essential
+      - pkg-config
+      - libnuma-dev
+      - libelf-dev
+      - libpcap-dev
+      - python3-pip
+      - python3-pyelftools
+      - meson
+      - ninja-build
+      - curl
+      - jq
+      - ufw
+    state: present
+  become: yes
+
+- name: Configure UFW - Allow SSH
+  ufw:
+    rule: allow
+    port: '22'
+    proto: tcp
+  become: yes
+
+- name: Configure UFW - Allow QUIC
+  ufw:
+    rule: allow
+    port: '4433'
+    proto: udp
+  become: yes
+
+- name: Enable UFW
+  ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+  become: yes
+
+- name: Apply system tuning
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-oxidize.conf
+    reload: yes
+  become: yes
+  loop:
+    - { name: 'net.core.rmem_max', value: '268435456' }
+    - { name: 'net.core.wmem_max', value: '268435456' }
+    - { name: 'net.core.netdev_max_backlog', value: '500000' }
+    - { name: 'net.core.somaxconn', value: '65535' }
+    - { name: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
+    - { name: 'vm.swappiness', value: '10' }
+    - { name: 'fs.file-max', value: '4194304' }
+
+- name: Set file limits
+  pam_limits:
+    domain: '*'
+    limit_type: '-'
+    limit_item: nofile
+    value: '2097152'
+  become: yes

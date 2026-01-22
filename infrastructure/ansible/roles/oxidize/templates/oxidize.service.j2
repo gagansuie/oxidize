@@ -1,0 +1,27 @@
+[Unit]
+Description=Oxidize Network Relay Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/oxidize
+ExecStart=/opt/oxidize/oxidize-server --config /etc/oxidize/server.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=2097152
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_IPC_LOCK
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=99
+Nice=-20
+NoNewPrivileges=false
+ProtectSystem=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

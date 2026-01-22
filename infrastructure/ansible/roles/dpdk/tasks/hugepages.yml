@@ -1,0 +1,53 @@
+---
+- name: Get total memory in GB
+  shell: free -g | awk '/^Mem:/{print $2}'
+  register: total_mem
+  changed_when: false
+
+- name: Calculate hugepages (50% of RAM)
+  set_fact:
+    hugepages_count: "{{ ((total_mem.stdout | int) * 1024 / 2 / 2) | int }}"
+
+- name: Configure hugepages in GRUB
+  lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX='
+    line: 'GRUB_CMDLINE_LINUX="default_hugepagesz=2M hugepagesz=2M hugepages={{ hugepages_count }}"'
+    backup: yes
+  become: yes
+  register: hugepages_grub
+
+- name: Update GRUB for hugepages
+  command: update-grub
+  become: yes
+  when: hugepages_grub.changed
+
+- name: Create hugetlbfs mount point
+  file:
+    path: /mnt/huge
+    state: directory
+    mode: '0777'
+  become: yes
+
+- name: Mount hugetlbfs
+  mount:
+    path: /mnt/huge
+    src: nodev
+    fstype: hugetlbfs
+    opts: pagesize=2M
+    state: mounted
+  become: yes
+
+- name: Allocate hugepages at runtime
+  sysctl:
+    name: vm.nr_hugepages
+    value: "{{ hugepages_count }}"
+    state: present
+    reload: yes
+  become: yes
+  ignore_errors: yes
+
+- name: Set reboot required for hugepages
+  set_fact:
+    reboot_required: true
+  when: hugepages_grub.changed

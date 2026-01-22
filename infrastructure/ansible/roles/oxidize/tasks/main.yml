@@ -1,0 +1,26 @@
+---
+- name: Create oxidize directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  become: yes
+  loop:
+    - /opt/oxidize
+    - /opt/oxidize/backup
+    - /etc/oxidize
+    - /etc/oxidize/certs
+    - /var/log/oxidize
+
+- name: Include TLS certificate tasks
+  include_tasks: tls.yml
+
+- name: Include configuration tasks
+  include_tasks: config.yml
+
+- name: Include systemd service tasks
+  include_tasks: service.yml
+
+- name: Include deployment tasks
+  include_tasks: deploy.yml
+  when: oxidize_binary_path is defined

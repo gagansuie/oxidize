@@ -1,0 +1,51 @@
+---
+- name: Stop oxidize service
+  systemd:
+    name: oxidize
+    state: stopped
+  become: yes
+  ignore_errors: yes
+
+- name: Backup current binary
+  copy:
+    src: /opt/oxidize/oxidize-server
+    dest: "/opt/oxidize/backup/oxidize-server.{{ ansible_date_time.epoch }}"
+    remote_src: yes
+  become: yes
+  ignore_errors: yes
+
+- name: Upload new binary
+  copy:
+    src: "{{ oxidize_binary_path }}"
+    dest: /opt/oxidize/oxidize-server
+    mode: '0755'
+  become: yes
+
+- name: Start oxidize service
+  systemd:
+    name: oxidize
+    state: started
+  become: yes
+
+- name: Wait for service to be ready
+  wait_for:
+    port: 4433
+    timeout: 30
+  ignore_errors: yes
+
+- name: Health check
+  command: ss -ulnp
+  register: health_check
+  changed_when: false
+
+- name: Verify service is listening
+  assert:
+    that:
+      - "'4433' in health_check.stdout"
+    fail_msg: "Service is not listening on port 4433"
+    success_msg: "Service is healthy and listening on port 4433"
+
+- name: Clean old backups (keep last 3)
+  shell: ls -t /opt/oxidize/backup/oxidize-server.* | tail -n +4 | xargs rm -f
+  become: yes
+  ignore_errors: yes

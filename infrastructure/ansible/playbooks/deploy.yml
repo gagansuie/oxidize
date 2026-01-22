@@ -1,0 +1,26 @@
+---
+- name: Deploy Oxidize Binary
+  hosts: relay_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    oxidize_binary_path: "{{ lookup('env', 'OXIDIZE_BINARY') | default('../../../target/release/oxidize-server', true) }}"
+
+  tasks:
+    - name: Verify binary exists
+      local_action:
+        module: stat
+        path: "{{ oxidize_binary_path }}"
+      register: binary_stat
+      become: no
+
+    - name: Fail if binary not found
+      fail:
+        msg: "Binary not found at {{ oxidize_binary_path }}. Set OXIDIZE_BINARY env var."
+      when: not binary_stat.stat.exists
+
+    - name: Include oxidize deploy tasks
+      include_role:
+        name: oxidize
+        tasks_from: deploy.yml
