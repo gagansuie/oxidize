@@ -1,0 +1,239 @@
+name: Deploy Oxidize
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - 'common/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'infrastructure/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: false
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - setup
+          - provision
+          - destroy
+      target:
+        description: 'Target servers (all or specific name)'
+        required: false
+        default: 'all'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+  TF_VAR_latitude_api_key: ${{ secrets.LATITUDE_API_KEY }}
+  TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  ANSIBLE_HOST_KEY_CHECKING: 'False'
+
+jobs:
+  # ============================================
+  # Build the server binary
+  # ============================================
+  build:
+    name: Build Server Binary
+    runs-on: ubuntu-latest
+    if: inputs.action != 'destroy'
+    outputs:
+      binary_artifact: oxidize-server-${{ github.sha }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: x86_64-unknown-linux-gnu
+          cache-prefix: deploy-server
+
+      - name: Build Release Binary
+        run: |
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release -p relay-server
+          strip target/release/oxidize-server
+          ls -lh target/release/oxidize-server
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxidize-server-${{ github.sha }}
+          path: target/release/oxidize-server
+          retention-days: 1
+
+  # ============================================
+  # Terraform: Provision Infrastructure + DNS
+  # ============================================
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    outputs:
+      server_ips: ${{ steps.output.outputs.server_ips }}
+      inventory: ${{ steps.output.outputs.inventory }}
+      dns_records: ${{ steps.output.outputs.dns_records }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6"
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        working-directory: infrastructure/terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: infrastructure/terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: inputs.action != 'destroy'
+        working-directory: infrastructure/terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: inputs.action == 'destroy'
+        working-directory: infrastructure/terraform
+        run: terraform destroy -auto-approve
+
+      - name: Get Terraform Outputs
+        id: output
+        if: inputs.action != 'destroy'
+        working-directory: infrastructure/terraform
+        run: |
+          SERVER_IPS=$(terraform output -json server_ips)
+          echo "server_ips=$SERVER_IPS" >> $GITHUB_OUTPUT
+          
+          INVENTORY=$(terraform output -raw ansible_inventory)
+          echo "inventory<<EOF" >> $GITHUB_OUTPUT
+          echo "$INVENTORY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          DNS_RECORDS=$(terraform output -json dns_records)
+          echo "dns_records=$DNS_RECORDS" >> $GITHUB_OUTPUT
+
+  # ============================================
+  # Ansible: Configure & Deploy
+  # ============================================
+  ansible:
+    name: Ansible
+    needs: [build, terraform]
+    runs-on: ubuntu-latest
+    if: inputs.action != 'destroy'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: oxidize-server-${{ github.sha }}
+          path: ./binary
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible
+        run: pip install ansible
+
+      - name: Setup SSH Key
+        env:
+          SSH_KEY: ${{ secrets.LATITUDE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/latitude_oxidize
+          chmod 600 ~/.ssh/latitude_oxidize
+          
+          echo '${{ needs.terraform.outputs.server_ips }}' | jq -r 'to_entries[] | .value' | while read IP; do
+            ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null || true
+          done
+
+      - name: Create Dynamic Inventory
+        run: |
+          mkdir -p infrastructure/ansible/inventory
+          cat > infrastructure/ansible/inventory/hosts << 'INVENTORY'
+          ${{ needs.terraform.outputs.inventory }}
+          INVENTORY
+          
+          echo "Generated inventory:"
+          cat infrastructure/ansible/inventory/hosts
+
+      - name: Check If First Deploy
+        id: first_deploy
+        run: |
+          # Check if oxidize service exists on first server
+          FIRST_IP=$(echo '${{ needs.terraform.outputs.server_ips }}' | jq -r 'to_entries[0].value')
+          if ssh -o StrictHostKeyChecking=no -i ~/.ssh/latitude_oxidize ubuntu@$FIRST_IP "systemctl is-active oxidize" 2>/dev/null; then
+            echo "first_deploy=false" >> $GITHUB_OUTPUT
+          else
+            echo "first_deploy=true" >> $GITHUB_OUTPUT
+            echo "First deployment detected - will run setup playbook"
+          fi
+
+      - name: Run Setup Playbook
+        if: inputs.action == 'setup' || inputs.action == 'provision' || steps.first_deploy.outputs.first_deploy == 'true'
+        working-directory: infrastructure/ansible
+        run: ansible-playbook playbooks/setup.yml -v
+
+      - name: Run Deploy Playbook
+        working-directory: infrastructure/ansible
+        env:
+          OXIDIZE_BINARY: ${{ github.workspace }}/binary/oxidize-server
+        run: |
+          chmod +x $OXIDIZE_BINARY
+          ansible-playbook playbooks/deploy.yml -v \
+            -e "oxidize_binary_path=$OXIDIZE_BINARY"
+
+      - name: Verify Deployment
+        run: |
+          echo "Deployed to servers:"
+          echo '${{ needs.terraform.outputs.server_ips }}' | jq -r 'to_entries[] | "  \(.key): \(.value)"'
+
+  # ============================================
+  # Summary
+  # ============================================
+  summary:
+    name: Deployment Summary
+    needs: [terraform, ansible]
+    runs-on: ubuntu-latest
+    if: always() && inputs.action != 'destroy'
+    
+    steps:
+      - name: Summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Servers" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo '${{ needs.terraform.outputs.server_ips }}' | jq -r 'to_entries[] | "\(.key): \(.value)"' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### DNS Records (Auto-configured)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo '${{ needs.terraform.outputs.dns_records }}' | jq -r '.main[]' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Status" >> $GITHUB_STEP_SUMMARY
+          echo "- Terraform: ${{ needs.terraform.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Ansible: ${{ needs.ansible.result }}" >> $GITHUB_STEP_SUMMARY
