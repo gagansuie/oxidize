@@ -28,23 +28,15 @@ provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
 
-data "latitudesh_project" "oxidize" {
-  # Uses first project in account
-}
-
-data "latitudesh_ssh_key" "deploy" {
-  # Uses first SSH key in account
-}
-
 resource "latitudesh_server" "relay" {
   for_each = { for server in var.servers : server.name => server if server.enabled }
 
-  project          = data.latitudesh_project.oxidize.id
+  project          = var.latitude_project_id
   plan             = each.value.plan
   site             = each.value.site
   operating_system = each.value.os
   hostname         = each.value.name
-  ssh_keys         = [data.latitudesh_ssh_key.deploy.id]
+  ssh_keys         = [var.latitude_ssh_key_id]
 
   tags = {
     environment = var.environment

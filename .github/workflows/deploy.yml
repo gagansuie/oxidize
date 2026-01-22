@@ -34,6 +34,8 @@ env:
   CARGO_TERM_COLOR: always
   TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
   TF_VAR_latitude_api_key: ${{ secrets.LATITUDE_API_KEY }}
+  TF_VAR_latitude_project_id: ${{ secrets.LATITUDE_PROJECT_ID }}
+  TF_VAR_latitude_ssh_key_id: ${{ secrets.LATITUDE_SSH_KEY_ID }}
   TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   ANSIBLE_HOST_KEY_CHECKING: 'False'
 

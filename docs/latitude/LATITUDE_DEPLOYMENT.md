@@ -90,9 +90,23 @@ Go to: `github.com/gagansuie/oxidize` → Settings → Secrets → Actions
 | Secret | Value |
 |--------|-------|
 | `LATITUDE_API_KEY` | API key (from [dashboard](https://www.latitude.sh/dashboard/account/api-keys)) |
+| `LATITUDE_PROJECT_ID` | Project ID (e.g., `proj_6B1VaL8bEa7qt`) - from dashboard URL |
+| `LATITUDE_SSH_KEY_ID` | SSH key ID - get via API (see below) |
 | `LATITUDE_SSH_KEY` | SSH private key (`~/.ssh/latitude_oxidize`) |
 | `TF_API_TOKEN` | Terraform Cloud API token (see below) |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API token with DNS edit permissions (see below) |
+
+### Get Latitude IDs
+
+```bash
+# Get project ID (visible in dashboard URL or via API)
+curl -s "https://api.latitude.sh/projects" \
+  -H "Authorization: Bearer $LATITUDE_API_KEY" | jq '.data[0].id'
+
+# Get SSH key ID
+curl -s "https://api.latitude.sh/ssh_keys" \
+  -H "Authorization: Bearer $LATITUDE_API_KEY" | jq '.data[] | {id, name}'
+```
 
 ### Cloudflare API Token (one-time)
 
@@ -104,7 +118,7 @@ Go to: `github.com/gagansuie/oxidize` → Settings → Secrets → Actions
 ### Terraform Cloud Setup (one-time)
 
 1. Create account at [app.terraform.io](https://app.terraform.io)
-2. Create organization: `gagansuie`
+2. Create organization: `oxidize`
 3. Create workspace: `oxidize-infrastructure` (CLI-driven)
 4. In workspace settings → General → Execution Mode: **Local**
 5. Go to User Settings → Tokens → Create API token

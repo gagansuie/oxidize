@@ -4,6 +4,16 @@ variable "latitude_api_key" {
   sensitive   = true
 }
 
+variable "latitude_project_id" {
+  description = "Latitude.sh project ID (e.g., proj_xxxxx)"
+  type        = string
+}
+
+variable "latitude_ssh_key_id" {
+  description = "Latitude.sh SSH key ID"
+  type        = string
+}
+
 variable "environment" {
   description = "Environment name (production, staging)"
   type        = string
