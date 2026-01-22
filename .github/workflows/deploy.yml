@@ -181,7 +181,7 @@ jobs:
             # Fetch IPv6 from Latitude API
             IPV6=$(curl -sf "https://api.latitude.sh/servers/$SERVER_ID" \
               -H "Authorization: Bearer $LATITUDE_API_KEY" | \
-              jq -r '.data.ip_addresses[] | select(.family == "IPv6" and .primary == true) | .address // empty')
+              jq -r '.data.attributes.ip_addresses[] | select(.family == "IPv6" and .primary == true) | .address // empty')
             
             if [ -n "$IPV6" ]; then
               echo "Creating AAAA records for $SERVER_NAME: $IPV6"
