@@ -76,12 +76,88 @@ get_real_user() {
     echo -e "${BLUE}User home: $REAL_HOME${NC}"
 }
 
+uninstall_deb() {
+    echo -e "${YELLOW}Checking for deb package...${NC}"
+    if dpkg -l | grep -q "oxidize"; then
+        echo -e "${YELLOW}Removing oxidize deb package...${NC}"
+        dpkg --purge oxidize 2>/dev/null || apt-get remove --purge -y oxidize 2>/dev/null || true
+        echo -e "${GREEN}  ✓ Deb package removed${NC}"
+    else
+        echo -e "${BLUE}  No deb package found${NC}"
+    fi
+}
+
+uninstall_rpm() {
+    echo -e "${YELLOW}Checking for rpm package...${NC}"
+    if rpm -qa | grep -q "oxidize"; then
+        echo -e "${YELLOW}Removing oxidize rpm package...${NC}"
+        if command -v dnf &> /dev/null; then
+            dnf remove -y oxidize 2>/dev/null || true
+        elif command -v yum &> /dev/null; then
+            yum remove -y oxidize 2>/dev/null || true
+        else
+            rpm -e oxidize 2>/dev/null || true
+        fi
+        echo -e "${GREEN}  ✓ RPM package removed${NC}"
+    else
+        echo -e "${BLUE}  No rpm package found${NC}"
+    fi
+}
+
+uninstall_appimage() {
+    echo -e "${YELLOW}Checking for AppImage installations...${NC}"
+    local found=false
+    
+    # Common AppImage locations
+    local appimage_locations=(
+        "$REAL_HOME/Applications/Oxidize*.AppImage"
+        "$REAL_HOME/Applications/oxidize*.AppImage"
+        "$REAL_HOME/.local/bin/Oxidize*.AppImage"
+        "$REAL_HOME/.local/bin/oxidize*.AppImage"
+        "$REAL_HOME/bin/Oxidize*.AppImage"
+        "$REAL_HOME/bin/oxidize*.AppImage"
+        "/opt/Oxidize*.AppImage"
+        "/opt/oxidize*.AppImage"
+        "/usr/local/bin/Oxidize*.AppImage"
+        "/usr/local/bin/oxidize*.AppImage"
+    )
+    
+    for pattern in "${appimage_locations[@]}"; do
+        for appimage in $pattern; do
+            if [ -f "$appimage" ]; then
+                echo -e "${YELLOW}  Removing AppImage: $appimage${NC}"
+                rm -f "$appimage"
+                found=true
+            fi
+        done
+    done
+    
+    # Remove AppImage desktop integration (appimaged creates these)
+    rm -f "$REAL_HOME/.local/share/applications/appimagekit-oxidize"*.desktop 2>/dev/null || true
+    rm -f "$REAL_HOME/.local/share/applications/appimagekit-Oxidize"*.desktop 2>/dev/null || true
+    
+    # Remove icons created by AppImage
+    rm -f "$REAL_HOME/.local/share/icons/hicolor/"*/apps/oxidize*.png 2>/dev/null || true
+    rm -f "$REAL_HOME/.local/share/icons/hicolor/"*/apps/Oxidize*.png 2>/dev/null || true
+    
+    if [ "$found" = true ]; then
+        echo -e "${GREEN}  ✓ AppImage files removed${NC}"
+    else
+        echo -e "${BLUE}  No AppImage files found${NC}"
+    fi
+}
+
 uninstall_linux() {
     echo -e "${YELLOW}Stopping services...${NC}"
     systemctl stop oxidize 2>/dev/null || true
     systemctl stop oxidize-daemon 2>/dev/null || true
     systemctl disable oxidize 2>/dev/null || true
     systemctl disable oxidize-daemon 2>/dev/null || true
+
+    # Uninstall packaged versions (deb, rpm, AppImage)
+    uninstall_deb
+    uninstall_rpm
+    uninstall_appimage
 
     echo -e "${YELLOW}Removing binaries...${NC}"
     rm -f /usr/local/bin/oxidize-client
@@ -120,13 +196,37 @@ uninstall_linux() {
 uninstall_macos() {
     echo -e "${YELLOW}Stopping launchd service...${NC}"
     launchctl unload /Library/LaunchDaemons/com.oxidize.client.plist 2>/dev/null || true
+    launchctl unload "$REAL_HOME/Library/LaunchAgents/com.oxidize.client.plist" 2>/dev/null || true
 
-    echo -e "${YELLOW}Removing binaries...${NC}"
+    echo -e "${YELLOW}Removing .app bundles...${NC}"
+    # System-wide installation
+    if [ -d "/Applications/Oxidize.app" ]; then
+        rm -rf "/Applications/Oxidize.app"
+        echo -e "${GREEN}  ✓ Removed /Applications/Oxidize.app${NC}"
+    fi
+    # User installation
+    if [ -d "$REAL_HOME/Applications/Oxidize.app" ]; then
+        rm -rf "$REAL_HOME/Applications/Oxidize.app"
+        echo -e "${GREEN}  ✓ Removed ~/Applications/Oxidize.app${NC}"
+    fi
+    # Alternative names
+    rm -rf "/Applications/oxidize.app" 2>/dev/null || true
+    rm -rf "$REAL_HOME/Applications/oxidize.app" 2>/dev/null || true
+
+    echo -e "${YELLOW}Removing .dmg files from Downloads...${NC}"
+    rm -f "$REAL_HOME/Downloads/Oxidize"*.dmg 2>/dev/null || true
+    rm -f "$REAL_HOME/Downloads/oxidize"*.dmg 2>/dev/null || true
+
+    echo -e "${YELLOW}Removing CLI binaries...${NC}"
     rm -f /usr/local/bin/oxidize-client
     rm -f /usr/local/bin/oxidize-daemon
+    rm -f /usr/local/bin/oxidize
 
-    echo -e "${YELLOW}Removing launchd plist...${NC}"
+    echo -e "${YELLOW}Removing launchd plists...${NC}"
     rm -f /Library/LaunchDaemons/com.oxidize.client.plist
+    rm -f /Library/LaunchDaemons/com.oxidize.daemon.plist
+    rm -f "$REAL_HOME/Library/LaunchAgents/com.oxidize.client.plist"
+    rm -f "$REAL_HOME/Library/LaunchAgents/com.oxidize.daemon.plist"
 
     echo -e "${YELLOW}Removing system config...${NC}"
     rm -rf /etc/oxidize
@@ -134,6 +234,12 @@ uninstall_macos() {
     echo -e "${YELLOW}Removing logs...${NC}"
     rm -f /var/log/oxidize.log
     rm -f /var/log/oxidize.error.log
+
+    echo -e "${YELLOW}Removing Homebrew cask (if installed)...${NC}"
+    if command -v brew &> /dev/null; then
+        brew uninstall --cask oxidize 2>/dev/null || true
+        brew uninstall oxidize 2>/dev/null || true
+    fi
 }
 
 uninstall_user_data() {
@@ -170,6 +276,44 @@ uninstall_windows() {
     echo -e "${YELLOW}Removing firewall rule...${NC}"
     powershell.exe -Command "Remove-NetFirewallRule -DisplayName 'Oxidize Daemon' -ErrorAction SilentlyContinue" 2>/dev/null || true
     
+    # Run MSI uninstaller if exists
+    echo -e "${YELLOW}Checking for MSI installation...${NC}"
+    powershell.exe -Command "
+        \$app = Get-WmiObject -Class Win32_Product | Where-Object { \$_.Name -like '*Oxidize*' }
+        if (\$app) {
+            Write-Host '  Uninstalling MSI package...'
+            \$app.Uninstall() | Out-Null
+            Write-Host '  MSI package removed'
+        }
+    " 2>/dev/null || true
+    
+    # Remove NSIS/Tauri installer entries from registry and run uninstaller
+    echo -e "${YELLOW}Checking for installed application...${NC}"
+    powershell.exe -Command "
+        # Check 64-bit uninstall registry
+        \$uninstallKey = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+        \$uninstallKey32 = 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+        \$userUninstall = 'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+        
+        \$apps = @()
+        \$apps += Get-ItemProperty \$uninstallKey -ErrorAction SilentlyContinue | Where-Object { \$_.DisplayName -like '*Oxidize*' }
+        \$apps += Get-ItemProperty \$uninstallKey32 -ErrorAction SilentlyContinue | Where-Object { \$_.DisplayName -like '*Oxidize*' }
+        \$apps += Get-ItemProperty \$userUninstall -ErrorAction SilentlyContinue | Where-Object { \$_.DisplayName -like '*Oxidize*' }
+        
+        foreach (\$app in \$apps) {
+            if (\$app.UninstallString) {
+                Write-Host \"  Running uninstaller for: \$($app.DisplayName)\"
+                try {
+                    Start-Process cmd.exe -ArgumentList '/c', \$app.UninstallString, '/S' -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                } catch { }
+            }
+            # Remove registry entry
+            if (\$app.PSPath) {
+                Remove-Item -Path \$app.PSPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    " 2>/dev/null || true
+    
     # Remove install directory
     echo -e "${YELLOW}Removing program files...${NC}"
     if [ -d "$INSTALL_DIR" ]; then
@@ -178,7 +322,25 @@ uninstall_windows() {
     fi
     
     # Also try via PowerShell for permissions
-    powershell.exe -Command "Remove-Item -Path '$INSTALL_DIR_WIN' -Recurse -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+    powershell.exe -Command "
+        Remove-Item -Path 'C:\\Program Files\\Oxidize' -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path 'C:\\Program Files (x86)\\Oxidize' -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:LOCALAPPDATA\\Programs\\Oxidize\" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:LOCALAPPDATA\\Oxidize\" -Recurse -Force -ErrorAction SilentlyContinue
+    " 2>/dev/null || true
+    
+    # Remove Start Menu and Desktop shortcuts
+    echo -e "${YELLOW}Removing shortcuts...${NC}"
+    powershell.exe -Command "
+        # Start Menu shortcuts
+        Remove-Item -Path \"\$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Oxidize*\" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Oxidize*\" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\\Oxidize.lnk\" -Force -ErrorAction SilentlyContinue
+        
+        # Desktop shortcuts
+        Remove-Item -Path \"\$env:USERPROFILE\\Desktop\\Oxidize.lnk\" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:PUBLIC\\Desktop\\Oxidize.lnk\" -Force -ErrorAction SilentlyContinue
+    " 2>/dev/null || true
     
     # Clean WinDivert from PATH
     echo -e "${YELLOW}Cleaning system PATH...${NC}"
@@ -197,6 +359,16 @@ uninstall_windows() {
     powershell.exe -Command "
         Remove-Item -Path \"\$env:LOCALAPPDATA\\com.oxidize.app\" -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -Path \"\$env:APPDATA\\Oxidize\" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:APPDATA\\com.oxidize.app\" -Recurse -Force -ErrorAction SilentlyContinue
+    " 2>/dev/null || true
+    
+    # Remove downloaded installers from Downloads
+    echo -e "${YELLOW}Removing installer files from Downloads...${NC}"
+    powershell.exe -Command "
+        Remove-Item -Path \"\$env:USERPROFILE\\Downloads\\Oxidize*.exe\" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:USERPROFILE\\Downloads\\Oxidize*.msi\" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:USERPROFILE\\Downloads\\oxidize*.exe\" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path \"\$env:USERPROFILE\\Downloads\\oxidize*.msi\" -Force -ErrorAction SilentlyContinue
     " 2>/dev/null || true
 }
 
@@ -264,13 +436,26 @@ print_success() {
     echo -e "${GREEN}           ✅ Oxidize Completely Uninstalled!              ${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "${BLUE}Removed:${NC}"
-    echo "  • Binaries from /usr/local/bin"
-    echo "  • Systemd/launchd services"
+    echo -e "${BLUE}Removed (platform-specific):${NC}"
+    echo "  Linux:"
+    echo "    • Deb/RPM packages"
+    echo "    • AppImage files and desktop integration"
+    echo "    • Systemd services and iptables rules"
+    echo "  macOS:"
+    echo "    • .app bundles from /Applications"
+    echo "    • .dmg files from Downloads"
+    echo "    • Homebrew cask (if installed)"
+    echo "    • launchd plists"
+    echo "  Windows:"
+    echo "    • MSI/EXE installers (via registry uninstall)"
+    echo "    • Start Menu and Desktop shortcuts"
+    echo "    • Program Files directories"
+    echo "    • Installer files from Downloads"
+    echo ""
+    echo -e "${BLUE}Removed (all platforms):${NC}"
+    echo "  • CLI binaries from /usr/local/bin"
     echo "  • Configuration from /etc/oxidize"
-    echo "  • Desktop entries (app menu)"
-    echo "  • User app data"
-    echo "  • iptables NFQUEUE rules"
+    echo "  • User app data and config"
     echo "  • System user 'oxidize'"
     echo "  • Local builds (target/, node_modules/, Tauri gen/)"
     echo ""
