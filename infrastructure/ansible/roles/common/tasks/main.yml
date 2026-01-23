@@ -39,12 +39,18 @@
       - irqbalance
       - cpufrequtils
       - linux-tools-common
-      - linux-tools-{{ ansible_kernel }}
       - curl
       - jq
       - ufw
     state: present
   become: yes
+
+- name: Install kernel-specific linux tools
+  apt:
+    name: linux-tools-{{ ansible_kernel }}
+    state: present
+  become: yes
+  ignore_errors: yes
 
 - name: Configure UFW - Allow SSH
   ufw:

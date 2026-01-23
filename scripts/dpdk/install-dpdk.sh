@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # DPDK Installation Script for Oxidize
-# Installs DPDK 23.11 LTS and configures the system for kernel bypass
+# Installs DPDK 25.11 and configures the system for kernel bypass
 #
 # Usage: sudo ./install-dpdk.sh [--with-mlx5]
 #
@@ -26,7 +26,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Configuration
-DPDK_VERSION="23.11.1"
+DPDK_VERSION="25.11"
 DPDK_DIR="/opt/dpdk"
 DPDK_BUILD_DIR="/opt/dpdk/build"
 INSTALL_MLX5=false
