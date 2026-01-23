@@ -59,6 +59,13 @@
     - bind_result.rc is defined
     - bind_result.rc != 0
 
+- name: Ensure /etc/oxidize exists
+  file:
+    path: /etc/oxidize
+    state: directory
+    mode: '0755'
+  become: yes
+
 - name: Save NIC configuration
   copy:
     content: |
