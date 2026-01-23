@@ -10,6 +10,7 @@ use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
 use relay_server::mobile_server::{
     generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
 };
+use relay_server::prometheus::PrometheusMetrics;
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-server")]
@@ -145,6 +146,19 @@ async fn main() -> Result<()> {
     setup_signal_handlers(shutdown_coordinator.clone()).await;
 
     info!("🔄 Graceful shutdown enabled (30s drain timeout)");
+
+    // Start metrics server if not disabled
+    if !args.disable_metrics {
+        let metrics = PrometheusMetrics::new()?;
+        let metrics_addr = args.metrics_addr;
+        tokio::spawn(async move {
+            if let Err(e) = metrics.start_server(metrics_addr).await {
+                error!("Metrics server error: {}", e);
+            }
+        });
+        info!("📊 Metrics server on http://{}", args.metrics_addr);
+    }
+
     info!("🚀 OxTunnel server running...");
 
     // Use tokio::select! to run server and wait for shutdown concurrently
