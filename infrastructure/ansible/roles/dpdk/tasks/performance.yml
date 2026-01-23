@@ -15,9 +15,13 @@
   become: yes
   ignore_errors: yes
 
-- name: Build updated GRUB cmdline with CPU isolation
+- name: Set base GRUB cmdline
   set_fact:
     grub_cmdline_base: "{{ (grub_cmdline_default.stdout | default('quiet splash')) | trim }}"
+  when: isolated_cores is defined
+
+- name: Build updated GRUB cmdline with CPU isolation
+  set_fact:
     grub_cmdline_updated: "{{ grub_cmdline_base ~ ( ' isolcpus=' ~ isolated_cores if isolated_cores | length > 0 and ('isolcpus=' not in grub_cmdline_base) else '' ) ~ ( ' nohz_full=' ~ isolated_cores if isolated_cores | length > 0 and ('nohz_full=' not in grub_cmdline_base) else '' ) ~ ( ' rcu_nocbs=' ~ isolated_cores if isolated_cores | length > 0 and ('rcu_nocbs=' not in grub_cmdline_base) else '' ) }}"
   when: isolated_cores is defined
 
