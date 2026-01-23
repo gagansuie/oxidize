@@ -6,11 +6,23 @@
 
 - name: Get public IP
   uri:
-    url: https://ifconfig.me
+    url: https://ifconfig.me/ip
     return_content: yes
     timeout: 10
   register: public_ip
   when: not tls_cert.stat.exists
+
+- name: Parse public IP
+  set_fact:
+    public_ip_value: "{{ (public_ip.content | regex_search('([0-9]{1,3}(?:\\.[0-9]{1,3}){3}|[0-9a-fA-F:]+)')) | default('') }}"
+  when: not tls_cert.stat.exists
+
+- name: Validate public IP
+  fail:
+    msg: "Failed to parse public IP from response: {{ public_ip.content | default('') }}"
+  when:
+    - not tls_cert.stat.exists
+    - public_ip_value | length == 0
 
 - name: Generate TLS certificate
   command: >
@@ -18,8 +30,8 @@
     -keyout /etc/oxidize/certs/server.key
     -out /etc/oxidize/certs/server.crt
     -days 365 -nodes
-    -subj "/CN={{ public_ip.content }}/O=Oxidize/C=US"
-    -addext "subjectAltName=IP:{{ public_ip.content }},DNS:localhost"
+    -subj "/CN={{ public_ip_value }}/O=Oxidize/C=US"
+    -addext "subjectAltName=IP:{{ public_ip_value }},DNS:localhost"
   become: yes
   when: not tls_cert.stat.exists
 
