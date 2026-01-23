@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-app"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "oxidize-common",
@@ -3685,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-common"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-daemon"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "oxidize-common",
@@ -4607,7 +4607,7 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "relay-client"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4629,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "relay-server"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "bytes",

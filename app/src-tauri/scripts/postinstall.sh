@@ -3,7 +3,7 @@
 # This runs after .deb/.rpm package installation
 # Sets up daemon with proper capabilities for packet capture
 
-set -e
+# Do NOT use set -e - we handle errors gracefully
 
 DAEMON_BIN="/usr/bin/oxidize-daemon"
 SERVICE_FILE="/etc/systemd/system/oxidize-daemon.service"
@@ -27,7 +27,12 @@ fi
 chown oxidize:oxidize "$RUN_DIR" 2>/dev/null || true
 
 # Find and copy the bundled daemon sidecar to /usr/bin
-SIDECAR_DAEMON=$(find "$APP_DIR" -name "oxidize-daemon*" -type f 2>/dev/null | head -1)
+if [ -d "$APP_DIR" ]; then
+    SIDECAR_DAEMON=$(find "$APP_DIR" -name "oxidize-daemon*" -type f 2>/dev/null | head -1 || true)
+else
+    SIDECAR_DAEMON=""
+    echo "⚠️  App directory not found at $APP_DIR"
+fi
 if [ -n "$SIDECAR_DAEMON" ] && [ -f "$SIDECAR_DAEMON" ]; then
     echo "Found bundled daemon at: $SIDECAR_DAEMON"
     cp "$SIDECAR_DAEMON" "$DAEMON_BIN"
@@ -73,10 +78,14 @@ ReadWritePaths=/var/run/oxidize
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable oxidize-daemon
-    systemctl start oxidize-daemon || true
-    
+    if command -v systemctl &> /dev/null; then
+        systemctl daemon-reload || true
+        systemctl enable oxidize-daemon || true
+        systemctl start oxidize-daemon || true
+    else
+        echo "⚠️  systemctl not available; skipping service enable/start"
+    fi
+
     echo "✅ Oxidize daemon installed with packet capture capabilities"
 else
     echo "⚠️  Daemon binary not found at $DAEMON_BIN"
