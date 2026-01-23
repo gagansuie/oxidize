@@ -16,8 +16,6 @@ path = "src/main.rs"
 [dependencies]
 oxidize-common = { path = "../common" }
 tokio = { workspace = true }
-quinn = { workspace = true }
-rustls = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

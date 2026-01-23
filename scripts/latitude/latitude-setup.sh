@@ -71,6 +71,7 @@ log_info "Installing dependencies..."
 
 apt-get update -qq
 
+# Ubuntu 24.04: bpftool included in linux-tools-common
 apt-get install -y \
     build-essential \
     pkg-config \
@@ -81,7 +82,6 @@ apt-get install -y \
     linux-headers-$(uname -r) \
     linux-tools-$(uname -r) \
     linux-tools-common \
-    bpftool \
     clang \
     llvm \
     pciutils \

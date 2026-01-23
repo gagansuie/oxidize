@@ -10,33 +10,10 @@ use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
 use relay_server::mobile_server::{
     generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
 };
-use relay_server::server::RelayServer;
-
-/// Auto-detect the default network interface
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-fn detect_default_interface() -> String {
-    // Try to find the default route interface
-    if let Ok(output) = std::process::Command::new("ip")
-        .args(["route", "show", "default"])
-        .output()
-    {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            // Parse "default via X.X.X.X dev ethX ..."
-            for part in stdout.split_whitespace() {
-                if part.starts_with("eth") || part.starts_with("enp") || part.starts_with("ens") {
-                    return part.to_string();
-                }
-            }
-        }
-    }
-    // Fallback
-    "eth0".to_string()
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-server")]
-#[command(about = "Oxidize - High-performance Network Relay Server", long_about = None)]
+#[command(about = "Oxidize - High-performance Network Relay Server with OxTunnel", long_about = None)]
 struct Args {
     #[arg(short, long, default_value = "0.0.0.0:4433")]
     listen: SocketAddr,
@@ -54,10 +31,10 @@ struct Args {
     disable_metrics: bool,
 
     #[arg(long)]
-    generate_mobile_config: bool,
+    generate_config: bool,
 
     #[arg(long)]
-    mobile_endpoint: Option<String>,
+    endpoint: Option<String>,
 }
 
 #[tokio::main]
@@ -65,9 +42,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let filter = if args.verbose {
-        "oxidize_server=trace,oxidize_common=debug"
+        "relay_server=trace,oxidize_common=debug"
     } else {
-        "oxidize_server=info,oxidize_common=info"
+        "relay_server=info,oxidize_common=info"
     };
 
     tracing_subscriber::fmt()
@@ -76,38 +53,34 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    // Handle mobile tunnel config generation
-    if args.generate_mobile_config {
+    // Handle config generation
+    if args.generate_config {
         let endpoint = args
-            .mobile_endpoint
-            .unwrap_or_else(|| format!("{}:51820", args.listen.ip()));
+            .endpoint
+            .unwrap_or_else(|| format!("{}:{}", args.listen.ip(), args.listen.port()));
 
-        info!("Generating Mobile Tunnel server configuration...");
+        info!("Generating OxTunnel server configuration...");
         let (server_id_hex, _, _server_id) = generate_server_config()?;
 
-        println!("\n=== Mobile Tunnel Server Configuration ===");
+        println!("\n=== OxTunnel Server Configuration ===");
         println!("Server ID: {}", server_id_hex);
-        println!("\nAdd to your server config.toml:");
-        println!("[oxtunnel]");
-        println!("enable_oxtunnel = true");
-        println!("oxtunnel_port = 51820");
+        println!("Listen: {}", args.listen);
 
         println!("\n=== Client Configuration ===");
         let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
         println!("{}", client_config);
 
-        println!("\nSave the client config to a JSON file for mobile app import.");
+        println!("\nSave the client config to a JSON file for app import.");
 
         return Ok(());
     }
 
-    info!("Starting Oxidize Server v{}", env!("CARGO_PKG_VERSION"));
-    info!("Listening on {}", args.listen);
     info!("╔════════════════════════════════════════╗");
     info!(
         "║   Oxidize Server v{}                ║",
         env!("CARGO_PKG_VERSION")
     );
+    info!("║   OxTunnel Protocol (no QUIC)          ║");
     info!("╚════════════════════════════════════════╝");
 
     let config = Config::load(&args.config).unwrap_or_else(|_| {
@@ -115,19 +88,33 @@ async fn main() -> Result<()> {
         Config::default()
     });
 
-    // Initialize Quinn-based QUIC server with AF_XDP acceleration (Linux)
-    let server = match RelayServer::new(args.listen, config.clone()).await {
-        Ok(s) => Arc::new(s),
+    // Generate server ID
+    let (server_id_hex, _, _) = generate_server_config()?;
+
+    info!("╔════════════════════════════════════════════════════════════════╗");
+    info!("║                    Server Configuration                         ║");
+    info!("╠════════════════════════════════════════════════════════════════╣");
+    info!("║ Server ID: {}  ║", &server_id_hex[..32]);
+    info!("║ Listen: {:42} ║", args.listen.to_string());
+    info!("╚════════════════════════════════════════════════════════════════╝");
+
+    // Initialize OxTunnel server
+    let server_config = MobileServerConfig {
+        listen_addr: args.listen,
+        enable_encryption: true,
+        ..Default::default()
+    };
+
+    let server = match MobileTunnelServer::new(server_config).await {
+        Ok(s) => s,
         Err(e) => {
-            error!("❌ FATAL: Failed to initialize QUIC server: {}", e);
+            error!("❌ FATAL: Failed to initialize OxTunnel server: {}", e);
             return Err(e);
         }
     };
 
-    info!("✅ QUIC server initialized on {}", args.listen);
-
-    info!("🚀 Server listening on {}", args.listen);
-    info!("📊 Max connections: {}", config.max_connections);
+    info!("✅ OxTunnel server initialized on {}", args.listen);
+    info!("📊 Max sessions: {}", config.max_connections);
     info!(
         "🗜️  Compression: {}",
         if config.enable_compression {
@@ -136,51 +123,19 @@ async fn main() -> Result<()> {
             "disabled"
         }
     );
+    info!("🔐 Encryption: ChaCha20-Poly1305");
 
-    // Stats logging
-    info!("📊 Server stats will be logged every 30 seconds");
+    // Auto-display client config
+    let endpoint = format!("{}:{}", args.listen.ip(), args.listen.port());
+    let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
 
-    // Start Mobile Tunnel server if enabled
-    if config.enable_oxtunnel {
-        let oxtunnel_port = config.oxtunnel_port.unwrap_or(51820);
-        let oxtunnel_addr: SocketAddr = format!("0.0.0.0:{}", oxtunnel_port).parse()?;
-
-        // Generate server ID
-        let (server_id_hex, _, _) = generate_server_config()?;
-
-        info!("╔════════════════════════════════════════════════════════════════╗");
-        info!("║           Mobile Tunnel Server Configuration                    ║");
-        info!("╠════════════════════════════════════════════════════════════════╣");
-        info!("║ Server ID: {}  ║", &server_id_hex[..32]);
-        info!("╚════════════════════════════════════════════════════════════════╝");
-
-        let mobile_config = MobileServerConfig {
-            listen_addr: oxtunnel_addr,
-            enable_encryption: true,
-            ..Default::default()
-        };
-
-        let mobile_server = MobileTunnelServer::new(mobile_config).await?;
-        info!("📱 OxTunnel server listening on {}", oxtunnel_addr);
-
-        // Auto-display client config for mobile users
-        let endpoint = format!("{}:{}", args.listen.ip(), oxtunnel_port);
-        let client_config = generate_client_config(&endpoint, &server_id_hex, None)?;
-
-        info!("╔════════════════════════════════════════════════════════════════╗");
-        info!("║              Mobile Client Configuration                        ║");
-        info!("╠════════════════════════════════════════════════════════════════╣");
-        info!("║ Import this JSON config in the Oxidize mobile app:             ║");
-        info!("╚════════════════════════════════════════════════════════════════╝");
-        for line in client_config.lines() {
-            info!("  {}", line);
-        }
-
-        tokio::spawn(async move {
-            if let Err(e) = mobile_server.run().await {
-                warn!("Mobile Tunnel server error: {}", e);
-            }
-        });
+    info!("╔════════════════════════════════════════════════════════════════╗");
+    info!("║                    Client Configuration                         ║");
+    info!("╠════════════════════════════════════════════════════════════════╣");
+    info!("║ Import this JSON config in the Oxidize app:                    ║");
+    info!("╚════════════════════════════════════════════════════════════════╝");
+    for line in client_config.lines() {
+        info!("  {}", line);
     }
 
     // Setup graceful shutdown coordinator
@@ -190,10 +145,7 @@ async fn main() -> Result<()> {
     setup_signal_handlers(shutdown_coordinator.clone()).await;
 
     info!("🔄 Graceful shutdown enabled (30s drain timeout)");
-    info!("   Send SIGTERM/SIGINT to gracefully drain connections");
-
-    // Start the QUIC server
-    info!("🚀 Starting QUIC server...");
+    info!("🚀 OxTunnel server running...");
 
     // Use tokio::select! to run server and wait for shutdown concurrently
     let mut shutdown_rx = shutdown_coordinator.shutdown_receiver();
@@ -201,7 +153,7 @@ async fn main() -> Result<()> {
     tokio::select! {
         result = server.run() => {
             if let Err(e) = result {
-                error!("QUIC server error: {}", e);
+                error!("OxTunnel server error: {}", e);
             }
         }
         _ = shutdown_rx.changed() => {

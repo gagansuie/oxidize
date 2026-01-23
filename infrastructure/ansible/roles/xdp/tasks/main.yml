@@ -24,11 +24,11 @@
       - linux-headers-{{ ansible_kernel }}
       - linux-tools-{{ ansible_kernel }}
       - linux-tools-common
-      - bpftool
       - iproute2
       - ethtool
     state: present
     update_cache: yes
+  # Ubuntu 24.04: bpftool included in linux-tools-common, libbpf1 included by default
 
 - name: Enable BPF JIT compiler
   sysctl:

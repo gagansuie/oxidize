@@ -1,4 +1,17 @@
 ---
+- name: Set hostname
+  hostname:
+    name: "{{ inventory_hostname }}"
+  become: yes
+
+- name: Update /etc/hosts with hostname
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+    state: present
+  become: yes
+
 - name: Remove apt proxy configuration (Latitude sets a broken proxy)
   file:
     path: "{{ item }}"
@@ -31,19 +44,18 @@
       - libnuma-dev
       - libelf-dev
       - libpcap-dev
-      - python3-pip
       - python3-pyelftools
       - meson
       - ninja-build
       - ethtool
       - irqbalance
-      - cpufrequtils
       - linux-tools-common
       - curl
       - jq
       - ufw
     state: present
   become: yes
+  # Ubuntu 24.04: python3-pip not needed (use pipx), cpufrequtils replaced by cpupower
 
 - name: Install kernel-specific linux tools
   apt:

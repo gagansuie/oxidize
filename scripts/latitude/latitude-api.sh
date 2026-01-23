@@ -196,16 +196,21 @@ cmd_deploy() {
     # Chicago = "chi" or "ord"
     # Plans: m4-metal-small, f4-metal-small, etc.
     
-    HOSTNAME="oxidize-relay"
     SITE="chi"  # Chicago
     PLAN="m4-metal-small"  # $189/mo, 6c, 64GB, 2x10Gbps
-    OS="ubuntu_22_04_x64_lts"
+    OS="ubuntu_24_04_x64_lts"
+    
+    # Auto-generate hostname: relay-{region}-{next_number}
+    # Count existing servers in this region
+    existing=$(api_request GET "/servers" | jq -r ".data[].attributes.hostname // empty" | grep -c "^relay-${SITE}-" 2>/dev/null || echo "0")
+    NEXT_NUM=$((existing + 1))
+    HOSTNAME="relay-${SITE}-${NEXT_NUM}"
     
     log_info "Deploying server..."
     log_info "  Hostname: $HOSTNAME"
     log_info "  Location: Chicago ($SITE)"
     log_info "  Plan: $PLAN"
-    log_info "  OS: Ubuntu 22.04 LTS"
+    log_info "  OS: Ubuntu 24.04 LTS"
     
     # Create server request
     payload=$(cat <<EOF
@@ -264,6 +269,30 @@ EOF
     mkdir -p /tmp/latitude
     echo "$response" > /tmp/latitude/last-deploy.json
     echo "$SERVER_ID" > /tmp/latitude/server-id
+}
+
+# ============================================
+# Rename Server
+# ============================================
+cmd_rename() {
+    local server_id=$1
+    local new_name=$2
+    
+    if [[ -z "$server_id" || -z "$new_name" ]]; then
+        log_error "Usage: ./latitude-api.sh rename <server_id> <new_name>"
+        exit 1
+    fi
+    
+    log_info "Renaming server $server_id to: $new_name"
+    
+    response=$(api_request PATCH "/servers/$server_id" "{\"data\": {\"type\": \"servers\", \"id\": \"$server_id\", \"attributes\": {\"hostname\": \"$new_name\"}}}")
+    
+    if echo "$response" | jq -e '.data.attributes.hostname' &>/dev/null; then
+        log_success "Server renamed to: $(echo "$response" | jq -r '.data.attributes.hostname')"
+    else
+        log_error "Failed to rename server"
+        echo "$response" | jq '.' 2>/dev/null || echo "$response"
+    fi
 }
 
 # ============================================
@@ -367,6 +396,9 @@ case "${1:-}" in
     wait)
         cmd_wait "$2"
         ;;
+    rename)
+        cmd_rename "$2" "$3"
+        ;;
     *)
         echo "Latitude.sh API Script for Oxidize"
         echo ""
@@ -377,6 +409,7 @@ case "${1:-}" in
         echo "  list                List all servers"
         echo "  status <id>         Get server status"
         echo "  wait [id]           Wait for server to be ready"
+        echo "  rename <id> <name>  Rename server"
         echo "  delete <id>         Delete server"
         echo "  regions             List available regions"
         echo "  plans               List available plans"

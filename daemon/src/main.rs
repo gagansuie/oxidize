@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService};
-use relay_client::{ClientConfig, RelayClient};
+use relay_client::RelayClient;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -260,9 +260,17 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         ])
         .output();
 
-    // STEP 2: Create QUIC client
-    let config = ClientConfig::default();
-    let client = match RelayClient::new(server_addr, config).await {
+    // STEP 2: Create OxTunnel client
+    let oxtunnel_config = relay_client::client::ClientConfig {
+        server_addr,
+        enable_encryption: true,
+        encryption_key: None,
+        enable_compression: true,
+        keepalive_interval: std::time::Duration::from_secs(25),
+        connection_timeout: std::time::Duration::from_secs(30),
+    };
+
+    let client = match RelayClient::new(oxtunnel_config).await {
         Ok(c) => c,
         Err(e) => {
             return DaemonResponse {
@@ -273,21 +281,15 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         }
     };
 
-    let metrics = client.get_metrics().clone();
-
-    // STEP 3: Establish QUIC connection BEFORE NFQUEUE setup
-    // This is critical - NFQUEUE intercepts even with iptables exclusions
-    let connection = match client.connect().await {
-        Ok(conn) => conn,
-        Err(e) => {
-            return DaemonResponse {
-                success: false,
-                message: format!("QUIC connection failed: {}", e),
-                data: None,
-            };
-        }
-    };
-    info!("✅ QUIC handshake complete to {}", server_addr);
+    // STEP 3: Establish OxTunnel connection BEFORE NFQUEUE setup
+    if let Err(e) = client.connect().await {
+        return DaemonResponse {
+            success: false,
+            message: format!("OxTunnel connection failed: {}", e),
+            data: None,
+        };
+    }
+    info!("✅ OxTunnel handshake complete to {}", server_addr);
 
     // STEP 4: Cross-platform packet capture using unified PacketCaptureService
     // Configure capture with relay server exclusion
@@ -305,14 +307,14 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     // Get platform name for logging
     let platform = PacketCaptureService::platform_name();
 
-    // Spawn client task with pre-established connection
+    // Spawn client task with packet capture
     let task = tokio::spawn(async move {
         info!("🚀 Starting relay client ({} mode)...", platform);
         info!("   ├─ Mode: {} packet capture", platform);
-        info!("   ├─ QUIC datagrams: enabled");
+        info!("   ├─ OxTunnel protocol: enabled");
         info!("   └─ Capturing TCP+UDP traffic");
 
-        if let Err(e) = client.run_with_connection(connection, oxtunnel_rx).await {
+        if let Err(e) = client.run_with_capture(oxtunnel_rx).await {
             error!("Client error: {}", e);
         }
 
@@ -325,7 +327,7 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     state_guard.connected = true;
     state_guard.server_id = Some(server_id.clone());
     state_guard.client_task = Some(task);
-    state_guard.metrics = Some(metrics);
+    state_guard.metrics = None; // OxTunnel client doesn't have RelayMetrics yet
     state_guard.connected_at = Some(std::time::Instant::now());
 
     DaemonResponse {
