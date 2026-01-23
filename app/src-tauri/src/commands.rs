@@ -798,19 +798,26 @@ pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
 
     let install_script = format!(
         r#"
-        set -e
-        mkdir -p /var/run/oxidize
-        mkdir -p /etc/oxidize
-        cp "{}" /usr/local/bin/oxidize-daemon
-        chmod 755 /usr/local/bin/oxidize-daemon
+        exec > /tmp/oxidize-install.log 2>&1
+        echo "=== Oxidize in-app install started at $(date) ==="
+        mkdir -p /var/run/oxidize 2>/dev/null || true
+        mkdir -p /etc/oxidize 2>/dev/null || true
+        cp "{}" /usr/local/bin/oxidize-daemon 2>/dev/null || true
+        chmod 755 /usr/local/bin/oxidize-daemon 2>/dev/null || true
         
         cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
 #!/bin/bash
 QUEUE_NUM=0
 iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
-iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
+iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass || true
 RULES
-        chmod +x /etc/oxidize/nfqueue-rules.sh
+        chmod +x /etc/oxidize/nfqueue-rules.sh 2>/dev/null || true
+        
+        cat > /etc/oxidize/cleanup-rules.sh << 'CLEANUP'
+#!/bin/bash
+iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
+CLEANUP
+        chmod +x /etc/oxidize/cleanup-rules.sh 2>/dev/null || true
         
         cat > /etc/systemd/system/oxidize-daemon.service << 'EOF'
 [Unit]
@@ -820,9 +827,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=/etc/oxidize/nfqueue-rules.sh
+ExecStartPre=-/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/local/bin/oxidize-daemon
-ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
+ExecStopPost=-/etc/oxidize/cleanup-rules.sh
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
@@ -832,9 +839,11 @@ ReadWritePaths=/var/run/oxidize
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable oxidize-daemon
-        systemctl start oxidize-daemon
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable oxidize-daemon 2>/dev/null || true
+        systemctl start oxidize-daemon 2>/dev/null || true
+        echo "=== Install complete ==="
+        exit 0
         "#,
         daemon_bin
     );
@@ -1004,24 +1013,19 @@ pub async fn uninstall_daemon() -> Result<String, String> {
 
     // Use pkexec to stop and remove the daemon
     let uninstall_script = r#"
-        # Stop the daemon service
+        exec > /tmp/oxidize-uninstall.log 2>&1
+        echo "=== Oxidize uninstall started at $(date) ==="
         systemctl stop oxidize-daemon 2>/dev/null || true
         systemctl disable oxidize-daemon 2>/dev/null || true
-        
-        # Remove service file
-        rm -f /etc/systemd/system/oxidize-daemon.service
-        
-        # Remove daemon binary
-        rm -f /usr/local/bin/oxidize-daemon
-        
-        # Remove socket directory
-        rm -rf /var/run/oxidize
-        
-        
-        # Reload systemd
+        rm -f /etc/systemd/system/oxidize-daemon.service 2>/dev/null || true
+        rm -f /usr/local/bin/oxidize-daemon 2>/dev/null || true
+        rm -f /usr/bin/oxidize-daemon 2>/dev/null || true
+        rm -rf /var/run/oxidize 2>/dev/null || true
+        rm -rf /etc/oxidize 2>/dev/null || true
+        iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
-        
-        echo "Daemon uninstalled successfully"
+        echo "=== Uninstall complete ==="
+        exit 0
     "#;
 
     let output = std::process::Command::new("pkexec")

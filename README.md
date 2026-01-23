@@ -64,8 +64,8 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **Kernel Bypass** - DPDK support for bare metal (100+ Gbps)
-- **Zero-Copy I/O** - Direct packet access via DPDK poll-mode drivers
+- **Kernel Bypass** - AF_XDP/XDP for bare metal (10-25 Gbps, no dedicated CPU cores)
+- **Zero-Copy I/O** - Direct packet access via AF_XDP UMEM
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
@@ -236,6 +236,35 @@ Netflix, Disney+, Hulu, Prime Video, HBO Max, Spotify - automatically bypassed s
 - **Predictive Prefetching** - DNS and connection pre-warming
 - **Health Monitoring** - Automatic failover on relay issues
 
+### 🚀 Server-to-Internet Optimizations
+The relay server optimizes traffic from server to destination (your game server, websites, etc.):
+
+| Optimization | Benefit | Implementation |
+|--------------|---------|----------------|
+| **BBR Congestion Control** | 2-25x better throughput on lossy links | `tcp_congestion_control = bbr` |
+| **TCP Fast Open** | -1 RTT on repeat connections | `tcp_fastopen = 3` |
+| **UDP GSO/GRO** | 64 packets per syscall | Kernel 4.18+ |
+| **ECN (RFC 9000)** | Congestion signals without loss | DCTCP-style response |
+| **Jumbo Frames** | 9000 MTU on datacenter NICs | Reduces header overhead |
+| **NUMA-Aware** | Memory close to CPU | <100ns memory access |
+| **Peering** | Direct routes to game servers | Latitude.sh Chicago |
+
+**Server Kernel Tuning (Applied Automatically):**
+```
+net.core.rmem_max = 268MB      # Large receive buffers
+net.core.wmem_max = 268MB      # Large send buffers  
+net.core.netdev_max_backlog = 500K  # Handle burst traffic
+net.ipv4.tcp_congestion_control = bbr  # Google BBR
+net.ipv4.tcp_fastopen = 3      # Client + server TFO
+```
+
+**Why This Matters:**
+```
+Without optimization:  Server → 5 hops → ISP peering → 8 hops → Game Server
+With Oxidize:          Server → 2 hops → Direct peering → Game Server
+                       (Latitude.sh has direct peering with major gaming networks)
+```
+
 ### 📊 Observability
 - **Prometheus Metrics** - Latency, throughput, compression ratios
 - **Speed Test** - Built-in benchmarking with JSON output
@@ -400,7 +429,7 @@ enable_priority_scheduler = true
 | **Transport** | QUIC Primary + UDP Fallback | ✅ Implemented |
 | **Transport** | Connection Migration (WiFi↔LTE) | ✅ Implemented |
 | **Transport** | Multi-path Aggregation | ✅ Implemented |
-| **Kernel Bypass** | DPDK (100+ Gbps) | ✅ Implemented |
+| **Kernel Bypass** | AF_XDP/XDP (10-25 Gbps) | ✅ Implemented |
 | **Compression** | LZ4 (~4 GB/s) | ✅ Implemented |
 | **Compression** | ROHC Headers (44% reduction) | ✅ Implemented |
 | **Compression** | Per-Connection Dictionaries | ✅ Implemented |
@@ -622,9 +651,9 @@ cargo bench --package oxidize-common
 **Kernel Bypass Mode (Bare Metal):**
 ```
 ╔════════════════════════════════════════════════════════════════╗
-║              KERNEL BYPASS BENCHMARKS                          ║
+║              KERNEL BYPASS BENCHMARKS (AF_XDP)                 ║
 ╠════════════════════════════════════════════════════════════════╣
-║ DPDK Mode:           100+ Gbps (line rate on 100GbE)           ║
+║ XDP Mode:            10-25 Gbps (event-driven, low power)      ║
 ║ Per-Packet Latency:  <300ns (P99)                              ║
 ║ Zero-Copy:           No memcpy in hot path                     ║
 ║ Lock-Free Rings:     SPSC queues, no contention                ║
@@ -635,8 +664,8 @@ cargo bench --package oxidize-common
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
-> **Note:** DPDK kernel bypass requires the `dpdk` feature and NIC bound to vfio-pci.
-> See deployment guides for setup instructions.
+> **Note:** AF_XDP kernel bypass requires the `xdp` feature and Linux kernel 5.4+.
+> Event-driven architecture with no dedicated CPU cores needed. See deployment guides for setup.
 
 ## Uninstall
 

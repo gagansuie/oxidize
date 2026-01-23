@@ -379,5 +379,5 @@ jobs:
   # It runs automatically on push to main and handles:
   # - Multi-server parallel deployment from .github/servers.yml
   # - Auto-detection of server state (fresh/configured/running)
-  # - Full DPDK setup with automatic reboot handling
+  # - AF_XDP setup for high-performance networking
   # - Zero-downtime deployments with health checks

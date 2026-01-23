@@ -1,16 +1,16 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-use oxidize_common::quic_dpdk::{EndpointConfig, QuicEndpoint};
 use relay_server::config::Config;
 use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
 use relay_server::mobile_server::{
     generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
 };
+use relay_server::server::RelayServer;
 
 /// Auto-detect the default network interface
 #[cfg(target_os = "linux")]
@@ -115,24 +115,16 @@ async fn main() -> Result<()> {
         Config::default()
     });
 
-    // Initialize QUIC endpoint (cross-platform, no Quinn dependency)
-    let endpoint_config = EndpointConfig {
-        listen_addr: args.listen,
-        max_connections: config.max_connections,
-        idle_timeout: Duration::from_secs(config.connection_timeout),
-        enable_0rtt: config.enable_0rtt,
-        ..Default::default()
-    };
-
-    let endpoint = match QuicEndpoint::new(endpoint_config) {
-        Ok(ep) => Arc::new(ep),
+    // Initialize Quinn-based QUIC server with AF_XDP acceleration (Linux)
+    let server = match RelayServer::new(args.listen, config.clone()).await {
+        Ok(s) => Arc::new(s),
         Err(e) => {
-            error!("❌ FATAL: Failed to initialize QUIC endpoint: {}", e);
-            bail!("QUIC endpoint initialization failed: {}", e);
+            error!("❌ FATAL: Failed to initialize QUIC server: {}", e);
+            return Err(e);
         }
     };
 
-    info!("✅ QUIC endpoint initialized on {}", args.listen);
+    info!("✅ QUIC server initialized on {}", args.listen);
 
     info!("🚀 Server listening on {}", args.listen);
     info!("📊 Max connections: {}", config.max_connections);
@@ -200,16 +192,16 @@ async fn main() -> Result<()> {
     info!("🔄 Graceful shutdown enabled (30s drain timeout)");
     info!("   Send SIGTERM/SIGINT to gracefully drain connections");
 
-    // Start the QUIC endpoint in a background task
-    info!("🚀 Starting QUIC endpoint...");
+    // Start the QUIC server
+    info!("🚀 Starting QUIC server...");
 
-    // Use tokio::select! to run endpoint and wait for shutdown concurrently
+    // Use tokio::select! to run server and wait for shutdown concurrently
     let mut shutdown_rx = shutdown_coordinator.shutdown_receiver();
 
     tokio::select! {
-        result = endpoint.run() => {
+        result = server.run() => {
             if let Err(e) = result {
-                error!("QUIC endpoint error: {}", e);
+                error!("QUIC server error: {}", e);
             }
         }
         _ = shutdown_rx.changed() => {
@@ -220,9 +212,7 @@ async fn main() -> Result<()> {
     // Graceful shutdown
     shutdown_coordinator.shutdown().await;
 
-    // Stop QUIC endpoint
-    info!("Stopping QUIC endpoint...");
-    endpoint.stop();
+    info!("Server stopped");
 
     Ok(())
 }

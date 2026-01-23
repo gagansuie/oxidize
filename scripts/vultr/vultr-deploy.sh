@@ -154,8 +154,8 @@ max_early_data_size = 4294967295
 # === AI Engine ===
 enable_ai_engine = true
 
-# === Kernel Bypass (DPDK) ===
-# Enabled by default on Linux - uses DPDK for high throughput
+# === Kernel Bypass (AF_XDP) ===
+# Enabled by default on Linux - uses AF_XDP for high throughput
 enable_kernel_bypass = true
 bypass_interface = "auto"    # Auto-detect or specify e.g. "enp1s0f0"
 bypass_queues = 4            # Number of RX/TX queues
@@ -315,7 +315,7 @@ start_service() {
         echo "  Status:      systemctl status $SERVICE_NAME"
         echo ""
         
-        echo "  Mode:        DPDK kernel bypass (auto-detected)"
+        echo "  Mode:        AF_XDP kernel bypass (auto-detected)"
         echo ""
     else
         log_error "Failed to start Oxidize server"

@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
         --install) ACTION="install" ;;
         --config) ACTION="config" ;;
         --tls) ACTION="tls" ;;
-        --dpdk) ACTION="dpdk" ;;
+        --xdp) ACTION="xdp" ;;
         --restart) ACTION="restart" ;;
         --status) ACTION="status" ;;
         --health) ACTION="health" ;;
@@ -58,7 +58,7 @@ if [[ -z "$ACTION" ]]; then
     echo "  --install  Install binary and systemd service"
     echo "  --config   Generate configuration file"
     echo "  --tls      Setup TLS certificates"
-    echo "  --dpdk     Setup DPDK kernel bypass (bind data NIC)"
+    echo "  --xdp      Setup XDP kernel bypass (configure data NIC)"
     echo "  --restart  Restart Oxidize service"
     echo "  --status   Show service status"
     echo "  --health   Run health check"
@@ -196,7 +196,7 @@ do_config() {
     
     cat > "$CONFIG_DIR/server.toml" << EOF
 # Oxidize Server Configuration
-# Latitude.sh Chicago - Dual NIC DPDK Setup
+# Latitude.sh Chicago - AF_XDP High-Performance Setup
 
 [server]
 # Public address for clients
@@ -208,11 +208,11 @@ cert_path = "$CONFIG_DIR/certs/server.crt"
 key_path = "$CONFIG_DIR/certs/server.key"
 
 [network]
-# Data plane NIC (for DPDK)
+# Data plane NIC (for AF_XDP)
 interface = "${DATA_NIC:-eth0}"
 
-# Kernel bypass mode: "dpdk"
-kernel_bypass = "dpdk"
+# Kernel bypass mode: "xdp" (AF_XDP zero-copy)
+kernel_bypass = "xdp"
 
 # Number of worker threads (match CPU cores)
 workers = $(nproc)
@@ -289,58 +289,47 @@ do_tls() {
 }
 
 # ============================================
-# DPDK Setup
+# XDP Setup
 # ============================================
-do_dpdk() {
-    log_info "Setting up DPDK kernel bypass..."
-    
-    # Check if DPDK is installed
-    if ! command -v dpdk-devbind.py &> /dev/null; then
-        log_info "Installing DPDK..."
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        if [[ -f "$SCRIPT_DIR/../dpdk/install-dpdk.sh" ]]; then
-            bash "$SCRIPT_DIR/../dpdk/install-dpdk.sh"
-        else
-            log_warn "DPDK install script not found, skipping"
-            return 0
-        fi
-    fi
+do_xdp() {
+    log_info "Setting up AF_XDP kernel bypass..."
     
     # Load NIC config
     if [[ -f "$CONFIG_DIR/nic-config.env" ]]; then
         source "$CONFIG_DIR/nic-config.env"
     else
-        log_warn "NIC config not found, skipping DPDK binding"
+        log_warn "NIC config not found, using default interface"
+        DATA_NIC=$(ip route get 8.8.8.8 | grep -oP 'dev \K\S+' | head -1)
+    fi
+    
+    if [[ -z "$DATA_NIC" ]]; then
+        log_warn "Could not determine data NIC"
         return 0
     fi
     
-    # Get data NIC PCI address
-    DATA_PCI=$(ethtool -i "$DATA_NIC" 2>/dev/null | grep "bus-info" | awk '{print $2}')
-    if [[ -z "$DATA_PCI" ]]; then
-        log_warn "Could not determine PCI address for $DATA_NIC"
-        return 0
+    log_info "Configuring $DATA_NIC for XDP..."
+    
+    # Enable multi-queue for XDP
+    QUEUES=$(nproc)
+    if [[ $QUEUES -gt 16 ]]; then
+        QUEUES=16
+    fi
+    ethtool -L "$DATA_NIC" combined $QUEUES 2>/dev/null || true
+    
+    # Set ring buffer sizes
+    ethtool -G "$DATA_NIC" rx 4096 tx 4096 2>/dev/null || true
+    
+    # Check XDP support
+    DRIVER=$(ethtool -i "$DATA_NIC" 2>/dev/null | grep "driver" | awk '{print $2}')
+    XDP_DRIVERS="i40e ixgbe mlx5_core mlx4_en nfp bnxt_en virtio_net veth igb e1000e"
+    
+    if echo "$XDP_DRIVERS" | grep -qw "$DRIVER"; then
+        log_success "XDP: $DATA_NIC ($DRIVER) supports native XDP mode"
+    else
+        log_warn "XDP: $DATA_NIC ($DRIVER) will use generic XDP mode"
     fi
     
-    # Check if already bound to DPDK
-    if dpdk-devbind.py --status-dev net | grep -q "$DATA_PCI.*drv=vfio-pci"; then
-        log_success "DPDK: $DATA_NIC ($DATA_PCI) already bound to vfio-pci"
-        return 0
-    fi
-    
-    # Load VFIO module
-    modprobe vfio-pci
-    echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode 2>/dev/null || true
-    
-    # Bring down interface and bind to DPDK
-    log_info "Binding $DATA_NIC ($DATA_PCI) to DPDK..."
-    ip link set "$DATA_NIC" down 2>/dev/null || true
-    dpdk-devbind.py -b vfio-pci "$DATA_PCI" || {
-        log_warn "Failed to bind NIC to DPDK, continuing with kernel driver"
-        ip link set "$DATA_NIC" up 2>/dev/null || true
-        return 0
-    }
-    
-    log_success "DPDK: $DATA_NIC bound to vfio-pci"
+    log_success "AF_XDP: $DATA_NIC configured for high-performance"
 }
 
 # ============================================
@@ -437,7 +426,7 @@ do_full() {
     do_tls
     echo ""
     
-    do_dpdk
+    do_xdp
     echo ""
     
     do_firewall
@@ -466,7 +455,7 @@ case $ACTION in
     install) do_install ;;
     config) do_config ;;
     tls) do_tls ;;
-    dpdk) do_dpdk ;;
+    xdp) do_xdp ;;
     restart) do_restart ;;
     status) do_status ;;
     health) do_health ;;

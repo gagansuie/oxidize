@@ -1,12 +1,18 @@
 #!/bin/bash
 #
 # Latitude.sh Bare Metal Setup Script for Oxidize
-# Configures hugepages, VFIO, DPDK, and dependencies for kernel bypass
+# Configures AF_XDP/XDP kernel bypass for high-performance networking
 #
 # Usage: sudo ./latitude-setup.sh
 #
 # Tested on: Ubuntu 22.04/24.04, Debian 12
 # Latitude.sh Chicago with dual 10Gbps NICs
+#
+# AF_XDP Benefits:
+# - Event-driven (no dedicated CPU cores)
+# - Low power consumption
+# - Full kernel integration
+# - 10-25 Gbps throughput
 #
 
 set -e
@@ -32,7 +38,7 @@ fi
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║     LATITUDE.SH BARE METAL SETUP FOR OXIDIZE              ║"
-echo "║     Dual-NIC DPDK Kernel Bypass Configuration             ║"
+echo "║     AF_XDP/XDP High-Performance Networking                ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -47,6 +53,17 @@ else
 fi
 log_info "Detected OS: $OS $OS_VERSION"
 
+# Check kernel version for AF_XDP support
+KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
+KERNEL_MAJOR=$(echo $KERNEL_VERSION | cut -d. -f1)
+KERNEL_MINOR=$(echo $KERNEL_VERSION | cut -d. -f2)
+
+if [[ $KERNEL_MAJOR -lt 5 ]] || [[ $KERNEL_MAJOR -eq 5 && $KERNEL_MINOR -lt 4 ]]; then
+    log_error "Kernel version $KERNEL_VERSION is too old. AF_XDP requires Linux 5.4+"
+    exit 1
+fi
+log_success "Kernel $KERNEL_VERSION supports AF_XDP"
+
 # ============================================
 # Step 1: Install Dependencies
 # ============================================
@@ -59,26 +76,24 @@ apt-get install -y \
     pkg-config \
     libssl-dev \
     libnuma-dev \
-    libpcap-dev \
     libelf-dev \
+    libbpf-dev \
     linux-headers-$(uname -r) \
+    linux-tools-$(uname -r) \
+    linux-tools-common \
+    bpftool \
+    clang \
+    llvm \
     pciutils \
     hwloc \
     numactl \
-    msr-tools \
     curl \
     git \
     htop \
     iotop \
     net-tools \
     ethtool \
-    python3 \
-    python3-pip \
-    meson \
-    ninja-build \
-    libbpf-dev \
-    clang \
-    llvm
+    iproute2
 
 log_success "Dependencies installed"
 
@@ -95,7 +110,7 @@ else
 fi
 
 # ============================================
-# Step 3: Configure Hugepages
+# Step 3: Configure Hugepages (optional for AF_XDP)
 # ============================================
 log_info "Configuring hugepages..."
 
@@ -107,13 +122,13 @@ TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
 
 if [[ $TOTAL_RAM_GB -ge 128 ]]; then
-    HUGEPAGES=8192  # 16GB for 128GB+ systems
+    HUGEPAGES=4096  # 8GB for 128GB+ systems
 elif [[ $TOTAL_RAM_GB -ge 64 ]]; then
-    HUGEPAGES=4096  # 8GB for 64GB systems
+    HUGEPAGES=2048  # 4GB for 64GB systems
 elif [[ $TOTAL_RAM_GB -ge 32 ]]; then
-    HUGEPAGES=2048  # 4GB for 32GB systems
+    HUGEPAGES=1024  # 2GB for 32GB systems
 else
-    HUGEPAGES=1024  # 2GB for smaller systems
+    HUGEPAGES=512   # 1GB for smaller systems
 fi
 
 log_info "Setting $HUGEPAGES hugepages (${HUGEPAGES}x2MB = $((HUGEPAGES * 2))MB)"
@@ -136,72 +151,34 @@ fi
 log_success "Hugepages configured: $(cat /proc/sys/vm/nr_hugepages)"
 
 # ============================================
-# Step 4: Enable IOMMU (for VFIO/DPDK)
+# Step 4: Enable BPF JIT
 # ============================================
-log_info "Checking IOMMU status..."
+log_info "Enabling BPF JIT compiler..."
 
-IOMMU_ENABLED=$(dmesg | grep -i "IOMMU enabled" || true)
-if [[ -z "$IOMMU_ENABLED" ]]; then
-    log_warn "IOMMU may not be enabled in BIOS/GRUB"
-    
-    if ! grep -q "intel_iommu=on" /etc/default/grub && ! grep -q "amd_iommu=on" /etc/default/grub; then
-        # Detect CPU vendor
-        CPU_VENDOR=$(grep -m1 vendor_id /proc/cpuinfo | awk '{print $3}')
-        
-        if [[ "$CPU_VENDOR" == "GenuineIntel" ]]; then
-            IOMMU_PARAM="intel_iommu=on iommu=pt"
-        else
-            IOMMU_PARAM="amd_iommu=on iommu=pt"
-        fi
-        
-        log_info "Adding IOMMU to GRUB: $IOMMU_PARAM"
-        sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"$IOMMU_PARAM /" /etc/default/grub
-        
-        # Also add hugepages to GRUB for boot-time allocation
-        if ! grep -q "hugepagesz" /etc/default/grub; then
-            sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"default_hugepagesz=2M hugepagesz=2M hugepages=$HUGEPAGES /" /etc/default/grub
-        fi
-        
-        update-grub
-        log_warn "GRUB updated - REBOOT REQUIRED for IOMMU"
-        NEEDS_REBOOT=1
-    fi
-else
-    log_success "IOMMU is enabled"
+echo 1 > /proc/sys/net/core/bpf_jit_enable
+if ! grep -q "net.core.bpf_jit_enable" /etc/sysctl.conf; then
+    echo "net.core.bpf_jit_enable = 1" >> /etc/sysctl.conf
 fi
 
-# ============================================
-# Step 5: Load VFIO Modules
-# ============================================
-log_info "Loading VFIO modules..."
-
-modprobe vfio-pci || log_warn "vfio-pci module not available (may need reboot)"
-modprobe uio || true
-modprobe uio_pci_generic || true
-
-# Make persistent
-cat > /etc/modules-load.d/oxidize-dpdk.conf << EOF
-vfio-pci
-uio
-uio_pci_generic
-EOF
-
-log_success "VFIO modules configured"
+log_success "BPF JIT enabled"
 
 # ============================================
-# Step 6: Detect Network Interfaces (Dual NIC)
+# Step 5: Detect Network Interfaces (Dual NIC)
 # ============================================
 log_info "Detecting network interfaces (Latitude.sh dual-NIC setup)..."
 
 echo ""
 echo "Available network interfaces:"
 echo "══════════════════════════════════════════════════════════════════════"
-printf "%-12s %-18s %-10s %-15s %-15s\n" "Interface" "MAC Address" "Speed" "Driver" "PCI Address"
+printf "%-12s %-18s %-10s %-15s %-15s\n" "Interface" "MAC Address" "Speed" "Driver" "XDP Support"
 echo "══════════════════════════════════════════════════════════════════════"
 
 MGMT_NIC=""
 DATA_NIC=""
 NIC_COUNT=0
+
+# XDP-native drivers
+XDP_DRIVERS="i40e ixgbe mlx5_core mlx4_en nfp bnxt_en virtio_net veth igb e1000e"
 
 for iface in /sys/class/net/*; do
     iface_name=$(basename "$iface")
@@ -209,9 +186,14 @@ for iface in /sys/class/net/*; do
         mac=$(cat "$iface/address" 2>/dev/null || echo "N/A")
         speed=$(cat "$iface/speed" 2>/dev/null || echo "?")
         driver=$(basename "$(readlink -f "$iface/device/driver")" 2>/dev/null || echo "N/A")
-        pci=$(basename "$(readlink -f "$iface/device")" 2>/dev/null || echo "N/A")
         
-        printf "%-12s %-18s %-10s %-15s %-15s\n" "$iface_name" "$mac" "${speed}Mbps" "$driver" "$pci"
+        # Check XDP support
+        xdp_support="generic"
+        if echo "$XDP_DRIVERS" | grep -qw "$driver"; then
+            xdp_support="native ✓"
+        fi
+        
+        printf "%-12s %-18s %-10s %-15s %-15s\n" "$iface_name" "$mac" "${speed}Mbps" "$driver" "$xdp_support"
         
         # Track NICs for dual-NIC setup
         if [[ $NIC_COUNT -eq 0 ]]; then
@@ -226,31 +208,14 @@ echo ""
 
 if [[ $NIC_COUNT -ge 2 ]]; then
     log_success "Dual-NIC detected: Management=$MGMT_NIC, Data=$DATA_NIC"
-    
-    # Save NIC configuration
-    cat > /etc/oxidize/nic-config.env << EOF
-# Latitude.sh Dual-NIC Configuration
-# Management NIC: SSH, API, control plane
-MGMT_NIC=$MGMT_NIC
-
-# Data NIC: DPDK, high-performance data plane
-DATA_NIC=$DATA_NIC
-EOF
-    log_success "NIC config saved to /etc/oxidize/nic-config.env"
 else
     log_warn "Only $NIC_COUNT NIC(s) detected - single NIC mode"
     MGMT_NIC=$(ls /sys/class/net | grep -v lo | head -1)
     DATA_NIC=$MGMT_NIC
 fi
 
-# Show PCI devices
-log_info "PCI network devices:"
-echo ""
-lspci | grep -i "ethernet\|network" || true
-echo ""
-
 # ============================================
-# Step 7: Create Oxidize directories
+# Step 6: Create Oxidize directories
 # ============================================
 log_info "Creating Oxidize directories..."
 
@@ -259,16 +224,34 @@ mkdir -p /var/log/oxidize
 mkdir -p /var/run/oxidize
 mkdir -p /etc/oxidize/certs
 
-log_success "Directories created"
+# Save NIC configuration
+cat > /etc/oxidize/nic-config.env << EOF
+# Latitude.sh Dual-NIC Configuration
+# Generated on $(date)
+
+# Management NIC: SSH, API, control plane
+MGMT_NIC=$MGMT_NIC
+
+# Data NIC: AF_XDP high-performance data plane
+DATA_NIC=$DATA_NIC
+
+# XDP attach mode: native, generic, or offload
+XDP_MODE=native
+EOF
+
+log_success "NIC config saved to /etc/oxidize/nic-config.env"
 
 # ============================================
-# Step 8: System Tuning for High-Performance Networking
+# Step 7: System Tuning for High-Performance Networking
 # ============================================
 log_info "Applying system tuning..."
 
-cat > /etc/sysctl.d/99-oxidize-performance.conf << EOF
-# Oxidize Performance Tuning for DPDK Kernel Bypass
-# Latitude.sh Dual-NIC High-Performance Configuration
+cat > /etc/sysctl.d/99-oxidize-xdp.conf << EOF
+# Oxidize Performance Tuning for AF_XDP
+# Latitude.sh High-Performance Configuration
+
+# BPF/XDP settings
+net.core.bpf_jit_enable = 1
 
 # Network buffers (increased for 10Gbps)
 net.core.rmem_max = 268435456
@@ -310,11 +293,16 @@ fs.nr_open = 4194304
 net.ipv4.neigh.default.gc_thresh1 = 8192
 net.ipv4.neigh.default.gc_thresh2 = 32768
 net.ipv4.neigh.default.gc_thresh3 = 65536
+
+# SO_BUSY_POLL - reduces latency by ~10µs
+# Kernel will busy-poll for 50µs before sleeping
+net.core.busy_poll = 50
+net.core.busy_read = 50
 EOF
 
-sysctl -p /etc/sysctl.d/99-oxidize-performance.conf > /dev/null 2>&1 || true
+sysctl -p /etc/sysctl.d/99-oxidize-xdp.conf > /dev/null 2>&1 || true
 
-# Increase limits
+# Increase limits for AF_XDP
 cat > /etc/security/limits.d/99-oxidize.conf << EOF
 * soft nofile 2097152
 * hard nofile 2097152
@@ -329,65 +317,158 @@ EOF
 log_success "System tuning applied"
 
 # ============================================
-# Step 9: Disable IRQ Balance (for CPU pinning)
+# Step 8: CPU Governor (Performance Mode)
+# ============================================
+log_info "Setting CPU governor to performance mode..."
+
+# Install cpufrequtils if not present
+apt-get install -y cpufrequtils 2>/dev/null || true
+
+# Set performance governor for all CPUs
+for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    if [[ -f "$cpu" ]]; then
+        echo performance > "$cpu" 2>/dev/null || true
+    fi
+done
+
+# Make persistent via systemd
+cat > /etc/systemd/system/cpu-performance.service << 'CPUEOF'
+[Unit]
+Description=Set CPU Governor to Performance
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $cpu 2>/dev/null || true; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+CPUEOF
+
+systemctl daemon-reload
+systemctl enable cpu-performance.service 2>/dev/null || true
+
+# Disable frequency scaling if available
+if [[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+    echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true
+fi
+
+log_success "CPU governor set to performance"
+
+# ============================================
+# Step 9: IRQ Affinity for Multi-Queue NICs
 # ============================================
 log_info "Configuring IRQ affinity..."
 
-if systemctl is-active --quiet irqbalance; then
-    systemctl stop irqbalance
-    systemctl disable irqbalance
-    log_success "irqbalance disabled (for manual CPU pinning)"
-else
-    log_success "irqbalance already disabled"
+# Create IRQ affinity script
+cat > /etc/oxidize/set-irq-affinity.sh << 'IRQEOF'
+#!/bin/bash
+# Set IRQ affinity for NIC queues
+# Spreads interrupts across CPU cores for better parallelism
+
+NIC=${1:-eth0}
+CORES=$(nproc)
+
+# Find IRQs for this NIC
+IRQS=$(grep "$NIC" /proc/interrupts | awk '{print $1}' | tr -d ':')
+
+if [[ -z "$IRQS" ]]; then
+    echo "No IRQs found for $NIC"
+    exit 0
 fi
 
+CORE=0
+for IRQ in $IRQS; do
+    # Set affinity to specific core (bitmask)
+    MASK=$(printf '%x' $((1 << CORE)))
+    echo $MASK > /proc/irq/$IRQ/smp_affinity 2>/dev/null || true
+    echo "IRQ $IRQ -> CPU $CORE (mask: $MASK)"
+    CORE=$(( (CORE + 1) % CORES ))
+done
+
+echo "IRQ affinity configured for $NIC across $CORES cores"
+IRQEOF
+chmod +x /etc/oxidize/set-irq-affinity.sh
+
+# Apply IRQ affinity now if DATA_NIC is set
+if [[ -n "$DATA_NIC" ]]; then
+    /etc/oxidize/set-irq-affinity.sh "$DATA_NIC" 2>/dev/null || true
+fi
+
+log_success "IRQ affinity configured"
+
 # ============================================
-# Step 10: Configure Data NIC for DPDK
+# Step 10: Configure Data NIC for XDP
 # ============================================
-if [[ -n "$DATA_NIC" && "$DATA_NIC" != "$MGMT_NIC" ]]; then
-    log_info "Configuring data NIC ($DATA_NIC) for high-performance..."
+if [[ -n "$DATA_NIC" ]]; then
+    log_info "Configuring data NIC ($DATA_NIC) for XDP..."
     
-    # Enable multi-queue
-    ethtool -L "$DATA_NIC" combined $(nproc) 2>/dev/null || true
-    
-    # Disable offloads for DPDK compatibility
-    ethtool -K "$DATA_NIC" rx off tx off sg off tso off gso off gro off lro off 2>/dev/null || true
+    # Enable multi-queue for XDP
+    QUEUES=$(nproc)
+    if [[ $QUEUES -gt 16 ]]; then
+        QUEUES=16  # Cap at 16 queues
+    fi
+    ethtool -L "$DATA_NIC" combined $QUEUES 2>/dev/null || true
     
     # Set ring buffer sizes
     ethtool -G "$DATA_NIC" rx 4096 tx 4096 2>/dev/null || true
     
-    log_success "Data NIC optimized for kernel bypass"
+    # Enable XDP features (keep most offloads for non-XDP traffic)
+    ethtool -K "$DATA_NIC" rxvlan off txvlan off 2>/dev/null || true
+    
+    log_success "Data NIC optimized for XDP"
 fi
+
+# ============================================
+# Step 11: Create XDP setup script
+# ============================================
+cat > /etc/oxidize/attach-xdp.sh << 'EOF'
+#!/bin/bash
+# Attach XDP program to interface
+# Usage: ./attach-xdp.sh <interface> <xdp_program.o>
+
+INTERFACE=${1:-eth1}
+XDP_PROG=${2:-/opt/oxidize/oxidize-xdp.o}
+
+if [[ ! -f "$XDP_PROG" ]]; then
+    echo "XDP program not found: $XDP_PROG"
+    echo "Using standard sockets (XDP acceleration disabled)"
+    exit 0
+fi
+
+# Attach XDP program
+ip link set dev $INTERFACE xdp obj $XDP_PROG sec xdp
+
+echo "XDP program attached to $INTERFACE"
+ip link show $INTERFACE | grep xdp
+EOF
+chmod +x /etc/oxidize/attach-xdp.sh
 
 # ============================================
 # Summary
 # ============================================
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║     LATITUDE.SH SETUP COMPLETE                            ║"
+echo "║     LATITUDE.SH AF_XDP SETUP COMPLETE                     ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
-log_success "Hugepages:     $(cat /proc/sys/vm/nr_hugepages) x 2MB"
-log_success "Total RAM:     ${TOTAL_RAM_GB}GB"
-log_success "CPU Cores:     $(nproc)"
-log_success "NUMA Nodes:    $(numactl --hardware 2>/dev/null | grep "available:" | awk '{print $2}' || echo '1')"
+log_success "Kernel:         $(uname -r) (AF_XDP ready)"
+log_success "BPF JIT:        Enabled"
+log_success "SO_BUSY_POLL:   50µs (low latency)"
+log_success "CPU Governor:   Performance"
+log_success "IRQ Affinity:   Multi-queue spread"
+log_success "Hugepages:      $(cat /proc/sys/vm/nr_hugepages) x 2MB"
+log_success "Total RAM:      ${TOTAL_RAM_GB}GB"
+log_success "CPU Cores:      $(nproc)"
+log_success "NUMA Nodes:     $(numactl --hardware 2>/dev/null | grep "available:" | awk '{print $2}' || echo '1')"
 log_success "Management NIC: $MGMT_NIC"
 log_success "Data NIC:       $DATA_NIC"
 echo ""
 
-if [[ -n "${NEEDS_REBOOT:-}" ]]; then
-    echo ""
-    log_warn "═══════════════════════════════════════════════════════════"
-    log_warn "  REBOOT REQUIRED to enable IOMMU for DPDK"
-    log_warn "  Run: sudo reboot"
-    log_warn "═══════════════════════════════════════════════════════════"
-    echo ""
-fi
-
 echo "Next steps:"
-echo "  1. Reboot if IOMMU was configured"
-echo "  2. Install DPDK:    ./scripts/dpdk/install-dpdk.sh"
-echo "  3. Setup hugepages: ./scripts/dpdk/setup-hugepages.sh"
-echo "  4. Bind data NIC:   ./scripts/dpdk/bind-nic.sh $DATA_NIC"
-echo "  5. Deploy server:   ./scripts/latitude/latitude-deploy.sh"
+echo "  1. Deploy server: ./scripts/latitude/latitude-deploy.sh"
+echo ""
+echo "XDP will be automatically enabled when the server starts."
+echo "No reboot required for AF_XDP."
 echo ""

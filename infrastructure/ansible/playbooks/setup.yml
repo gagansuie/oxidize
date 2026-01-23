@@ -9,13 +9,13 @@
 
   roles:
     - common
-    - dpdk
+    - xdp
     - oxidize
 
   post_tasks:
     - name: Reboot if required
       reboot:
-        msg: "Rebooting for IOMMU/hugepages configuration"
+        msg: "Rebooting for kernel/hugepages configuration"
         reboot_timeout: 300
       when: reboot_required | default(false)
 
@@ -23,10 +23,4 @@
       wait_for_connection:
         delay: 30
         timeout: 300
-      when: reboot_required | default(false)
-
-    - name: Re-run DPDK NIC binding after reboot
-      include_role:
-        name: dpdk
-        tasks_from: bind_nic.yml
       when: reboot_required | default(false)

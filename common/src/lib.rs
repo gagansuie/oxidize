@@ -1,5 +1,5 @@
 // ============================================================================
-// OXIDIZE - High Performance QUIC Relay with DPDK Support
+// OXIDIZE - High Performance QUIC Relay with AF_XDP Support
 // ============================================================================
 
 // Core performance modules
@@ -41,20 +41,23 @@ pub mod relay_mesh;
 // Benchmark utilities
 pub mod benchmark;
 
-// Kernel Bypass - DPDK-based for maximum throughput (Linux only)
+// Kernel Bypass - AF_XDP for maximum throughput (Linux only)
 #[cfg(target_os = "linux")]
 pub mod kernel_bypass;
 
-// QUIC-DPDK - Cross-platform QUIC implementation with optional DPDK acceleration
-// Provides: QuicEndpoint, EndpointConfig, EndpointStats
-// Features:
-// - Cross-platform UDP socket layer (works on Linux, macOS, Windows)
-// - Optional DPDK poll-mode drivers for 100+ Gbps (Linux with dpdk feature)
-// - Custom QUIC v1 (RFC 9000) implementation
-// - Zero-copy packet processing
-// - Hardware crypto (AES-NI)
-// - ML-augmented congestion control
-pub mod quic_dpdk;
+// AF_XDP - High-performance zero-copy networking (Linux only)
+// Uses XDP (eXpress Data Path) for kernel-integrated acceleration
+// Benefits:
+// - Event-driven (no dedicated CPU cores)
+// - Low power consumption
+// - Full kernel integration
+// - 10-25 Gbps throughput
+#[cfg(target_os = "linux")]
+pub mod af_xdp;
+
+// eBPF/XDP programs for packet filtering and redirection
+#[cfg(target_os = "linux")]
+pub mod ebpf;
 
 // Core optimizations
 pub mod low_latency;

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Vultr Bare Metal Setup Script for Oxidize
-# Configures hugepages, VFIO, and dependencies for DPDK kernel bypass
+# Configures AF_XDP/XDP kernel bypass for high-performance networking
 #
 # Usage: sudo ./vultr-setup.sh
 #
@@ -31,7 +31,7 @@ fi
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║     VULTR BARE METAL SETUP FOR OXIDIZE                    ║"
-echo "║     DPDK Kernel Bypass Configuration                      ║"
+echo "║     AF_XDP/XDP High-Performance Networking                ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -46,6 +46,17 @@ else
 fi
 log_info "Detected OS: $OS $OS_VERSION"
 
+# Check kernel version
+KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
+KERNEL_MAJOR=$(echo $KERNEL_VERSION | cut -d. -f1)
+KERNEL_MINOR=$(echo $KERNEL_VERSION | cut -d. -f2)
+
+if [[ $KERNEL_MAJOR -lt 5 ]] || [[ $KERNEL_MAJOR -eq 5 && $KERNEL_MINOR -lt 4 ]]; then
+    log_error "Kernel version $KERNEL_VERSION is too old. AF_XDP requires Linux 5.4+"
+    exit 1
+fi
+log_success "Kernel $KERNEL_VERSION supports AF_XDP"
+
 # ============================================
 # Step 1: Install Dependencies
 # ============================================
@@ -58,19 +69,25 @@ apt-get install -y \
     pkg-config \
     libssl-dev \
     libnuma-dev \
-    libpcap-dev \
     libelf-dev \
+    libbpf-dev \
     linux-headers-$(uname -r) \
+    linux-tools-$(uname -r) \
+    linux-tools-common \
+    bpftool \
+    clang \
+    llvm \
     pciutils \
     hwloc \
     numactl \
-    msr-tools \
     curl \
     git \
     htop \
     iotop \
     net-tools \
     ethtool \
+    iproute2
+
 log_success "Dependencies installed"
 
 # ============================================
@@ -90,34 +107,28 @@ fi
 # ============================================
 log_info "Configuring hugepages..."
 
-# Check current hugepage status
 CURRENT_HUGEPAGES=$(cat /proc/sys/vm/nr_hugepages)
 log_info "Current hugepages: $CURRENT_HUGEPAGES"
 
-# Calculate hugepages (aim for 4GB = 2048 x 2MB pages)
-# Adjust based on available RAM
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
 
 if [[ $TOTAL_RAM_GB -ge 64 ]]; then
-    HUGEPAGES=4096  # 8GB for 64GB+ systems
+    HUGEPAGES=2048  # 4GB
 elif [[ $TOTAL_RAM_GB -ge 32 ]]; then
-    HUGEPAGES=2048  # 4GB for 32GB systems
+    HUGEPAGES=1024  # 2GB
 else
-    HUGEPAGES=1024  # 2GB for smaller systems
+    HUGEPAGES=512   # 1GB
 fi
 
-log_info "Setting $HUGEPAGES hugepages (${HUGEPAGES}x2MB = $((HUGEPAGES * 2))MB)"
+log_info "Setting $HUGEPAGES hugepages"
 
-# Set hugepages now
 echo $HUGEPAGES > /proc/sys/vm/nr_hugepages
 
-# Make persistent
 if ! grep -q "vm.nr_hugepages" /etc/sysctl.conf; then
     echo "vm.nr_hugepages = $HUGEPAGES" >> /etc/sysctl.conf
 fi
 
-# Mount hugetlbfs if not mounted
 if ! mount | grep -q hugetlbfs; then
     mkdir -p /mnt/huge
     mount -t hugetlbfs nodev /mnt/huge
@@ -127,192 +138,94 @@ fi
 log_success "Hugepages configured: $(cat /proc/sys/vm/nr_hugepages)"
 
 # ============================================
-# Step 4: Enable IOMMU (for VFIO)
+# Step 4: Enable BPF JIT
 # ============================================
-log_info "Checking IOMMU status..."
+log_info "Enabling BPF JIT compiler..."
 
-IOMMU_ENABLED=$(dmesg | grep -i "IOMMU enabled" || true)
-if [[ -z "$IOMMU_ENABLED" ]]; then
-    log_warn "IOMMU may not be enabled in BIOS/GRUB"
-    
-    # Check if already in GRUB
-    if ! grep -q "intel_iommu=on" /etc/default/grub && ! grep -q "amd_iommu=on" /etc/default/grub; then
-        # Detect CPU vendor
-        CPU_VENDOR=$(grep -m1 vendor_id /proc/cpuinfo | awk '{print $3}')
-        
-        if [[ "$CPU_VENDOR" == "GenuineIntel" ]]; then
-            IOMMU_PARAM="intel_iommu=on iommu=pt"
-        else
-            IOMMU_PARAM="amd_iommu=on iommu=pt"
-        fi
-        
-        log_info "Adding IOMMU to GRUB: $IOMMU_PARAM"
-        sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"$IOMMU_PARAM /" /etc/default/grub
-        
-        # Also add hugepages to GRUB for boot-time allocation
-        if ! grep -q "hugepagesz" /etc/default/grub; then
-            sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"default_hugepagesz=2M hugepagesz=2M hugepages=$HUGEPAGES /" /etc/default/grub
-        fi
-        
-        update-grub
-        log_warn "GRUB updated - REBOOT REQUIRED for IOMMU"
-        NEEDS_REBOOT=1
-    fi
-else
-    log_success "IOMMU is enabled"
+echo 1 > /proc/sys/net/core/bpf_jit_enable
+if ! grep -q "net.core.bpf_jit_enable" /etc/sysctl.conf; then
+    echo "net.core.bpf_jit_enable = 1" >> /etc/sysctl.conf
 fi
 
-# ============================================
-# Step 5: Load VFIO Modules
-# ============================================
-log_info "Loading VFIO modules..."
-
-modprobe vfio-pci || log_warn "vfio-pci module not available (may need reboot)"
-modprobe uio || true
-modprobe uio_pci_generic || true
-
-# Make persistent
-cat > /etc/modules-load.d/oxidize-dpdk.conf << EOF
-vfio-pci
-uio
-uio_pci_generic
-EOF
-
-log_success "VFIO modules configured"
+log_success "BPF JIT enabled"
 
 # ============================================
-# Step 6: Detect Network Interfaces
+# Step 5: Detect Network Interface
 # ============================================
 log_info "Detecting network interfaces..."
 
-echo ""
-echo "Available network interfaces:"
-echo "──────────────────────────────────────────────────────────────"
-printf "%-12s %-18s %-10s %-20s\n" "Interface" "MAC Address" "Speed" "Driver"
-echo "──────────────────────────────────────────────────────────────"
+DEFAULT_IF=$(ip route | grep default | awk '{print $5}' | head -1)
+XDP_DRIVERS="i40e ixgbe mlx5_core mlx4_en nfp bnxt_en virtio_net veth igb e1000e"
 
-for iface in /sys/class/net/*; do
-    iface_name=$(basename "$iface")
-    if [[ "$iface_name" != "lo" ]]; then
-        mac=$(cat "$iface/address" 2>/dev/null || echo "N/A")
-        speed=$(cat "$iface/speed" 2>/dev/null || echo "?")
-        driver=$(basename "$(readlink -f "$iface/device/driver")" 2>/dev/null || echo "N/A")
-        printf "%-12s %-18s %-10s %-20s\n" "$iface_name" "$mac" "${speed}Mbps" "$driver"
+if [[ -n "$DEFAULT_IF" ]]; then
+    DRIVER=$(ethtool -i $DEFAULT_IF 2>/dev/null | grep "driver" | awk '{print $2}')
+    log_info "Default interface: $DEFAULT_IF (driver: $DRIVER)"
+    
+    if echo "$XDP_DRIVERS" | grep -qw "$DRIVER"; then
+        log_success "Driver $DRIVER supports native XDP mode"
+    else
+        log_warn "Driver $DRIVER may only support generic XDP mode"
     fi
-done
-echo ""
-
-# Show PCI devices
-log_info "PCI network devices:"
-echo ""
-lspci | grep -i "ethernet\|network" || true
-echo ""
+fi
 
 # ============================================
-# Step 7: Create Oxidize directories
+# Step 6: Create Directories
 # ============================================
 log_info "Creating Oxidize directories..."
 
 mkdir -p /etc/oxidize
 mkdir -p /var/log/oxidize
 mkdir -p /var/run/oxidize
+mkdir -p /etc/oxidize/certs
+mkdir -p /opt/oxidize
 
 log_success "Directories created"
 
 # ============================================
-# Step 8: System Tuning
+# Step 7: System Tuning
 # ============================================
 log_info "Applying system tuning..."
 
-cat > /etc/sysctl.d/99-oxidize-performance.conf << EOF
-# Oxidize Performance Tuning for DPDK Kernel Bypass
-
-# Network buffers
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
-net.core.rmem_default = 16777216
-net.core.wmem_default = 16777216
-net.core.netdev_max_backlog = 250000
+cat > /etc/sysctl.d/99-oxidize-xdp.conf << EOF
+# Oxidize AF_XDP Performance Tuning
+net.core.bpf_jit_enable = 1
+net.core.rmem_max = 268435456
+net.core.wmem_max = 268435456
+net.core.rmem_default = 33554432
+net.core.wmem_default = 33554432
+net.core.netdev_max_backlog = 500000
 net.core.somaxconn = 65535
-
-# UDP tuning
-net.ipv4.udp_mem = 65536 131072 262144
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-
-# TCP tuning (for fallback)
-net.ipv4.tcp_rmem = 4096 87380 134217728
-net.ipv4.tcp_wmem = 4096 65536 134217728
+net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_fastopen = 3
-
-# Connection tracking
-net.netfilter.nf_conntrack_max = 1000000
-net.netfilter.nf_conntrack_tcp_timeout_established = 86400
-
-# Memory
 vm.swappiness = 10
-vm.dirty_ratio = 40
-vm.dirty_background_ratio = 10
-
-# File descriptors
-fs.file-max = 2097152
-fs.nr_open = 2097152
+fs.file-max = 4194304
 EOF
 
-sysctl -p /etc/sysctl.d/99-oxidize-performance.conf > /dev/null 2>&1 || true
+sysctl -p /etc/sysctl.d/99-oxidize-xdp.conf > /dev/null 2>&1 || true
 
-# Increase limits
 cat > /etc/security/limits.d/99-oxidize.conf << EOF
-* soft nofile 1048576
-* hard nofile 1048576
+* soft nofile 2097152
+* hard nofile 2097152
 * soft memlock unlimited
 * hard memlock unlimited
-root soft nofile 1048576
-root hard nofile 1048576
-root soft memlock unlimited
-root hard memlock unlimited
 EOF
 
 log_success "System tuning applied"
-
-# ============================================
-# Step 9: Disable IRQ Balance (for CPU pinning)
-# ============================================
-log_info "Configuring IRQ affinity..."
-
-if systemctl is-active --quiet irqbalance; then
-    systemctl stop irqbalance
-    systemctl disable irqbalance
-    log_success "irqbalance disabled (for manual CPU pinning)"
-else
-    log_success "irqbalance already disabled"
-fi
 
 # ============================================
 # Summary
 # ============================================
 echo ""
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║     SETUP COMPLETE                                        ║"
+echo "║     VULTR AF_XDP SETUP COMPLETE                           ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo ""
-log_success "Hugepages:     $(cat /proc/sys/vm/nr_hugepages) x 2MB"
-log_success "Total RAM:     ${TOTAL_RAM_GB}GB"
-log_success "CPU Cores:     $(nproc)"
-log_success "NUMA Nodes:    $(numactl --hardware 2>/dev/null | grep "available:" | awk '{print $2}' || echo '1')"
+log_success "Kernel:     $(uname -r) (AF_XDP ready)"
+log_success "BPF JIT:    Enabled"
+log_success "Hugepages:  $(cat /proc/sys/vm/nr_hugepages) x 2MB"
+log_success "Interface:  ${DEFAULT_IF:-eth0}"
 echo ""
-
-if [[ -n "${NEEDS_REBOOT:-}" ]]; then
-    echo ""
-    log_warn "═══════════════════════════════════════════════════════════"
-    log_warn "  REBOOT REQUIRED to enable IOMMU for DPDK"
-    log_warn "  Run: sudo reboot"
-    log_warn "═══════════════════════════════════════════════════════════"
-    echo ""
-fi
-
 echo "Next steps:"
-echo "  1. Reboot if IOMMU was configured"
-echo "  2. Run: ./scripts/vultr-deploy.sh          # Deploy Oxidize server"
+echo "  1. Run: ./scripts/vultr/vultr-deploy.sh"
 echo ""

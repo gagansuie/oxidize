@@ -1,0 +1,109 @@
+---
+# AF_XDP/XDP Setup Role for Oxidize
+# Configures high-performance networking with AF_XDP
+
+- name: Check kernel version for AF_XDP support
+  shell: uname -r | cut -d. -f1-2
+  register: kernel_version
+  changed_when: false
+
+- name: Verify kernel 5.4+ for AF_XDP
+  assert:
+    that:
+      - kernel_version.stdout is version('5.4', '>=')
+    fail_msg: "AF_XDP requires Linux kernel 5.4+. Current: {{ kernel_version.stdout }}"
+
+- name: Install XDP/BPF dependencies
+  apt:
+    name:
+      - build-essential
+      - clang
+      - llvm
+      - libelf-dev
+      - libbpf-dev
+      - linux-headers-{{ ansible_kernel }}
+      - linux-tools-{{ ansible_kernel }}
+      - linux-tools-common
+      - bpftool
+      - iproute2
+      - ethtool
+    state: present
+    update_cache: yes
+
+- name: Enable BPF JIT compiler
+  sysctl:
+    name: net.core.bpf_jit_enable
+    value: '1'
+    sysctl_file: /etc/sysctl.d/99-oxidize-xdp.conf
+    reload: yes
+
+- name: Configure hugepages
+  sysctl:
+    name: vm.nr_hugepages
+    value: "{{ hugepages_count | default(1024) }}"
+    sysctl_file: /etc/sysctl.d/99-oxidize-xdp.conf
+    reload: yes
+
+- name: Create hugetlbfs mount point
+  file:
+    path: /mnt/huge
+    state: directory
+    mode: '0755'
+
+- name: Mount hugetlbfs
+  mount:
+    path: /mnt/huge
+    src: nodev
+    fstype: hugetlbfs
+    state: mounted
+
+- name: Configure network buffer sizes
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-oxidize-xdp.conf
+    reload: yes
+  loop:
+    - { name: 'net.core.rmem_max', value: '268435456' }
+    - { name: 'net.core.wmem_max', value: '268435456' }
+    - { name: 'net.core.rmem_default', value: '33554432' }
+    - { name: 'net.core.wmem_default', value: '33554432' }
+    - { name: 'net.core.netdev_max_backlog', value: '500000' }
+    - { name: 'net.core.somaxconn', value: '65535' }
+
+- name: Configure memory limits for AF_XDP
+  copy:
+    content: |
+      * soft memlock unlimited
+      * hard memlock unlimited
+      * soft nofile 2097152
+      * hard nofile 2097152
+    dest: /etc/security/limits.d/99-oxidize.conf
+    mode: '0644'
+
+- name: Detect data NIC for XDP
+  shell: ip route get 8.8.8.8 | grep -oP 'dev \K\S+' | head -1
+  register: data_nic
+  changed_when: false
+
+- name: Get NIC driver
+  shell: ethtool -i {{ data_nic.stdout }} 2>/dev/null | grep "driver" | awk '{print $2}'
+  register: nic_driver
+  changed_when: false
+  when: data_nic.stdout != ""
+
+- name: Display XDP configuration
+  debug:
+    msg: |
+      AF_XDP Configuration:
+        Kernel: {{ kernel_version.stdout }}
+        Data NIC: {{ data_nic.stdout }}
+        Driver: {{ nic_driver.stdout | default('unknown') }}
+        Hugepages: {{ hugepages_count | default(1024) }} x 2MB
+
+- name: Configure NIC for XDP
+  shell: |
+    ethtool -L {{ data_nic.stdout }} combined $(nproc) 2>/dev/null || true
+    ethtool -G {{ data_nic.stdout }} rx 4096 tx 4096 2>/dev/null || true
+  when: data_nic.stdout != ""
+  changed_when: false

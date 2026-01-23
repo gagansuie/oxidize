@@ -1,6 +1,6 @@
 # Latitude.sh Bare Metal Deployment Guide
 
-Quick-start guide for deploying Oxidize on Latitude.sh bare metal with **DPDK kernel bypass** for maximum performance.
+Quick-start guide for deploying Oxidize on Latitude.sh bare metal with **AF_XDP kernel bypass** for maximum performance.
 
 ## Server Specifications
 
@@ -29,7 +29,7 @@ Quick-start guide for deploying Oxidize on Latitude.sh bare metal with **DPDK ke
 │           │                                │                 │
 │           │                                │                 │
 │  ┌────────▼────────┐              ┌────────▼────────┐       │
-│  │  Linux Kernel   │              │  DPDK           │       │
+│  │  Linux Kernel   │              │  AF_XDP/XDP     │       │
 │  │  SSH, API       │              │  Kernel Bypass  │       │
 │  └─────────────────┘              └─────────────────┘       │
 │                                                              │
@@ -129,7 +129,7 @@ curl -s "https://api.latitude.sh/ssh_keys" \
 The workflow automatically:
 
 1. **Terraform:** Provision servers on Latitude.sh
-2. **Ansible Setup:** Install DPDK, hugepages, UFW, system tuning
+2. **Ansible Setup:** Install AF_XDP, hugepages, UFW, system tuning
 3. **Ansible Deploy:** Upload binary, start service, health check
 
 ### 4. Workflow Options
@@ -172,7 +172,7 @@ ssh ubuntu@SERVER_IP
 
 systemctl status oxidize        # Service status
 journalctl -u oxidize -f        # Logs
-dpdk-devbind.py --status-dev net  # DPDK NIC status
+ip link show                      # NIC status
 ss -ulnp | grep 4433            # Port check
 ```
 
@@ -183,14 +183,14 @@ ss -ulnp | grep 4433            # Port check
 │   Terraform     │ ──▶ │     Ansible     │ ──▶ │    Oxidize      │
 │  (Provision)    │     │   (Configure)   │     │   (Running)     │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-  - Create servers       - Install DPDK         - QUIC relay
+  - Create servers       - Install AF_XDP       - QUIC relay
   - Manage state         - Configure hugepages  - Kernel bypass
   - Output IPs           - Setup UFW            - Health checks
 ```
 
 **Ansible Roles:**
 - `common` - Base packages, UFW, system tuning
-- `dpdk` - IOMMU, hugepages, DPDK install, NIC binding
+- `xdp` - Hugepages, XDP setup, system tuning
 - `oxidize` - TLS certs, config, systemd service, deployment
 
 ## Manual Deployment (Optional)
@@ -206,9 +206,7 @@ cd oxidize
 # Full setup + deploy
 sudo ./scripts/latitude/latitude-setup.sh
 sudo reboot
-sudo ./scripts/dpdk/install-dpdk.sh
-sudo ./scripts/dpdk/setup-hugepages.sh
-sudo ./scripts/dpdk/bind-nic.sh <data_nic>
+sudo ./scripts/xdp/setup-xdp.sh
 sudo ./scripts/latitude/latitude-deploy.sh --full
 ```
 
@@ -225,7 +223,7 @@ key_path = "/etc/oxidize/certs/server.key"
 
 [network]
 interface = "eth1"           # Data NIC for kernel bypass
-kernel_bypass = "dpdk"
+kernel_bypass = "xdp"
 workers = 6                  # Match CPU cores
 zero_copy = true
 
@@ -330,7 +328,7 @@ cat /etc/oxidize/server.toml
 /opt/oxidize/oxidize-server --config /etc/oxidize/server.toml
 ```
 
-### DPDK Not Working
+### XDP Not Working
 
 ```bash
 # Check hugepages
@@ -437,7 +435,7 @@ Deploy additional servers in different locations:
 | OVHcloud | Advance-1 | $93/mo | Unlimited | 1Gbps |
 
 **Latitude.sh advantages:**
-- Dual NICs for proper DPDK architecture
+- Dual NICs for proper AF_XDP architecture
 - 4x more bandwidth than Vultr
 - Chicago location (close to Midwest users)
 - Stable bare metal (no iPXE issues like Vultr)
