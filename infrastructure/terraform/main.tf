@@ -28,6 +28,12 @@ provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
 
+# Rename migration: chicago-1 -> relay-chi-1
+moved {
+  from = latitudesh_server.relay["chicago-1"]
+  to   = latitudesh_server.relay["relay-chi-1"]
+}
+
 resource "latitudesh_server" "relay" {
   for_each = { for server in var.servers : server.name => server if server.enabled }
 
