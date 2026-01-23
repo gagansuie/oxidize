@@ -151,19 +151,18 @@ impl SpeedTest {
         // Latency test (ping-pong)
         info!("Testing latency...");
         let mut latencies = Vec::with_capacity(100);
-        let _ping_packet = vec![0x01u8; 64]; // Small ping packet
+        let _ping_packet = [0x01u8; 64]; // Small ping packet
 
         for _ in 0..100 {
             let start = Instant::now();
             socket.send(&[0x01; 64]).await?;
 
             let mut buf = [0u8; 128];
-            match tokio::time::timeout(Duration::from_secs(1), socket.recv(&mut buf)).await {
-                Ok(Ok(_)) => {
-                    let elapsed = start.elapsed().as_micros() as u64;
-                    latencies.push(elapsed);
-                }
-                _ => {}
+            if let Ok(Ok(_)) =
+                tokio::time::timeout(Duration::from_secs(1), socket.recv(&mut buf)).await
+            {
+                let elapsed = start.elapsed().as_micros() as u64;
+                latencies.push(elapsed);
             }
         }
 

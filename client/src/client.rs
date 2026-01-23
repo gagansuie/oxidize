@@ -3,6 +3,8 @@
 //! High-performance tunnel client using the OxTunnel protocol over raw UDP.
 //! Replaces the previous QUIC-based implementation with a lighter-weight transport.
 
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use oxidize_common::oxtunnel_protocol::{
     decode_packet, encode_packet, flags, generate_id, CryptoEngine, HandshakeInit,
