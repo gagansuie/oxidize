@@ -47,6 +47,13 @@ iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
 RULES
     chmod +x "$CONFIG_DIR/nfqueue-rules.sh"
 
+    # Create cleanup script for ExecStopPost (systemd doesn't use shell by default)
+    cat > "$CONFIG_DIR/cleanup-rules.sh" << 'CLEANUP'
+#!/bin/bash
+iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
+CLEANUP
+    chmod +x "$CONFIG_DIR/cleanup-rules.sh"
+
     # Create systemd service (runs as root for NFQUEUE/iptables access)
     cat > "$SERVICE_FILE" << 'EOF'
 [Unit]
@@ -58,7 +65,7 @@ Wants=network-online.target
 Type=simple
 ExecStartPre=/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/bin/oxidize-daemon
-ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
+ExecStopPost=-/etc/oxidize/cleanup-rules.sh
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
