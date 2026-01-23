@@ -9,35 +9,26 @@ DAEMON_BIN="/usr/bin/oxidize-daemon"
 SERVICE_FILE="/etc/systemd/system/oxidize-daemon.service"
 RUN_DIR="/var/run/oxidize"
 CONFIG_DIR="/etc/oxidize"
-# Tauri installs the app here, sidecar binaries are in the same directory
-APP_DIR="/usr/lib/oxidize"
 
 echo "Setting up Oxidize daemon..."
 
 # Create directories
-mkdir -p "$RUN_DIR"
-mkdir -p "$CONFIG_DIR"
-chmod 755 "$RUN_DIR"
-chmod 755 "$CONFIG_DIR"
+mkdir -p "$RUN_DIR" || true
+mkdir -p "$CONFIG_DIR" || true
+chmod 755 "$RUN_DIR" 2>/dev/null || true
+chmod 755 "$CONFIG_DIR" 2>/dev/null || true
 
-# Create dedicated user for the daemon
-if ! id -u oxidize &>/dev/null; then
+# Create dedicated user for the daemon (optional, daemon runs as root for iptables)
+if ! id -u oxidize &>/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin oxidize 2>/dev/null || true
 fi
 chown oxidize:oxidize "$RUN_DIR" 2>/dev/null || true
 
-# Find and copy the bundled daemon sidecar to /usr/bin
-if [ -d "$APP_DIR" ]; then
-    SIDECAR_DAEMON=$(find "$APP_DIR" -name "oxidize-daemon*" -type f 2>/dev/null | head -1 || true)
-else
-    SIDECAR_DAEMON=""
-    echo "⚠️  App directory not found at $APP_DIR"
-fi
-if [ -n "$SIDECAR_DAEMON" ] && [ -f "$SIDECAR_DAEMON" ]; then
-    echo "Found bundled daemon at: $SIDECAR_DAEMON"
-    cp "$SIDECAR_DAEMON" "$DAEMON_BIN"
-    chmod +x "$DAEMON_BIN"
-    echo "Copied daemon to $DAEMON_BIN"
+# Tauri bundles the daemon directly to /usr/bin/oxidize-daemon
+# Just ensure it's executable
+if [ -f "$DAEMON_BIN" ]; then
+    chmod +x "$DAEMON_BIN" 2>/dev/null || true
+    echo "Found daemon at $DAEMON_BIN"
 fi
 
 # Install systemd service if daemon binary exists
