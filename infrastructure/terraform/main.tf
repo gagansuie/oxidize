@@ -46,7 +46,7 @@ resource "latitudesh_server" "relay" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [ssh_keys]
+    ignore_changes  = [ssh_keys, tags, hostname, operating_system]
   }
 }
 

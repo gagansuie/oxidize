@@ -1,8 +1,26 @@
 ---
+- name: Remove apt proxy configuration (Latitude sets a broken proxy)
+  file:
+    path: "{{ item }}"
+    state: absent
+  become: yes
+  loop:
+    - /etc/apt/apt.conf.d/90curtin-aptproxy
+    - /etc/apt/apt.conf.d/proxy.conf
+  ignore_errors: yes
+
+- name: Clear any apt proxy environment
+  lineinfile:
+    path: /etc/environment
+    regexp: '^(http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY)='
+    state: absent
+  become: yes
+  ignore_errors: yes
+
 - name: Update apt cache
   apt:
     update_cache: yes
-    cache_valid_time: 3600
+    cache_valid_time: 0
   become: yes
 
 - name: Install base packages
