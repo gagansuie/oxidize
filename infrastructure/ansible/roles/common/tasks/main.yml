@@ -35,6 +35,11 @@
       - python3-pyelftools
       - meson
       - ninja-build
+      - ethtool
+      - irqbalance
+      - cpufrequtils
+      - linux-tools-common
+      - linux-tools-{{ ansible_kernel }}
       - curl
       - jq
       - ufw
