@@ -21,20 +21,20 @@
 - name: Configure DPDK with meson
   command:
     cmd: meson setup build --prefix=/opt/dpdk -Dplatform=native -Ddisable_drivers=raw/*,crypto/*,compress/*,regex/*,ml/*
-    chdir: /tmp/dpdk-build/dpdk-23.11.1
-    creates: /tmp/dpdk-build/dpdk-23.11.1/build/build.ninja
+    chdir: /tmp/dpdk-build/dpdk-23.11
+    creates: /tmp/dpdk-build/dpdk-23.11/build/build.ninja
   become: yes
 
 - name: Build DPDK
   command:
     cmd: ninja -C build
-    chdir: /tmp/dpdk-build/dpdk-23.11.1
+    chdir: /tmp/dpdk-build/dpdk-23.11
   become: yes
 
 - name: Install DPDK
   command:
     cmd: ninja -C build install
-    chdir: /tmp/dpdk-build/dpdk-23.11.1
+    chdir: /tmp/dpdk-build/dpdk-23.11
   become: yes
 
 - name: Update ldconfig
