@@ -128,8 +128,6 @@ resource "cloudflare_load_balancer" "relay" {
   name             = "relay.${var.cloudflare_zone}"
   fallback_pool_id = cloudflare_load_balancer_pool.relay_region[keys(local.servers_by_site)[0]].id
   default_pool_ids = [for pool in cloudflare_load_balancer_pool.relay_region : pool.id]
-  proxied          = false  # DNS-only mode for UDP/TCP direct connection
-  ttl              = 30     # Low TTL for fast failover
   steering_policy  = "geo"  # Route to closest region
 
   # Map Cloudflare regions to our pools (cf_region from server config)
