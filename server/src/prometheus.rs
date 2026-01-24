@@ -214,9 +214,12 @@ impl PrometheusMetrics {
         match req.uri().path() {
             "/health" | "/healthz" | "/ready" => {
                 // Health check endpoint for zero-downtime deployments
+                // CORS enabled for client-side latency measurement
                 Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Type", "application/json")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Access-Control-Allow-Methods", "GET, OPTIONS")
                     .body(Body::from(r#"{"status":"healthy","ready":true}"#))
                     .unwrap())
             }
