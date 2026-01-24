@@ -80,7 +80,7 @@ jobs:
     outputs:
       server_ips: ${{ steps.output.outputs.server_ips }}
       inventory: ${{ steps.output.outputs.inventory }}
-      dns_records: ${{ steps.output.outputs.dns_records }}
+      load_balancer: ${{ steps.output.outputs.load_balancer }}
     
     steps:
       - name: Checkout
@@ -160,8 +160,8 @@ jobs:
           echo "$INVENTORY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
-          DNS_RECORDS=$(terraform output -json dns_records)
-          echo "dns_records=$DNS_RECORDS" >> $GITHUB_OUTPUT
+          LOAD_BALANCER=$(terraform output -json load_balancer)
+          echo "load_balancer=$LOAD_BALANCER" >> $GITHUB_OUTPUT
 
       - name: Create IPv6 AAAA Records
         if: inputs.action != 'destroy'
@@ -303,9 +303,9 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          echo "### DNS Records (Auto-configured)" >> $GITHUB_STEP_SUMMARY
+          echo "### Load Balancer" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '${{ needs.terraform.outputs.dns_records }}' | jq -r '.main[]' >> $GITHUB_STEP_SUMMARY
+          echo '${{ needs.terraform.outputs.load_balancer }}' | jq -r '.hostname' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
