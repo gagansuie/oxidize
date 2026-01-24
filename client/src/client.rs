@@ -106,12 +106,24 @@ impl RelayClient {
             encryption_supported: self.config.enable_encryption,
         };
 
-        let mut buf = [0u8; 128];
-        let len = handshake.encode(&mut buf);
+        // Encode handshake payload
+        let mut payload_buf = [0u8; 64];
+        let payload_len = handshake.encode(&mut payload_buf);
+
+        // Wrap in OxTunnel packet with CONTROL flag
+        let mut packet_buf = [0u8; MAX_PACKET_SIZE];
+        let packet_len = encode_packet(
+            &mut packet_buf,
+            &payload_buf[..payload_len],
+            0,
+            flags::CONTROL,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to encode handshake: {}", e))?;
 
         // Send handshake
-        self.socket.send(&buf[..len]).await?;
-        debug!("Sent handshake init");
+        self.socket.send(&packet_buf[..packet_len]).await?;
+        debug!("Sent handshake init ({} bytes)", packet_len);
 
         // Wait for response
         let mut response_buf = [0u8; 256];
@@ -122,8 +134,12 @@ impl RelayClient {
         .context("Handshake timeout")?
         .context("Failed to receive handshake response")?;
 
-        // Parse response
-        let response = HandshakeResponse::decode(&response_buf[..recv_len])
+        // Decode OxTunnel packet first
+        let (_header, payload) = decode_packet(&mut response_buf[..recv_len], None)
+            .map_err(|e| anyhow::anyhow!("Failed to decode response packet: {}", e))?;
+
+        // Parse handshake response from payload
+        let response = HandshakeResponse::decode(payload)
             .ok_or_else(|| anyhow::anyhow!("Invalid handshake response"))?;
 
         // Store encryption key if provided

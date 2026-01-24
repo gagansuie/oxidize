@@ -489,8 +489,8 @@ impl MobileTunnelServer {
     }
 
     /// Get server statistics
-    pub fn stats(&self) -> &TunnelStats {
-        &self.stats
+    pub fn stats(&self) -> Arc<TunnelStats> {
+        Arc::clone(&self.stats)
     }
 
     /// Get active session count

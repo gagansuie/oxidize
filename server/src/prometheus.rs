@@ -26,6 +26,9 @@ pub struct PrometheusMetrics {
     pub packets_sent_total: Counter,
     pub packets_received_total: Counter,
     pub compression_saved_bytes: Counter,
+    pub tunnel_active_sessions: Gauge,
+    pub tunnel_handshakes_completed: Counter,
+    pub tunnel_invalid_packets: Counter,
     #[allow(dead_code)]
     pub request_duration: HistogramVec,
     // µs-level latency histograms (used via record_* methods)
@@ -86,6 +89,24 @@ impl PrometheusMetrics {
             .namespace("oxidize"),
         )?;
         registry.register(Box::new(compression_saved_bytes.clone()))?;
+
+        let tunnel_active_sessions = Gauge::with_opts(
+            Opts::new("tunnel_active_sessions", "Currently active tunnel sessions")
+                .namespace("oxidize"),
+        )?;
+        registry.register(Box::new(tunnel_active_sessions.clone()))?;
+
+        let tunnel_handshakes_completed = Counter::with_opts(
+            Opts::new("tunnel_handshakes_completed", "Total handshakes completed")
+                .namespace("oxidize"),
+        )?;
+        registry.register(Box::new(tunnel_handshakes_completed.clone()))?;
+
+        let tunnel_invalid_packets = Counter::with_opts(
+            Opts::new("tunnel_invalid_packets", "Total invalid packets received")
+                .namespace("oxidize"),
+        )?;
+        registry.register(Box::new(tunnel_invalid_packets.clone()))?;
 
         let request_duration = HistogramVec::new(
             HistogramOpts::new(
@@ -152,6 +173,9 @@ impl PrometheusMetrics {
             packets_sent_total,
             packets_received_total,
             compression_saved_bytes,
+            tunnel_active_sessions,
+            tunnel_handshakes_completed,
+            tunnel_invalid_packets,
             request_duration,
             encode_latency_us,
             decode_latency_us,
@@ -172,6 +196,23 @@ impl PrometheusMetrics {
             .inc_by(stats.packets_received as f64);
         self.compression_saved_bytes
             .inc_by(stats.compression_saved as f64);
+    }
+
+    /// Update tunnel-specific metrics
+    pub fn update_tunnel_stats(&self, active_sessions: u64, handshakes: u64, invalid_packets: u64) {
+        self.tunnel_active_sessions.set(active_sessions as f64);
+        // For counters, we need to track deltas, but for simplicity set absolute values
+        // In production, you'd track previous values and compute deltas
+        let current_handshakes = self.tunnel_handshakes_completed.get() as u64;
+        if handshakes > current_handshakes {
+            self.tunnel_handshakes_completed
+                .inc_by((handshakes - current_handshakes) as f64);
+        }
+        let current_invalid = self.tunnel_invalid_packets.get() as u64;
+        if invalid_packets > current_invalid {
+            self.tunnel_invalid_packets
+                .inc_by((invalid_packets - current_invalid) as f64);
+        }
     }
 
     /// Record encode latency in microseconds

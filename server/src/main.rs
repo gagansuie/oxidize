@@ -151,6 +151,22 @@ async fn main() -> Result<()> {
     if !args.disable_metrics {
         let metrics = PrometheusMetrics::new()?;
         let metrics_addr = args.metrics_addr;
+
+        // Spawn task to periodically update tunnel metrics
+        let metrics_clone = metrics.clone();
+        let server_stats = server.stats();
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                metrics_clone.update_tunnel_stats(
+                    server_stats.active_sessions.load(Ordering::Relaxed),
+                    server_stats.handshakes_completed.load(Ordering::Relaxed),
+                    server_stats.invalid_packets.load(Ordering::Relaxed),
+                );
+            }
+        });
+
         tokio::spawn(async move {
             if let Err(e) = metrics.start_server(metrics_addr).await {
                 error!("Metrics server error: {}", e);
