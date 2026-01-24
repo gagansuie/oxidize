@@ -71,7 +71,7 @@
     proto: tcp
   become: yes
 
-- name: Configure UFW - Allow QUIC
+- name: Configure UFW - Allow QUIC/OxTunnel
   ufw:
     rule: allow
     port: '4433'

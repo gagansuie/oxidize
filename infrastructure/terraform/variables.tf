@@ -23,12 +23,13 @@ variable "environment" {
 variable "servers" {
   description = "List of servers to provision"
   type = list(object({
-    name    = string
-    region  = string
-    site    = string
-    plan    = string
-    os      = string
-    enabled = bool
+    name      = string
+    region    = string
+    site      = string
+    plan      = string
+    os        = string
+    enabled   = bool
+    cf_region = string  # Cloudflare geo region: WNAM, ENAM, WEUR, EEUR, APAC, OC, SAM, etc.
   }))
   default = []
 }
@@ -44,3 +45,4 @@ variable "cloudflare_zone" {
   type        = string
   default     = "oxd.sh"
 }
+
