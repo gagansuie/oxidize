@@ -72,12 +72,9 @@ data "cloudflare_zone" "oxd" {
   name = var.cloudflare_zone
 }
 
-# Get account ID from zone (no need to hardcode)
-data "cloudflare_accounts" "main" {}
-
 locals {
-  # Use the first account (most users have one account)
-  cloudflare_account_id = data.cloudflare_accounts.main.accounts[0].id
+  # Get account ID from zone (no need to hardcode or add extra API permissions)
+  cloudflare_account_id = data.cloudflare_zone.oxd.account_id
 }
 
 # Build a map of unique regions from servers
