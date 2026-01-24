@@ -367,12 +367,52 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
+struct ApiServer {
+    id: String,
+    #[serde(default)]
+    ipv4: Option<String>,
+    #[serde(default)]
+    region: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct RegionsResponse {
     regions: Vec<ApiRegion>,
+    #[serde(default)]
+    servers: Vec<ApiServer>,
     #[serde(default)]
     timestamp: String,
     #[serde(default)]
     error: Option<String>,
+}
+
+/// Ping a specific IPv4 address and return latency in ms
+async fn ping_ip(ip: &str) -> Option<u32> {
+    use std::time::Instant;
+    use tokio::net::TcpStream;
+
+    let addr = format!("{}:9090", ip);
+    let start = Instant::now();
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(1000),
+        TcpStream::connect(&addr),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Some(start.elapsed().as_millis() as u32),
+        Ok(Err(_)) => {
+            // Connection refused but we got a response = valid RTT
+            let elapsed = start.elapsed().as_millis() as u32;
+            if elapsed < 500 {
+                Some(elapsed)
+            } else {
+                None
+            }
+        }
+        Err(_) => None, // Timeout
+    }
 }
 
 #[tauri::command]
@@ -396,12 +436,43 @@ pub async fn get_regions() -> Result<Vec<Region>, String> {
         return Err(format!("API error: {}", error));
     }
 
-    let regions: Vec<Region> = api_response
+    // Build a map of server_id -> ipv4 for latency measurement
+    // Use IPv4 since it's more universally available (IPv6 may not work for all users)
+    let server_ips: std::collections::HashMap<String, String> = api_response
+        .servers
+        .iter()
+        .filter_map(|s| s.ipv4.as_ref().map(|ip| (s.id.clone(), ip.clone())))
+        .collect();
+
+    // Measure latency to each unique IP in parallel
+    let unique_ips: Vec<String> = server_ips.values().cloned().collect();
+    let latency_futures: Vec<_> = unique_ips
+        .iter()
+        .map(|ip| {
+            let ip = ip.clone();
+            async move { (ip.clone(), ping_ip(&ip).await) }
+        })
+        .collect();
+
+    let latency_results: std::collections::HashMap<String, Option<u32>> =
+        futures::future::join_all(latency_futures)
+            .await
+            .into_iter()
+            .collect();
+
+    // Build regions with measured latency
+    let mut regions: Vec<Region> = api_response
         .regions
         .into_iter()
         .filter(|r| r.status == "online" || r.status == "maintenance")
         .map(|r| {
-            let latency_ms = r.latency.trim_end_matches("ms").parse::<u32>().ok();
+            // Find best (lowest) latency among servers in this region
+            let best_latency = r
+                .server_ids
+                .iter()
+                .filter_map(|sid| server_ips.get(sid))
+                .filter_map(|ip| latency_results.get(ip).copied().flatten())
+                .min();
 
             Region {
                 id: r.id,
@@ -409,7 +480,7 @@ pub async fn get_regions() -> Result<Vec<Region>, String> {
                 location: r.location,
                 country_code: r.country_code,
                 status: r.status,
-                latency_ms,
+                latency_ms: best_latency,
                 load: r.load,
                 server_count: r.server_count,
                 server_ids: r.server_ids,
@@ -417,7 +488,15 @@ pub async fn get_regions() -> Result<Vec<Region>, String> {
         })
         .collect();
 
-    tracing::info!("Fetched {} regions from API", regions.len());
+    // Sort by latency (lowest first), None values last
+    regions.sort_by(|a, b| match (a.latency_ms, b.latency_ms) {
+        (Some(a_lat), Some(b_lat)) => a_lat.cmp(&b_lat),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    tracing::info!("Fetched {} regions, measured latencies", regions.len());
     Ok(regions)
 }
 
