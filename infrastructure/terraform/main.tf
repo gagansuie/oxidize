@@ -65,80 +65,42 @@ output "ansible_inventory" {
 }
 
 # =============================================================================
-# Cloudflare Load Balancer - Smart DNS routing with health checks
+# Cloudflare DNS - Simple DNS records (Load Balancer requires paid add-on)
 # =============================================================================
 
 data "cloudflare_zone" "oxd" {
   name = var.cloudflare_zone
 }
 
-locals {
-  # Get account ID from zone (no need to hardcode or add extra API permissions)
-  cloudflare_account_id = data.cloudflare_zone.oxd.account_id
+# Regional DNS records (e.g., chi.relay.oxd.sh)
+# Multiple servers in same region = round-robin load balancing
+resource "cloudflare_record" "relay_regional_a" {
+  for_each = { for name, server in latitudesh_server.relay : name => server }
+
+  zone_id = data.cloudflare_zone.oxd.id
+  name    = "${var.servers[index(var.servers.*.name, each.key)].site}.relay"
+  content = each.value.primary_ipv4
+  type    = "A"
+  ttl     = 300
+  proxied = false  # Must be false for UDP/TCP direct connection
 }
 
-# Build a map of unique regions from servers
-locals {
-  # Group servers by site (region code)
-  servers_by_site = {
-    for site in distinct([for s in var.servers : s.site if s.enabled]) :
-    site => [for name, server in latitudesh_server.relay : server if var.servers[index(var.servers.*.name, name)].site == site]
-  }
+# Main relay.oxd.sh points to all servers (global round-robin)
+resource "cloudflare_record" "relay_main_a" {
+  for_each = { for name, server in latitudesh_server.relay : name => server }
+
+  zone_id = data.cloudflare_zone.oxd.id
+  name    = "relay"
+  content = each.value.primary_ipv4
+  type    = "A"
+  ttl     = 300
+  proxied = false
 }
 
-# Health check monitor - checks /health endpoint on port 9090
-resource "cloudflare_load_balancer_monitor" "relay_health" {
-  account_id     = local.cloudflare_account_id
-  type           = "http"
-  port           = 9090
-  path           = "/health"
-  expected_body  = "healthy"
-  expected_codes = "200"
-  description    = "Oxidize relay health check"
-  # Note: interval, retries, timeout use Cloudflare defaults (plan-dependent)
-}
-
-# Create a pool for each region
-resource "cloudflare_load_balancer_pool" "relay_region" {
-  for_each = local.servers_by_site
-
-  account_id = local.cloudflare_account_id
-  name       = "relay-${each.key}"
-  monitor    = cloudflare_load_balancer_monitor.relay_health.id
-
-  dynamic "origins" {
-    for_each = each.value
-    content {
-      name    = origins.value.hostname
-      address = origins.value.primary_ipv4
-      enabled = true
-      weight  = 1
-    }
-  }
-}
-
-# Main load balancer at relay.oxd.sh
-resource "cloudflare_load_balancer" "relay" {
-  zone_id          = data.cloudflare_zone.oxd.id
-  name             = "relay.${var.cloudflare_zone}"
-  fallback_pool_id = cloudflare_load_balancer_pool.relay_region[keys(local.servers_by_site)[0]].id
-  default_pool_ids = [for pool in cloudflare_load_balancer_pool.relay_region : pool.id]
-  steering_policy  = "geo"  # Route to closest region
-
-  # Map Cloudflare regions to our pools (cf_region from server config)
-  dynamic "region_pools" {
-    for_each = local.servers_by_site
-    content {
-      region   = var.servers[index(var.servers.*.site, region_pools.key)].cf_region
-      pool_ids = [cloudflare_load_balancer_pool.relay_region[region_pools.key].id]
-    }
-  }
-}
-
-output "load_balancer" {
-  description = "Load balancer configuration"
+output "dns_records" {
+  description = "Created DNS records"
   value = {
-    hostname = cloudflare_load_balancer.relay.name
-    pools    = [for name, pool in cloudflare_load_balancer_pool.relay_region : "${name}: ${pool.name}"]
+    regional = [for r in cloudflare_record.relay_regional_a : "${r.name}.${var.cloudflare_zone} -> ${r.content}"]
+    main     = [for r in cloudflare_record.relay_main_a : "${r.name}.${var.cloudflare_zone} -> ${r.content}"]
   }
 }
