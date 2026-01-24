@@ -94,10 +94,8 @@ resource "cloudflare_load_balancer_monitor" "relay_health" {
   path           = "/health"
   expected_body  = "healthy"
   expected_codes = "200"
-  interval       = 60
-  retries        = 2
-  timeout        = 5
   description    = "Oxidize relay health check"
+  # Note: interval, retries, timeout use Cloudflare defaults (plan-dependent)
 }
 
 # Create a pool for each region
