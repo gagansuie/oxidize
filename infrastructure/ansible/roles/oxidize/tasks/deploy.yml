@@ -29,8 +29,9 @@
 
 - name: Wait for service to be ready
   wait_for:
-    port: 4433
+    port: 51820
     timeout: 30
+    state: started
   ignore_errors: yes
 
 - name: Health check
@@ -41,9 +42,9 @@
 - name: Verify service is listening
   assert:
     that:
-      - "'4433' in health_check.stdout"
-    fail_msg: "Service is not listening on port 4433"
-    success_msg: "Service is healthy and listening on port 4433"
+      - "'51820' in health_check.stdout"
+    fail_msg: "Service is not listening on port 51820"
+    success_msg: "Service is healthy and listening on port 51820"
 
 - name: Clean old backups (keep last 3)
   shell: ls -t /opt/oxidize/backup/oxidize-server.* | tail -n +4 | xargs rm -f

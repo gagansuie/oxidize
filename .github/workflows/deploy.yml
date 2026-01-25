@@ -159,39 +159,6 @@ jobs:
           echo "$INVENTORY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Create IPv6 AAAA Records
-        if: inputs.action != 'destroy'
-        env:
-          LATITUDE_API_KEY: ${{ secrets.LATITUDE_API_KEY }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
-        run: |
-          # Get server IDs from Terraform state
-          cd infrastructure/terraform
-          
-          for SERVER_NAME in $(terraform output -json server_ips | jq -r 'keys[]'); do
-            # Get server ID from state
-            SERVER_ID=$(terraform state show "latitudesh_server.relay[\"$SERVER_NAME\"]" | grep "^    id" | awk '{print $3}' | tr -d '"')
-            SITE=$(terraform state show "latitudesh_server.relay[\"$SERVER_NAME\"]" | grep "^    site" | awk '{print $3}' | tr -d '"')
-            
-            # Fetch IPv6 from Latitude API (with null handling)
-            IPV6=$(curl -sf "https://api.latitude.sh/servers/$SERVER_ID" \
-              -H "Authorization: Bearer $LATITUDE_API_KEY" | \
-              jq -r '(.data.attributes.ip_addresses // [])[] | select(.family == "IPv6" and .primary == true) | .address // empty')
-            
-            if [ -n "$IPV6" ]; then
-              echo "Creating AAAA record for $SERVER_NAME: $IPV6"
-              
-              # Per-server AAAA record (e.g., relay-chi-1.oxd.sh) - optional for debugging
-              curl -sf -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"$SERVER_NAME\",\"content\":\"$IPV6\",\"ttl\":300,\"proxied\":false}" || true
-            else
-              echo "No IPv6 found for $SERVER_NAME"
-            fi
-          done
-
   # ============================================
   # Ansible: Configure & Deploy
   # ============================================
