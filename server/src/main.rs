@@ -16,7 +16,8 @@ use relay_server::prometheus::PrometheusMetrics;
 #[command(name = "relay-server")]
 #[command(about = "Oxidize - High-performance Network Relay Server with OxTunnel", long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "0.0.0.0:4433")]
+    /// Listen address - uses [::] for dual-stack (IPv6 + IPv4) by default
+    #[arg(short, long, default_value = "[::]:4433")]
     listen: SocketAddr,
 
     #[arg(short, long, default_value = "config.toml")]
@@ -25,17 +26,23 @@ struct Args {
     #[arg(short, long)]
     verbose: bool,
 
-    #[arg(long, default_value = "0.0.0.0:9090")]
+    /// Metrics server address - uses [::] for dual-stack
+    #[arg(long, default_value = "[::]:9090")]
     metrics_addr: SocketAddr,
 
     #[arg(long)]
     disable_metrics: bool,
 
-    #[arg(long, default_value = "0.0.0.0:80")]
+    /// HTTP server address - uses [::] for dual-stack
+    #[arg(long, default_value = "[::]:80")]
     http_addr: SocketAddr,
 
     #[arg(long)]
     disable_http: bool,
+
+    /// Maximum connections capacity (for load calculation)
+    #[arg(long, default_value = "10000")]
+    max_connections: u32,
 
     #[arg(long)]
     generate_config: bool,
@@ -189,8 +196,11 @@ async fn main() -> Result<()> {
     if !args.disable_http {
         let http_addr = args.http_addr;
         let http_stats = server.stats();
+        let max_connections = args.max_connections;
         tokio::spawn(async move {
-            if let Err(e) = relay_server::prometheus::start_http_server(http_addr, http_stats).await
+            if let Err(e) =
+                relay_server::prometheus::start_http_server(http_addr, http_stats, max_connections)
+                    .await
             {
                 error!("HTTP server error: {}", e);
             }

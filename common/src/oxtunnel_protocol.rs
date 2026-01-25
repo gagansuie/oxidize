@@ -250,6 +250,11 @@ pub fn should_compress(data: &[u8]) -> bool {
 /// Protocol magic bytes for identification
 pub const PROTOCOL_MAGIC: [u8; 2] = [0x4F, 0x58]; // "OX" for Oxidize
 
+/// Ping magic bytes for latency measurement (responds immediately with PONG)
+pub const PING_MAGIC: [u8; 4] = [0x4F, 0x58, 0x50, 0x49]; // "OXPI" - OXidize PIng
+/// Pong magic bytes (response to ping)
+pub const PONG_MAGIC: [u8; 4] = [0x4F, 0x58, 0x50, 0x4F]; // "OXPO" - OXidize POng
+
 /// Header size: magic(2) + flags(1) + seqnum(4) + length(2) = 9 bytes
 pub const HEADER_SIZE: usize = 9;
 

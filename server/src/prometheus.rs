@@ -378,6 +378,7 @@ impl Default for PrometheusMetrics {
 pub async fn start_http_server(
     addr: SocketAddr,
     stats: Arc<oxidize_common::oxtunnel_protocol::TunnelStats>,
+    max_connections: u32,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
 
@@ -407,9 +408,23 @@ pub async fn start_http_server(
                             let tx_packets = stats.total_tx_packets.load(Ordering::Relaxed);
                             let rx_packets = stats.total_rx_packets.load(Ordering::Relaxed);
 
+                            // Calculate load percentage (0-100)
+                            let load_percent = if max_connections > 0 {
+                                ((connections as f64 / max_connections as f64) * 100.0).min(100.0)
+                                    as u8
+                            } else {
+                                0
+                            };
+
                             let json = format!(
-                                r#"{{"connections":{},"tx_bytes":{},"rx_bytes":{},"tx_packets":{},"rx_packets":{}}}"#,
-                                connections, tx_bytes, rx_bytes, tx_packets, rx_packets
+                                r#"{{"connections":{},"max_connections":{},"load_percent":{},"tx_bytes":{},"rx_bytes":{},"tx_packets":{},"rx_packets":{}}}"#,
+                                connections,
+                                max_connections,
+                                load_percent,
+                                tx_bytes,
+                                rx_bytes,
+                                tx_packets,
+                                rx_packets
                             );
 
                             Ok(Response::builder()

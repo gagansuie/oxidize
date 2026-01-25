@@ -82,13 +82,28 @@ pub struct RelayClient {
 
 impl RelayClient {
     /// Create a new OxTunnel client
+    /// Binds to appropriate address family based on server address (IPv6 preferred)
     pub async fn new(config: ClientConfig) -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        // Bind to same address family as server for proper connectivity
+        let bind_addr = if config.server_addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let socket = UdpSocket::bind(bind_addr).await?;
         socket.connect(&config.server_addr).await?;
 
         let client_id = generate_id();
 
-        info!("OxTunnel client created, server: {}", config.server_addr);
+        info!(
+            "OxTunnel client created ({}), server: {}",
+            if config.server_addr.is_ipv6() {
+                "IPv6"
+            } else {
+                "IPv4"
+            },
+            config.server_addr
+        );
 
         Ok(Self {
             config,

@@ -700,14 +700,30 @@ impl OxTunnelServer {
                     self.stats.total_rx_packets.fetch_add(1, Ordering::Relaxed);
 
                     // Parse source address from raw packet (Eth + IP + UDP)
-                    if let Some(peer_addr) = Self::parse_packet_addr(&pkt.data) {
+                    // Returns (peer_addr, payload_offset) for both IPv4 and IPv6
+                    if let Some((peer_addr, payload_offset)) = Self::parse_packet_addr(&pkt.data) {
+                        let payload = &pkt.data[payload_offset..];
+
+                        // Fast path: Handle UDP ping for latency measurement (no rate limit)
+                        if payload.len() >= 4
+                            && payload[..4] == oxidize_common::oxtunnel_protocol::PING_MAGIC
+                        {
+                            // Respond via standard socket (XDP is RX only)
+                            let mut pong = vec![0u8; payload.len()];
+                            pong[..4]
+                                .copy_from_slice(&oxidize_common::oxtunnel_protocol::PONG_MAGIC);
+                            if payload.len() > 4 {
+                                pong[4..].copy_from_slice(&payload[4..]);
+                            }
+                            let _ = self.socket.send_to(&pong, peer_addr).await;
+                            continue;
+                        }
+
                         if !self.rate_limiter.check_packet(peer_addr.ip()).await {
                             continue;
                         }
 
                         let handler = self.clone_handler();
-                        // Extract payload after Eth(14) + IP(20) + UDP(8) = 42 bytes
-                        let payload_offset = 14 + 20 + 8; // Simplified, assumes no IP options
                         if pkt.data.len() > payload_offset {
                             let packet = pkt.data[payload_offset..].to_vec();
                             tokio::spawn(async move {
@@ -726,48 +742,85 @@ impl OxTunnelServer {
         }
     }
 
+    /// Parse source address and payload offset from raw AF_XDP packet
+    /// Supports both IPv4 and IPv6
+    /// Returns (peer_addr, payload_offset) where payload starts after UDP header
     #[cfg(target_os = "linux")]
-    fn parse_packet_addr(data: &[u8]) -> Option<SocketAddr> {
-        // AF_XDP receives raw Ethernet frames: Eth(14) + IP(20+) + UDP(8)
+    fn parse_packet_addr(data: &[u8]) -> Option<(SocketAddr, usize)> {
         const ETH_HDR_LEN: usize = 14;
-        const MIN_PKT_LEN: usize = ETH_HDR_LEN + 20 + 8; // Eth + IP + UDP minimum
+        const IPV4_MIN_LEN: usize = ETH_HDR_LEN + 20 + 8; // Eth + IPv4 + UDP
+        const IPV6_MIN_LEN: usize = ETH_HDR_LEN + 40 + 8; // Eth + IPv6 + UDP
 
-        if data.len() < MIN_PKT_LEN {
+        if data.len() < IPV4_MIN_LEN {
             return None;
         }
 
         // Check ethertype (offset 12-13 in Ethernet header)
         let ethertype = u16::from_be_bytes([data[12], data[13]]);
-        if ethertype != 0x0800 {
-            // Not IPv4
-            return None;
+
+        match ethertype {
+            0x0800 => {
+                // IPv4
+                let ip_start = ETH_HDR_LEN;
+                let version = (data[ip_start] >> 4) & 0xF;
+                if version != 4 {
+                    return None;
+                }
+
+                let ihl = (data[ip_start] & 0xF) as usize * 4;
+                if data.len() < ip_start + ihl + 8 {
+                    return None;
+                }
+
+                // Source IP at offset 12-15 in IP header
+                let src_ip = Ipv4Addr::new(
+                    data[ip_start + 12],
+                    data[ip_start + 13],
+                    data[ip_start + 14],
+                    data[ip_start + 15],
+                );
+
+                // UDP source port at start of UDP header
+                let udp_start = ip_start + ihl;
+                let src_port = u16::from_be_bytes([data[udp_start], data[udp_start + 1]]);
+                let payload_offset = udp_start + 8; // After UDP header
+
+                Some((
+                    SocketAddr::new(IpAddr::V4(src_ip), src_port),
+                    payload_offset,
+                ))
+            }
+            0x86DD => {
+                // IPv6
+                if data.len() < IPV6_MIN_LEN {
+                    return None;
+                }
+
+                let ip_start = ETH_HDR_LEN;
+
+                // Check next header is UDP (17)
+                let next_header = data[ip_start + 6];
+                if next_header != 17 {
+                    return None; // Not UDP (extension headers not supported)
+                }
+
+                // Source IP at offset 8-23 in IPv6 header
+                let mut src_bytes = [0u8; 16];
+                src_bytes.copy_from_slice(&data[ip_start + 8..ip_start + 24]);
+                let src_ip = Ipv6Addr::from(src_bytes);
+
+                // UDP header starts after 40-byte IPv6 header
+                let udp_start = ip_start + 40;
+                let src_port = u16::from_be_bytes([data[udp_start], data[udp_start + 1]]);
+                let payload_offset = udp_start + 8; // After UDP header
+
+                Some((
+                    SocketAddr::new(IpAddr::V6(src_ip), src_port),
+                    payload_offset,
+                ))
+            }
+            _ => None, // Unknown ethertype
         }
-
-        // IP header starts after Ethernet header
-        let ip_start = ETH_HDR_LEN;
-        let version = (data[ip_start] >> 4) & 0xF;
-        if version != 4 {
-            return None;
-        }
-
-        let ihl = (data[ip_start] & 0xF) as usize * 4;
-        if data.len() < ip_start + ihl + 8 {
-            return None;
-        }
-
-        // Source IP at offset 12-15 in IP header
-        let src_ip = Ipv4Addr::new(
-            data[ip_start + 12],
-            data[ip_start + 13],
-            data[ip_start + 14],
-            data[ip_start + 15],
-        );
-
-        // UDP source port at start of UDP header
-        let udp_start = ip_start + ihl;
-        let src_port = u16::from_be_bytes([data[udp_start], data[udp_start + 1]]);
-
-        Some(SocketAddr::new(IpAddr::V4(src_ip), src_port))
     }
 
     fn spawn_background_tasks(&self) {
@@ -875,6 +928,18 @@ impl OxTunnelServer {
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((len, peer_addr)) => {
+                    // Fast path: Handle UDP ping for latency measurement (no rate limit)
+                    if len >= 4 && buf[..4] == oxidize_common::oxtunnel_protocol::PING_MAGIC {
+                        // Respond immediately with PONG (echo back any extra data for timing)
+                        let mut pong = vec![0u8; len];
+                        pong[..4].copy_from_slice(&oxidize_common::oxtunnel_protocol::PONG_MAGIC);
+                        if len > 4 {
+                            pong[4..].copy_from_slice(&buf[4..len]);
+                        }
+                        let _ = self.socket.send_to(&pong, peer_addr).await;
+                        continue;
+                    }
+
                     // Rate limit check - drop packet if rate exceeded
                     if !self.rate_limiter.check_packet(peer_addr.ip()).await {
                         debug!("Rate limited packet from {}", peer_addr);

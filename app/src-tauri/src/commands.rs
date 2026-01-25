@@ -68,6 +68,8 @@ pub struct AppState {
     pub last_latency_check: Mutex<Option<std::time::Instant>>,
     /// Cached server data: server_id -> ipv4 address
     pub server_ips: Mutex<std::collections::HashMap<String, String>>,
+    /// Cached server data: server_id -> ipv6 address
+    pub server_ipv6s: Mutex<std::collections::HashMap<String, String>>,
     /// Round-robin index per region: region_id -> last used index
     pub region_server_index: Mutex<std::collections::HashMap<String, usize>>,
     /// Cached region server lists: region_id -> Vec<server_id>
@@ -416,6 +418,8 @@ struct ApiServer {
     #[serde(default)]
     ipv4: Option<String>,
     #[serde(default)]
+    ipv6: Option<String>,
+    #[serde(default)]
     region: String,
 }
 
@@ -431,17 +435,96 @@ struct RegionsResponse {
     error: Option<String>,
 }
 
-/// Ping a specific IPv4 address and return latency in ms
-async fn ping_ip(ip: &str) -> Option<u32> {
+/// OxTunnel ping magic bytes
+const PING_MAGIC: [u8; 4] = [0x4F, 0x58, 0x50, 0x49]; // "OXPI"
+const PONG_MAGIC: [u8; 4] = [0x4F, 0x58, 0x50, 0x4F]; // "OXPO"
+
+/// Ping a server using UDP (preferred) with TCP fallback
+/// Tries IPv6 first if available, then IPv4
+async fn ping_server(ipv4: Option<&str>, ipv6: Option<&str>) -> Option<u32> {
+    // Try UDP ping first (more accurate for tunnel latency)
+    // Prefer IPv6 over IPv4
+    if let Some(ip6) = ipv6 {
+        if let Some(latency) = ping_udp(&format!("[{}]:4433", ip6)).await {
+            return Some(latency);
+        }
+    }
+
+    if let Some(ip4) = ipv4 {
+        if let Some(latency) = ping_udp(&format!("{}:4433", ip4)).await {
+            return Some(latency);
+        }
+    }
+
+    // Fall back to TCP ping if UDP fails
+    if let Some(ip6) = ipv6 {
+        if let Some(latency) = ping_tcp(&format!("[{}]:9090", ip6)).await {
+            return Some(latency);
+        }
+    }
+
+    if let Some(ip4) = ipv4 {
+        if let Some(latency) = ping_tcp(&format!("{}:9090", ip4)).await {
+            return Some(latency);
+        }
+    }
+
+    None
+}
+
+/// UDP ping using OxTunnel PING/PONG protocol
+async fn ping_udp(addr: &str) -> Option<u32> {
+    use std::time::Instant;
+    use tokio::net::UdpSocket;
+
+    let socket = match UdpSocket::bind("[::]:0").await {
+        Ok(s) => s,
+        Err(_) => match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(_) => return None,
+        },
+    };
+
+    // Send PING packet with timestamp for verification
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut ping_packet = [0u8; 12];
+    ping_packet[..4].copy_from_slice(&PING_MAGIC);
+    ping_packet[4..12].copy_from_slice(&timestamp.to_le_bytes());
+
+    let start = Instant::now();
+
+    if socket.send_to(&ping_packet, addr).await.is_err() {
+        return None;
+    }
+
+    let mut buf = [0u8; 64];
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        socket.recv_from(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok((len, _))) if len >= 4 && buf[..4] == PONG_MAGIC => {
+            Some(start.elapsed().as_millis() as u32)
+        }
+        _ => None,
+    }
+}
+
+/// TCP ping (fallback) - measures connection establishment time
+async fn ping_tcp(addr: &str) -> Option<u32> {
     use std::time::Instant;
     use tokio::net::TcpStream;
 
-    let addr = format!("{}:9090", ip);
     let start = Instant::now();
 
     match tokio::time::timeout(
         std::time::Duration::from_millis(1000),
-        TcpStream::connect(&addr),
+        TcpStream::connect(addr),
     )
     .await
     {
@@ -457,6 +540,12 @@ async fn ping_ip(ip: &str) -> Option<u32> {
         }
         Err(_) => None, // Timeout
     }
+}
+
+/// Legacy ping function for backward compatibility
+#[allow(dead_code)]
+async fn ping_ip(ip: &str) -> Option<u32> {
+    ping_server(Some(ip), None).await
 }
 
 #[tauri::command]
@@ -493,37 +582,61 @@ pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region
         return Err(format!("API error: {}", error));
     }
 
-    // Build a map of server_id -> ipv4 for latency measurement
-    // Use IPv4 since it's more universally available (IPv6 may not work for all users)
+    // Build maps of server_id -> ipv4/ipv6 for latency measurement and connection
     let server_ips: std::collections::HashMap<String, String> = api_response
         .servers
         .iter()
         .filter_map(|s| s.ipv4.as_ref().map(|ip| (s.id.clone(), ip.clone())))
         .collect();
 
-    // Cache server IPs for use when connecting
+    let server_ipv6s: std::collections::HashMap<String, String> = api_response
+        .servers
+        .iter()
+        .filter_map(|s| s.ipv6.as_ref().map(|ip| (s.id.clone(), ip.clone())))
+        .collect();
+
+    // Cache server IPs for use when connecting (prefer IPv6 when available)
     {
         let mut cached_ips = state.server_ips.lock().await;
         *cached_ips = server_ips.clone();
-        tracing::info!("Cached {} server IPs", cached_ips.len());
+        let mut cached_ipv6s = state.server_ipv6s.lock().await;
+        *cached_ipv6s = server_ipv6s.clone();
+        tracing::info!(
+            "Cached {} IPv4 and {} IPv6 server addresses",
+            cached_ips.len(),
+            cached_ipv6s.len()
+        );
     }
 
-    // Measure latency to each unique IP in parallel
-    let unique_ips: Vec<String> = server_ips.values().cloned().collect();
+    // Measure latency to each server using UDP (IPv6 preferred) with TCP fallback
+    // Build list of (server_id, ipv4, ipv6) tuples
+    let server_addrs: Vec<(String, Option<String>, Option<String>)> = api_response
+        .servers
+        .iter()
+        .map(|s| (s.id.clone(), s.ipv4.clone(), s.ipv6.clone()))
+        .collect();
+
     tracing::info!(
-        "Measuring latency to {} unique IPs: {:?}",
-        unique_ips.len(),
-        unique_ips
+        "Measuring latency to {} servers (UDP IPv6 preferred, TCP fallback)",
+        server_addrs.len()
     );
 
-    let latency_futures: Vec<_> = unique_ips
+    let latency_futures: Vec<_> = server_addrs
         .iter()
-        .map(|ip| {
-            let ip = ip.clone();
+        .map(|(id, ipv4, ipv6)| {
+            let id = id.clone();
+            let ipv4 = ipv4.clone();
+            let ipv6 = ipv6.clone();
             async move {
-                let result = ping_ip(&ip).await;
-                tracing::info!("Ping {} -> {:?}", ip, result);
-                (ip, result)
+                let result = ping_server(ipv4.as_deref(), ipv6.as_deref()).await;
+                tracing::info!(
+                    "Ping {} (v4: {:?}, v6: {:?}) -> {:?}ms",
+                    id,
+                    ipv4,
+                    ipv6,
+                    result
+                );
+                (id, result)
             }
         })
         .collect();
@@ -534,7 +647,7 @@ pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region
             .into_iter()
             .collect();
 
-    tracing::info!("Latency measurement complete");
+    tracing::info!("Latency measurement complete (UDP/IPv6 preferred)");
 
     // Build regions with measured latency
     let mut regions: Vec<Region> = api_response
@@ -546,8 +659,7 @@ pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region
             let best_latency = r
                 .server_ids
                 .iter()
-                .filter_map(|sid| server_ips.get(sid))
-                .filter_map(|ip| latency_results.get(ip).copied().flatten())
+                .filter_map(|sid| latency_results.get(sid).copied().flatten())
                 .min();
 
             Region {

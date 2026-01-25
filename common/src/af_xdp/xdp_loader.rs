@@ -645,99 +645,145 @@ impl XdpProgram {
     /// SAFETY: This program is designed to be fail-safe. ANY error or unexpected
     /// condition results in XDP_PASS, ensuring network connectivity is never broken.
     ///
-    /// Checks performed:
-    /// 1. Packet bounds (Eth + IP + UDP minimum = 42 bytes)
-    /// 2. IPv4 ethertype (0x0800)
-    /// 3. IP header length == 20 (IHL == 5, no options)
-    /// 4. UDP protocol (17)
-    /// 5. dst_port OR src_port matches quic_port
+    /// Supports both IPv4 and IPv6:
+    /// - IPv4: Eth(14) + IP(20) + UDP(8) = 42 bytes min, ports at offset 34/36
+    /// - IPv6: Eth(14) + IPv6(40) + UDP(8) = 62 bytes min, ports at offset 54/56
     ///
     /// Only packets matching ALL criteria are redirected to AF_XDP.
-    /// Everything else (including IPv6, TCP, ICMP, ARP, etc.) goes to XDP_PASS.
+    /// Everything else goes to XDP_PASS.
     fn generate_xdp_bytecode(xskmap_fd: RawFd, quic_port: u16) -> Vec<BpfInsn> {
         let port_be = quic_port.to_be() as i32;
 
-        // Program layout (instruction indices):
-        // 0:     r6 = r1 (save ctx)
-        // 1:     r2 = ctx->data
-        // 2:     r3 = ctx->data_end
-        // 3:     r4 = r2
-        // 4:     r4 += 42
-        // 5:     if r3 < r4 goto PASS (bounds check - packet too small)
-        // 6:     r4 = *(u16*)(r2 + 12) (ethertype)
-        // 7:     if r4 != 0x0008 goto PASS (not IPv4)
-        // 8:     r4 = *(u8*)(r2 + 14) (IP version + IHL byte)
-        // 9:     r4 &= 0x0F (mask to get IHL)
-        // 10:    if r4 != 5 goto PASS (IP header has options, skip)
-        // 11:    r4 = *(u8*)(r2 + 23) (IP protocol)
-        // 12:    if r4 != 17 goto PASS (not UDP)
-        // 13:    r4 = *(u16*)(r2 + 36) (UDP dst port)
-        // 14:    if r4 == port goto REDIRECT
-        // 15:    r4 = *(u16*)(r2 + 34) (UDP src port)
-        // 16:    if r4 != port goto PASS
-        // REDIRECT (index 17):
-        // 17-18: r1 = map_fd (64-bit load)
-        // 19:    r2 = ctx->rx_queue_index
-        // 20:    r3 = XDP_PASS (fallback)
-        // 21:    call bpf_redirect_map
-        // 22:    exit
-        // PASS (index 23):
-        // 23:    r0 = XDP_PASS
-        // 24:    exit
+        // Ethertypes in little-endian (as read from memory on x86)
+        const ETHERTYPE_IPV4_LE: i32 = 0x0008; // 0x0800 in network order
+        const ETHERTYPE_IPV6_LE: i32 = 0xDD86; // 0x86DD in network order
+
+        // Program layout with dual IPv4/IPv6 support (35 instructions, indices 0-34):
         //
-        // Total: 25 instructions (indices 0-24)
+        // COMMON (0-6):
+        //   0: r6 = r1
+        //   1: r2 = ctx->data
+        //   2: r3 = ctx->data_end
+        //   3: r4 = r2
+        //   4: r4 += 42
+        //   5: if r3 < r4 goto PASS
+        //   6: r4 = ethertype
+        //
+        // BRANCH (7-8):
+        //   7: if r4 == IPv6 goto IPv6_PATH (19)
+        //   8: if r4 != IPv4 goto PASS
+        //
+        // IPv4 PATH (9-18):
+        //   9:  r4 = version/IHL
+        //   10: r4 &= 0x0F
+        //   11: if r4 != 5 goto PASS
+        //   12: r4 = protocol
+        //   13: if r4 != 17 goto PASS
+        //   14: r4 = dst_port
+        //   15: if r4 == port goto REDIRECT
+        //   16: r4 = src_port
+        //   17: if r4 == port goto REDIRECT
+        //   18: goto PASS
+        //
+        // IPv6 PATH (19-26):
+        //   19: r4 = r2
+        //   20: r4 += 62
+        //   21: if r3 < r4 goto PASS
+        //   22: r4 = next_header
+        //   23: if r4 != 17 goto PASS
+        //   24: r4 = dst_port
+        //   25: if r4 == port goto REDIRECT
+        //   26: r4 = src_port
+        //   27: if r4 != port goto PASS
+        //
+        // REDIRECT (28-32):
+        //   28-29: r1 = map_fd
+        //   30: r2 = rx_queue_index
+        //   31: r3 = XDP_PASS
+        //   32: call redirect_map
+        //   33: exit
+        //
+        // PASS (34-35):
+        //   34: r0 = XDP_PASS
+        //   35: exit
 
         vec![
+            // === COMMON SETUP (0-6) ===
             // 0: r6 = r1 (save context)
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, 6, 1, 0, 0),
-            // 1: r2 = *(u32*)(r6 + 0) = ctx->data
+            // 1: r2 = ctx->data
             BpfInsn::new(BPF_LDX | BPF_W | BPF_MEM, 2, 6, 0, 0),
-            // 2: r3 = *(u32*)(r6 + 4) = ctx->data_end
+            // 2: r3 = ctx->data_end
             BpfInsn::new(BPF_LDX | BPF_W | BPF_MEM, 3, 6, 4, 0),
             // 3: r4 = r2
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, 4, 2, 0, 0),
-            // 4: r4 += 42 (minimum packet size: Eth 14 + IP 20 + UDP 8)
+            // 4: r4 += 42
             BpfInsn::new(BPF_ALU64 | BPF_ADD | BPF_K, 4, 0, 0, 42),
-            // 5: if r3 < r4 goto PASS (index 23), offset = 23 - 5 - 1 = 17
-            BpfInsn::new(BPF_JMP | BPF_JLT | BPF_X, 3, 4, 17, 0),
-            // 6: r4 = *(u16*)(r2 + 12) = ethertype
+            // 5: if r3 < r4 goto PASS (34), offset = 34 - 5 - 1 = 28
+            BpfInsn::new(BPF_JMP | BPF_JLT | BPF_X, 3, 4, 28, 0),
+            // 6: r4 = ethertype
             BpfInsn::new(BPF_LDX | BPF_H | BPF_MEM, 4, 2, 12, 0),
-            // 7: if r4 != 0x0008 (IPv4 0x0800 in LE) goto PASS, offset = 23 - 7 - 1 = 15
-            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 15, 0x0008),
-            // 8: r4 = *(u8*)(r2 + 14) = IP version/IHL byte
+            // === BRANCH (7-8) ===
+            // 7: if r4 == IPv6 goto IPv6_PATH (19), offset = 19 - 7 - 1 = 11
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 11, ETHERTYPE_IPV6_LE),
+            // 8: if r4 != IPv4 goto PASS (34), offset = 34 - 8 - 1 = 25
+            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 25, ETHERTYPE_IPV4_LE),
+            // === IPv4 PATH (9-18) ===
+            // 9: r4 = version/IHL
             BpfInsn::new(BPF_LDX | BPF_B | BPF_MEM, 4, 2, 14, 0),
-            // 9: r4 &= 0x0F (extract IHL, lower 4 bits)
+            // 10: r4 &= 0x0F
             BpfInsn::new(BPF_ALU64 | BPF_AND | BPF_K, 4, 0, 0, 0x0F),
-            // 10: if r4 != 5 goto PASS (IHL != 5 means IP options present), offset = 23 - 10 - 1 = 12
-            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 12, 5),
-            // 11: r4 = *(u8*)(r2 + 23) = IP protocol
+            // 11: if r4 != 5 goto PASS (34), offset = 34 - 11 - 1 = 22
+            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 22, 5),
+            // 12: r4 = protocol
             BpfInsn::new(BPF_LDX | BPF_B | BPF_MEM, 4, 2, 23, 0),
-            // 12: if r4 != 17 (UDP) goto PASS, offset = 23 - 12 - 1 = 10
-            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 10, 17),
-            // 13: r4 = *(u16*)(r2 + 36) = UDP dst port
+            // 13: if r4 != 17 goto PASS (34), offset = 34 - 13 - 1 = 20
+            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 20, 17),
+            // 14: r4 = dst_port (offset 36 = Eth14 + IP20 + 2)
             BpfInsn::new(BPF_LDX | BPF_H | BPF_MEM, 4, 2, 36, 0),
-            // 14: if r4 == port goto REDIRECT (index 17), offset = 17 - 14 - 1 = 2
-            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 2, port_be),
-            // 15: r4 = *(u16*)(r2 + 34) = UDP src port
+            // 15: if r4 == port goto REDIRECT (28), offset = 28 - 15 - 1 = 12
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 12, port_be),
+            // 16: r4 = src_port (offset 34)
             BpfInsn::new(BPF_LDX | BPF_H | BPF_MEM, 4, 2, 34, 0),
-            // 16: if r4 != port goto PASS, offset = 23 - 16 - 1 = 6
+            // 17: if r4 == port goto REDIRECT (28), offset = 28 - 17 - 1 = 10
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 10, port_be),
+            // 18: goto PASS (34), offset = 34 - 18 - 1 = 15
+            BpfInsn::new(BPF_JMP | BPF_JA, 0, 0, 15, 0),
+            // === IPv6 PATH (19-27) ===
+            // 19: r4 = r2
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_X, 4, 2, 0, 0),
+            // 20: r4 += 62
+            BpfInsn::new(BPF_ALU64 | BPF_ADD | BPF_K, 4, 0, 0, 62),
+            // 21: if r3 < r4 goto PASS (34), offset = 34 - 21 - 1 = 12
+            BpfInsn::new(BPF_JMP | BPF_JLT | BPF_X, 3, 4, 12, 0),
+            // 22: r4 = next_header (offset 20 = Eth14 + IPv6 byte 6)
+            BpfInsn::new(BPF_LDX | BPF_B | BPF_MEM, 4, 2, 20, 0),
+            // 23: if r4 != 17 goto PASS (34), offset = 34 - 23 - 1 = 10
+            BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 10, 17),
+            // 24: r4 = dst_port (offset 56 = Eth14 + IPv6_40 + 2)
+            BpfInsn::new(BPF_LDX | BPF_H | BPF_MEM, 4, 2, 56, 0),
+            // 25: if r4 == port goto REDIRECT (28), offset = 28 - 25 - 1 = 2
+            BpfInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 4, 0, 2, port_be),
+            // 26: r4 = src_port (offset 54)
+            BpfInsn::new(BPF_LDX | BPF_H | BPF_MEM, 4, 2, 54, 0),
+            // 27: if r4 != port goto PASS (34), offset = 34 - 27 - 1 = 6
             BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 6, port_be),
-            // REDIRECT (index 17):
-            // 17-18: r1 = map_fd (BPF_LD_MAP_FD pseudo instruction)
+            // === REDIRECT (28-33) ===
+            // 28-29: r1 = map_fd
             BpfInsn::new(BPF_LD | BPF_DW | BPF_IMM, 1, 1, 0, xskmap_fd),
-            BpfInsn::new(0, 0, 0, 0, 0), // 64-bit load continuation
-            // 19: r2 = *(u32*)(r6 + 16) = ctx->rx_queue_index
+            BpfInsn::new(0, 0, 0, 0, 0),
+            // 30: r2 = rx_queue_index
             BpfInsn::new(BPF_LDX | BPF_W | BPF_MEM, 2, 6, 16, 0),
-            // 20: r3 = XDP_PASS (fallback if queue not in map)
+            // 31: r3 = XDP_PASS
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, 3, 0, 0, XDP_PASS),
-            // 21: call bpf_redirect_map(r1=map, r2=key, r3=flags)
+            // 32: call redirect_map
             BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_redirect_map),
-            // 22: exit (return value in r0 from redirect_map)
+            // 33: exit
             BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
-            // PASS (index 23):
-            // 23: r0 = XDP_PASS
+            // === PASS (34-35) ===
+            // 34: r0 = XDP_PASS
             BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, XDP_PASS),
-            // 24: exit
+            // 35: exit
             BpfInsn::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
         ]
     }
