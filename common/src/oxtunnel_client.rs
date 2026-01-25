@@ -718,6 +718,7 @@ fn run_platform_capture(
     config: CaptureConfig,
 ) {
     use nfq::{Queue, Verdict};
+    use std::process::Command;
 
     info!(
         "📦 Linux NFQUEUE capture starting on queue {}...",
@@ -728,16 +729,99 @@ fn run_platform_capture(
         config.capture_tcp, config.capture_udp
     );
 
+    // Set up iptables rules to redirect traffic to NFQUEUE
+    info!("📦 Setting up iptables NFQUEUE rules...");
+    let queue_num = config.queue_num.to_string();
+
+    // Remove any existing rules first (ignore errors)
+    if config.capture_tcp {
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+            ])
+            .output();
+    }
+    if config.capture_udp {
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+            ])
+            .output();
+    }
+
+    // Add NFQUEUE rules with bypass (so traffic continues if queue isn't bound)
+    let mut rules_added = true;
+    if config.capture_tcp {
+        if Command::new("iptables")
+            .args([
+                "-I",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output()
+            .is_err()
+        {
+            rules_added = false;
+        }
+    }
+    if config.capture_udp {
+        if Command::new("iptables")
+            .args([
+                "-I",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output()
+            .is_err()
+        {
+            rules_added = false;
+        }
+    }
+
+    if rules_added {
+        info!("✅ iptables NFQUEUE rules added");
+    } else {
+        warn!("⚠️ Failed to add some iptables rules - packet capture may not work");
+    }
+
     let mut queue = match Queue::open() {
         Ok(q) => q,
         Err(e) => {
             error!("Failed to open NFQUEUE: {}", e);
+            cleanup_iptables_rules(&config);
             return;
         }
     };
 
     if let Err(e) = queue.bind(config.queue_num) {
         error!("Failed to bind NFQUEUE {}: {}", config.queue_num, e);
+        cleanup_iptables_rules(&config);
         return;
     }
 
@@ -779,7 +863,48 @@ fn run_platform_capture(
         }
     }
 
+    // Clean up iptables rules on exit
+    cleanup_iptables_rules(&config);
     info!("📦 NFQUEUE capture stopped after {} packets", packet_count);
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_iptables_rules(config: &CaptureConfig) {
+    use std::process::Command;
+
+    info!("📦 Cleaning up iptables NFQUEUE rules...");
+    let queue_num = config.queue_num.to_string();
+
+    if config.capture_tcp {
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output();
+    }
+    if config.capture_udp {
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output();
+    }
 }
 
 // ============================================================================

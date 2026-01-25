@@ -1,4 +1,4 @@
-name: Deploy Oxidize
+name: Server Deploy
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'infrastructure/**'
-      - '.github/workflows/deploy.yml'
+      - '.github/workflows/server.yml'
   workflow_dispatch:
     inputs:
       action:

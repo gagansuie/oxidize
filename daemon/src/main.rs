@@ -305,6 +305,7 @@ async fn handle_connect(
     info!("✅ OxTunnel handshake complete to {}", server_addr);
 
     // STEP 4: Cross-platform packet capture using unified PacketCaptureService
+    // Note: iptables rules for NFQUEUE are now set up inside PacketCaptureService on Linux
     // Configure capture with relay server exclusion
     let capture_config = CaptureConfig {
         capture_tcp: true,
@@ -373,7 +374,7 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         };
     }
 
-    // Abort the client task (capture service is stopped internally when client ends)
+    // Abort the client task (capture service cleans up iptables rules internally)
     if let Some(task) = state_guard.client_task.take() {
         task.abort();
         info!("Client task aborted");

@@ -9,7 +9,13 @@
 mod linux_impl;
 
 #[cfg(target_os = "linux")]
+mod xdp_loader;
+
+#[cfg(target_os = "linux")]
 pub use linux_impl::*;
+
+#[cfg(target_os = "linux")]
+pub use xdp_loader::XdpProgram;
 
 #[cfg(not(target_os = "linux"))]
 mod stub_impl;

@@ -577,7 +577,7 @@ impl OxTunnelServer {
 
     /// Run the OxTunnel server
     pub async fn run(self) -> Result<()> {
-        // Linux: Always use AF_XDP for maximum performance (no fallback)
+        // Linux: Always use AF_XDP/FLASH for maximum performance
         #[cfg(target_os = "linux")]
         {
             let interface = self
@@ -611,25 +611,63 @@ impl OxTunnelServer {
     /// FLASH = Fast Linked AF_XDP Sockets - multi-queue for linear scaling
     #[cfg(target_os = "linux")]
     async fn run_with_xdp(self, interface: String) -> Result<()> {
+        use oxidize_common::af_xdp::XdpProgram;
+
         info!("🚀 Starting FLASH AF_XDP mode on interface: {}", interface);
 
+        let port = self.config.listen_addr.port();
         let xdp_config = XdpConfig {
             interface: interface.clone(),
             queue_id: self.config.xdp_queue_id,
-            quic_port: self.config.listen_addr.port(),
+            quic_port: port,
             enable_flash: true,
             num_queues: 0, // Auto-detect
             ..XdpConfig::high_throughput(&interface)
         };
 
+        // Create FLASH AF_XDP sockets
         let mut flash_socket =
             FlashSocket::new(xdp_config).context("Failed to create FLASH AF_XDP socket")?;
 
+        let num_queues = flash_socket.num_queues();
         info!(
-            "✅ FLASH AF_XDP ready on {} with {} queues",
-            interface,
-            flash_socket.num_queues()
+            "✅ FLASH AF_XDP sockets created on {} with {} queues",
+            interface, num_queues
         );
+
+        // Load XDP BPF program to redirect packets to AF_XDP sockets
+        let mut xdp_prog = match XdpProgram::new(&interface, port, num_queues.max(64)) {
+            Ok(prog) => prog,
+            Err(e) => {
+                warn!(
+                    "Failed to load XDP program: {} - falling back to standard UDP",
+                    e
+                );
+                return self.run_standard().await;
+            }
+        };
+
+        // Attach XDP program to interface
+        if let Err(e) = xdp_prog.attach(false) {
+            warn!("Failed to attach XDP program: {} - trying SKB mode", e);
+            if let Err(e2) = xdp_prog.attach(true) {
+                warn!(
+                    "SKB mode also failed: {} - falling back to standard UDP",
+                    e2
+                );
+                return self.run_standard().await;
+            }
+        }
+
+        // Register AF_XDP sockets in XSKMAP for each queue
+        for (queue_id, socket_fd) in flash_socket.socket_fds() {
+            if let Err(e) = xdp_prog.register_socket(queue_id, socket_fd) {
+                warn!("Failed to register socket for queue {}: {}", queue_id, e);
+            }
+        }
+
+        info!("✅ XDP program loaded and attached to {}", interface);
+        info!("🔥 FLASH AF_XDP ready - zero-copy packet processing enabled");
 
         // Spawn background tasks
         self.spawn_background_tasks();
@@ -639,13 +677,19 @@ impl OxTunnelServer {
             &self.server_id[..8]
         );
 
-        // FLASH packet processing loop - receives from all queues
+        // FLASH packet processing loop
+        let mut poll_count = 0u64;
         loop {
-            // Poll for packets across all queues
-            if flash_socket.poll(100) {
-                let packets = flash_socket.recv(128); // FLASH batch size
+            poll_count += 1;
+            if poll_count % 10000 == 0 {
+                debug!("AF_XDP poll iteration {}", poll_count);
+            }
 
-                // Collect frame addresses before processing
+            if flash_socket.poll(100) {
+                let packets = flash_socket.recv(128);
+                if !packets.is_empty() {
+                    info!("📦 AF_XDP received {} packets", packets.len());
+                }
                 let addrs: Vec<u64> = packets.iter().map(|p| p.frame_addr).collect();
 
                 for pkt in packets {
@@ -654,56 +698,96 @@ impl OxTunnelServer {
                         .fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
                     self.stats.total_rx_packets.fetch_add(1, Ordering::Relaxed);
 
-                    // Parse source address from packet (assuming UDP/IP)
+                    // Parse source address from raw packet (Eth + IP + UDP)
                     if let Some(peer_addr) = Self::parse_packet_addr(&pkt.data) {
                         if !self.rate_limiter.check_packet(peer_addr.ip()).await {
                             continue;
                         }
 
                         let handler = self.clone_handler();
-                        let packet = pkt.data;
-
-                        tokio::spawn(async move {
-                            if let Err(e) = handler.handle_packet(&packet, peer_addr).await {
-                                debug!("Error handling packet from {}: {}", peer_addr, e);
-                            }
-                        });
+                        // Extract payload after Eth(14) + IP(20) + UDP(8) = 42 bytes
+                        let payload_offset = 14 + 20 + 8; // Simplified, assumes no IP options
+                        if pkt.data.len() > payload_offset {
+                            let packet = pkt.data[payload_offset..].to_vec();
+                            tokio::spawn(async move {
+                                if let Err(e) = handler.handle_packet(&packet, peer_addr).await {
+                                    debug!("Error handling packet from {}: {}", peer_addr, e);
+                                }
+                            });
+                        }
                     }
                 }
 
-                // Return frames to UMEM
                 flash_socket.return_frames(&addrs);
             }
 
-            // Yield to allow other tasks to run
             tokio::task::yield_now().await;
         }
     }
 
     #[cfg(target_os = "linux")]
     fn parse_packet_addr(data: &[u8]) -> Option<SocketAddr> {
-        // Parse IP header to extract source address
-        if data.len() < 28 {
-            return None;
-        } // Min IP + UDP header
+        // AF_XDP receives raw Ethernet frames: Eth(14) + IP(20+) + UDP(8)
+        const ETH_HDR_LEN: usize = 14;
+        const MIN_PKT_LEN: usize = ETH_HDR_LEN + 20 + 8; // Eth + IP + UDP minimum
 
-        let version = (data[0] >> 4) & 0xF;
+        if data.len() < MIN_PKT_LEN {
+            return None;
+        }
+
+        // Check ethertype (offset 12-13 in Ethernet header)
+        let ethertype = u16::from_be_bytes([data[12], data[13]]);
+        if ethertype != 0x0800 {
+            // Not IPv4
+            return None;
+        }
+
+        // IP header starts after Ethernet header
+        let ip_start = ETH_HDR_LEN;
+        let version = (data[ip_start] >> 4) & 0xF;
         if version != 4 {
             return None;
         }
 
-        let ihl = (data[0] & 0xF) as usize * 4;
-        if data.len() < ihl + 8 {
+        let ihl = (data[ip_start] & 0xF) as usize * 4;
+        if data.len() < ip_start + ihl + 8 {
             return None;
         }
 
-        let src_ip = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
-        let src_port = u16::from_be_bytes([data[ihl], data[ihl + 1]]);
+        // Source IP at offset 12-15 in IP header
+        let src_ip = Ipv4Addr::new(
+            data[ip_start + 12],
+            data[ip_start + 13],
+            data[ip_start + 14],
+            data[ip_start + 15],
+        );
+
+        // UDP source port at start of UDP header
+        let udp_start = ip_start + ihl;
+        let src_port = u16::from_be_bytes([data[udp_start], data[udp_start + 1]]);
 
         Some(SocketAddr::new(IpAddr::V4(src_ip), src_port))
     }
 
     fn spawn_background_tasks(&self) {
+        // Response sender task - sends queued responses via UDP socket
+        let socket_tx = Arc::clone(&self.socket);
+        let response_rx = Arc::clone(&self.response_rx);
+        let stats_tx = Arc::clone(&self.stats);
+        tokio::spawn(async move {
+            let mut rx = response_rx.write().await;
+            while let Some((data, addr)) = rx.recv().await {
+                if let Err(e) = socket_tx.send_to(&data, addr).await {
+                    error!("Failed to send response to {}: {}", addr, e);
+                } else {
+                    stats_tx
+                        .total_tx_bytes
+                        .fetch_add(data.len() as u64, Ordering::Relaxed);
+                    stats_tx.total_tx_packets.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+
         // Cleanup task
         let sessions_cleanup = Arc::clone(&self.sessions);
         let ip_pool_cleanup = Arc::clone(&self.ip_pool);

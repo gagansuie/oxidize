@@ -21,6 +21,7 @@
         history: HistoricalDataPoint[];
         totalSessions: number;
         totalBytes: number;
+        totalTimeSecs: number;
         firstUsed: number;
     }
 
@@ -31,6 +32,7 @@
         history: [],
         totalSessions: 0,
         totalBytes: 0,
+        totalTimeSecs: 0,
         firstUsed: Date.now(),
     });
 
@@ -48,14 +50,27 @@
             const stored = localStorage.getItem(STORAGE_KEY);
             if (stored) {
                 const parsed = JSON.parse(stored);
+                const daysSinceFirstUse = parsed.firstUsed
+                    ? (Date.now() - parsed.firstUsed) / (24 * 60 * 60 * 1000)
+                    : 0;
+                // Max reasonable: 100GB/day for heavy usage
+                const maxReasonableBytes = Math.max(
+                    10 * 1024 * 1024 * 1024,
+                    daysSinceFirstUse * 100 * 1024 * 1024 * 1024,
+                );
+
                 // Validate data integrity - reset if corrupted
                 if (
                     parsed.totalSessions > 10000 ||
-                    parsed.totalBytes > 1e15 ||
+                    parsed.totalBytes > maxReasonableBytes ||
                     !parsed.firstUsed ||
                     parsed.firstUsed > Date.now()
                 ) {
-                    console.warn("Corrupted analytics data, resetting...");
+                    console.warn("Corrupted analytics data, resetting...", {
+                        totalBytes: parsed.totalBytes,
+                        maxReasonable: maxReasonableBytes,
+                        daysSince: daysSinceFirstUse,
+                    });
                     localStorage.removeItem(STORAGE_KEY);
                     return;
                 }
@@ -75,37 +90,60 @@
         }
     }
 
-    let lastBytesRecorded = 0;
-    let lastPacketsRecorded = 0;
+    let lastBytesRecorded = -1; // -1 means uninitialized
+    let lastPacketsRecorded = -1;
+    let lastUptimeRecorded = -1;
 
     function recordSession(): void {
         if (!status.connected) return;
 
         const currentBytes = status.bytes_sent + status.bytes_received;
         const currentPackets = status.packets_sent + status.packets_received;
+        const currentUptime = status.uptime_secs;
+
+        // Initialize on first call - don't add anything, just record baseline
+        if (lastBytesRecorded < 0) {
+            lastBytesRecorded = currentBytes;
+            lastPacketsRecorded = currentPackets;
+            lastUptimeRecorded = currentUptime;
+            return; // Skip first record to establish baseline
+        }
 
         // Calculate delta since last record (not cumulative)
         const bytesDelta = currentBytes - lastBytesRecorded;
         const packetsDelta = currentPackets - lastPacketsRecorded;
+        const uptimeDelta = currentUptime - lastUptimeRecorded;
 
         // Update last recorded values
         lastBytesRecorded = currentBytes;
         lastPacketsRecorded = currentPackets;
+        lastUptimeRecorded = currentUptime;
+
+        // Skip if delta is suspiciously large (> 100MB in 30s = corruption)
+        if (bytesDelta > 100 * 1024 * 1024 || bytesDelta < 0) {
+            return;
+        }
 
         const point: HistoricalDataPoint = {
             timestamp: Date.now(),
             latency_ms: status.latency_ms ?? 0,
-            bytes_transferred: bytesDelta > 0 ? bytesDelta : currentBytes,
+            bytes_transferred: bytesDelta,
             compression_saved: status.compression_saved,
-            packets: packetsDelta > 0 ? packetsDelta : currentPackets,
+            packets: packetsDelta > 0 ? packetsDelta : 0,
             session_duration: status.uptime_secs,
         };
 
         storedData.history = [...storedData.history.slice(-99), point];
 
-        // Only add the delta bytes, not cumulative
+        // Only add valid delta bytes
         if (bytesDelta > 0) {
             storedData.totalBytes += bytesDelta;
+        }
+
+        // Track total connection time (max 120s delta to prevent jumps)
+        if (uptimeDelta > 0 && uptimeDelta < 120) {
+            storedData.totalTimeSecs =
+                (storedData.totalTimeSecs || 0) + uptimeDelta;
         }
 
         saveStoredData();
@@ -164,6 +202,16 @@
         if (h > 0) return `${h}h ${m}m ${s}s`;
         if (m > 0) return `${m}m ${s}s`;
         return `${s}s`;
+    }
+
+    function formatTotalTime(secs: number): string {
+        if (!secs || secs === 0) return "0m";
+        const days = Math.floor(secs / 86400);
+        const hours = Math.floor((secs % 86400) / 3600);
+        const mins = Math.floor((secs % 3600) / 60);
+        if (days > 0) return `${days}d ${hours}h`;
+        if (hours > 0) return `${hours}h ${mins}m`;
+        return `${mins}m`;
     }
 
     function calcCompressionRatio(): string {
@@ -270,6 +318,12 @@
                     <span class="summary-value">{storedData.totalSessions}</span
                     >
                     <span class="summary-label">Sessions</span>
+                </div>
+                <div class="summary-card">
+                    <span class="summary-value"
+                        >{formatTotalTime(storedData.totalTimeSecs)}</span
+                    >
+                    <span class="summary-label">Total Time</span>
                 </div>
                 <div class="summary-card">
                     <span class="summary-value"
@@ -607,12 +661,37 @@
                 Connection Latency
             </h3>
             <div class="latency-display">
-                <div class="latency-value-large">
+                <div
+                    class="latency-value-large"
+                    class:good={(status.latency_ms ?? 0) < 50}
+                    class:medium={(status.latency_ms ?? 0) >= 50 &&
+                        (status.latency_ms ?? 0) < 100}
+                    class:high={(status.latency_ms ?? 0) >= 100}
+                >
                     {status.latency_ms ?? "--"}<span class="latency-unit"
                         >ms</span
                     >
                 </div>
-                <span class="latency-label">Round-trip to relay server</span>
+                <span class="latency-sublabel">Round-trip to relay server</span>
+                <div class="latency-bar-wrapper">
+                    <div
+                        class="latency-bar-fill"
+                        class:good={(status.latency_ms ?? 0) < 50}
+                        class:medium={(status.latency_ms ?? 0) >= 50 &&
+                            (status.latency_ms ?? 0) < 100}
+                        class:high={(status.latency_ms ?? 0) >= 100}
+                        style="width: {Math.min(
+                            ((status.latency_ms ?? 0) / 150) * 100,
+                            100,
+                        )}%"
+                    ></div>
+                    <div class="latency-scale">
+                        <span>0</span>
+                        <span>50ms</span>
+                        <span>100ms</span>
+                        <span>150ms+</span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -892,33 +971,53 @@
     }
 
     .latency-bar-wrapper {
-        flex: 1;
+        width: 100%;
         height: 8px;
-        background: #1a1a2e;
+        background: rgba(255, 255, 255, 0.1);
         border-radius: 4px;
-        overflow: hidden;
+        overflow: visible;
+        margin-top: 0.75rem;
+        position: relative;
     }
 
-    .latency-bar {
+    .latency-bar-fill {
         height: 100%;
         border-radius: 4px;
         transition: width 0.3s ease;
     }
 
-    .latency-bar.direct {
-        background: #666;
-    }
-
-    .latency-bar.relay {
+    .latency-bar-fill.good {
         background: linear-gradient(90deg, #00d4aa, #00b894);
     }
+    .latency-bar-fill.medium {
+        background: linear-gradient(90deg, #f0a500, #e67e22);
+    }
+    .latency-bar-fill.high {
+        background: linear-gradient(90deg, #ff5555, #e74c3c);
+    }
 
-    .latency-value {
-        width: 50px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: #e0e0e0;
-        text-align: right;
+    .latency-scale {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 4px;
+        font-size: 0.6rem;
+        color: #555;
+    }
+
+    .latency-sublabel {
+        font-size: 0.75rem;
+        color: #666;
+        margin-top: 0.25rem;
+    }
+
+    .latency-value-large.good {
+        color: #00d4aa;
+    }
+    .latency-value-large.medium {
+        color: #f0a500;
+    }
+    .latency-value-large.high {
+        color: #ff5555;
     }
 
     .latency-summary {

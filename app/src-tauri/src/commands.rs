@@ -47,7 +47,8 @@ struct ApiRegion {
     location: String,
     country_code: String,
     status: String,
-    latency: String,
+    #[serde(default)]
+    latency: Option<String>,
     load: u8,
     server_count: u32,
     server_ids: Vec<String>,
@@ -461,19 +462,32 @@ async fn ping_ip(ip: &str) -> Option<u32> {
 #[tauri::command]
 pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region>, String> {
     let url = format!("{}/api/servers", API_BASE_URL);
+    tracing::info!("Fetching regions from: {}", url);
 
-    let response = reqwest::get(&url)
+    let response = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
         .await
-        .map_err(|e| format!("Failed to fetch regions: {}", e))?;
+        .map_err(|e| {
+            tracing::error!("Failed to fetch regions: {}", e);
+            format!("Failed to fetch regions: {}", e)
+        })?;
+
+    tracing::info!("API response status: {}", response.status());
 
     if !response.status().is_success() {
         return Err(format!("API returned status: {}", response.status()));
     }
 
-    let api_response: RegionsResponse = response
-        .json()
+    let text = response
+        .text()
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+    tracing::info!("API response length: {} bytes", text.len());
+
+    let api_response: RegionsResponse =
+        serde_json::from_str(&text).map_err(|e| format!("Failed to parse response: {}", e))?;
 
     if let Some(error) = api_response.error {
         return Err(format!("API error: {}", error));
@@ -496,11 +510,21 @@ pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region
 
     // Measure latency to each unique IP in parallel
     let unique_ips: Vec<String> = server_ips.values().cloned().collect();
+    tracing::info!(
+        "Measuring latency to {} unique IPs: {:?}",
+        unique_ips.len(),
+        unique_ips
+    );
+
     let latency_futures: Vec<_> = unique_ips
         .iter()
         .map(|ip| {
             let ip = ip.clone();
-            async move { (ip.clone(), ping_ip(&ip).await) }
+            async move {
+                let result = ping_ip(&ip).await;
+                tracing::info!("Ping {} -> {:?}", ip, result);
+                (ip, result)
+            }
         })
         .collect();
 
@@ -509,6 +533,8 @@ pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region
             .await
             .into_iter()
             .collect();
+
+    tracing::info!("Latency measurement complete");
 
     // Build regions with measured latency
     let mut regions: Vec<Region> = api_response

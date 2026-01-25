@@ -550,10 +550,18 @@
     font-size: 0.9rem;
     color: #888;
     margin: 0.25rem 0;
+    word-break: break-all;
+    max-width: 100%;
   }
 
   .connection-info strong {
     color: #00d4aa;
+    font-size: 0.85rem;
+  }
+
+  .connection-info .ip strong {
+    font-family: monospace;
+    letter-spacing: -0.5px;
   }
 
   .connection-info .error {

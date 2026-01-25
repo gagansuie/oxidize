@@ -31,7 +31,7 @@ struct Args {
     #[arg(long)]
     disable_metrics: bool,
 
-    #[arg(long, default_value = "0.0.0.0:8080")]
+    #[arg(long, default_value = "0.0.0.0:80")]
     http_addr: SocketAddr,
 
     #[arg(long)]

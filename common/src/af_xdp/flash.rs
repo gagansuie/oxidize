@@ -265,6 +265,15 @@ impl FlashSocket {
     pub fn is_supported() -> bool {
         XdpSocket::is_supported()
     }
+
+    /// Get socket file descriptors for each queue (for XSKMAP registration)
+    pub fn socket_fds(&self) -> Vec<(u32, i32)> {
+        self.sockets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u32, s.as_raw_fd()))
+            .collect()
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
