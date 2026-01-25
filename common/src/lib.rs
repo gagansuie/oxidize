@@ -6,7 +6,6 @@
 pub mod adaptive_dict;
 pub mod adaptive_fec;
 pub mod compression;
-pub mod fec;
 pub mod metrics;
 pub mod packet;
 pub mod packet_processor;

@@ -5,7 +5,6 @@
 use oxidize_common::adaptive_fec::AdaptiveFec;
 use oxidize_common::benchmark::{BenchmarkComparison, Benchmarker, ThroughputBench};
 use oxidize_common::compression::{compress_data, decompress_data};
-use oxidize_common::fec::FecEncoder;
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
 use oxidize_common::parallel_compression::ParallelCompressor;
 use oxidize_common::security::{
@@ -177,20 +176,28 @@ fn bench_fec() {
 
     let data = vec![0u8; 1400]; // Typical packet size
 
-    // Different FEC ratios
-    let encoder_light = FecEncoder::new(10, 1).unwrap();
-    comparison.add(bench.run("FEC 10:1 (10% overhead)", 1400, || {
-        let _ = encoder_light.encode(&data);
+    // AdaptiveFec with different simulated loss rates
+    let mut fec_low = AdaptiveFec::new();
+    comparison.add(bench.run("Adaptive FEC (low loss)", 1400, || {
+        let _ = fec_low.encode(&data);
     }));
 
-    let encoder_medium = FecEncoder::new(5, 1).unwrap();
-    comparison.add(bench.run("FEC 5:1 (20% overhead)", 1400, || {
-        let _ = encoder_medium.encode(&data);
+    let mut fec_med = AdaptiveFec::new();
+    // Simulate some loss to trigger medium FEC
+    for _ in 0..10 {
+        let _ = fec_med.encode(&data);
+    }
+    comparison.add(bench.run("Adaptive FEC (medium)", 1400, || {
+        let _ = fec_med.encode(&data);
     }));
 
-    let encoder_heavy = FecEncoder::new(3, 1).unwrap();
-    comparison.add(bench.run("FEC 3:1 (33% overhead)", 1400, || {
-        let _ = encoder_heavy.encode(&data);
+    let mut fec_high = AdaptiveFec::new();
+    // Simulate high loss
+    for _ in 0..50 {
+        let _ = fec_high.encode(&data);
+    }
+    comparison.add(bench.run("Adaptive FEC (high loss)", 1400, || {
+        let _ = fec_high.encode(&data);
     }));
 
     println!("{}", comparison.format_table());
@@ -323,10 +330,10 @@ fn bench_throughput() {
     }
 
     println!("\n### FEC Encode Throughput\n");
-    let encoder = FecEncoder::new(5, 1).unwrap();
-    let results = bench.run("FEC encode", |data| {
-        let shards = encoder.encode(data).unwrap_or_default();
-        shards.iter().map(|s| s.len()).sum()
+    let mut fec_encoder = AdaptiveFec::new();
+    let results = bench.run("Adaptive FEC encode", |data| {
+        let packet = fec_encoder.encode(data).unwrap();
+        packet.shards.iter().map(|s| s.len()).sum()
     });
 
     for result in &results {
@@ -414,20 +421,20 @@ fn bench_end_to_end() {
     }));
 
     // Compression + FEC
-    let encoder = FecEncoder::new(5, 1).unwrap();
+    let mut fec = AdaptiveFec::new();
     let data = packet.clone();
     comparison.add(bench.run("+ LZ4 + FEC", 1400, || {
         let compressed = compress_data(&data).unwrap();
-        let _ = encoder.encode(&compressed);
+        let _ = fec.encode(&compressed);
     }));
 
     // Full pipeline: compress + FEC + batch queue
     let data = packet.clone();
     let result = bench.run("Full pipeline", 1400, || {
         let compressed = compress_data(&data).unwrap();
-        let encoded = encoder.encode(&compressed).unwrap();
+        let encoded = fec.encode(&compressed).unwrap();
         let mut batcher = UdpBatcher::new();
-        for shard in encoded {
+        for shard in encoded.shards {
             batcher.queue(dest, bytes::Bytes::from(shard));
         }
         let _ = batcher.flush();
@@ -439,9 +446,9 @@ fn bench_end_to_end() {
     let data = packet.clone();
     let result = bench.run("Hot-path (reuse)", 1400, || {
         let compressed = compress_data(&data).unwrap();
-        let encoded = encoder.encode(&compressed).unwrap();
+        let encoded = fec.encode(&compressed).unwrap();
         reusable_batcher.clear();
-        for shard in encoded {
+        for shard in encoded.shards {
             reusable_batcher.queue(dest, bytes::Bytes::from(shard));
         }
         let _ = reusable_batcher.flush();
@@ -653,21 +660,21 @@ fn bench_network_simulation() {
     }));
 
     // Simulate lossy network with FEC recovery
-    let encoder = FecEncoder::new(5, 2).unwrap(); // Higher redundancy
+    let mut fec_recovery = AdaptiveFec::new();
     let data = packet.clone();
     comparison.add(bench.run("5% loss + FEC recovery", 1400, || {
         let compressed = compress_data(&data).unwrap();
-        let shards = encoder.encode(&compressed).unwrap();
+        let packet = fec_recovery.encode(&compressed).unwrap();
         // Simulate loss: drop 1 shard, still recoverable
-        let _recoverable = shards.len() - 1;
+        let _recoverable = packet.shards.len() - 1;
     }));
 
     // High loss scenario
-    let encoder_heavy = FecEncoder::new(3, 2).unwrap(); // 66% redundancy
+    let mut fec_heavy = AdaptiveFec::new();
     let data = packet.clone();
     let result = bench.run("15% loss + heavy FEC", 1400, || {
         let compressed = compress_data(&data).unwrap();
-        let _ = encoder_heavy.encode(&compressed);
+        let _ = fec_heavy.encode(&compressed);
     });
 
     // Store simulated latency overhead
@@ -696,7 +703,7 @@ fn bench_memory_pressure() {
 
     // Pre-allocate buffer pool
     let mut pool = BufferPool::new(65536, 128, 512);
-    let encoder = FecEncoder::new(5, 1).unwrap();
+    let mut fec_encoder = AdaptiveFec::new();
     let mut batcher = UdpBatcher::new();
     let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433);
 
@@ -713,7 +720,7 @@ fn bench_memory_pressure() {
 
         // FEC encode (every 10th packet)
         if i % 10 == 0 {
-            let _ = encoder.encode(&compressed);
+            let _ = fec_encoder.encode(&compressed);
         }
 
         // Queue for batching

@@ -204,29 +204,26 @@ pub struct SchedulerStats {
 }
 
 /// Traffic classifier for automatic priority assignment
-pub struct TrafficClassifier;
+///
+/// **Note**: For comprehensive traffic classification including domain-based rules,
+/// streaming detection, and user priority hints, use `TrafficClassifier` from
+/// the `traffic_classifier` module instead. This classifier provides basic
+/// port-based classification for the priority scheduler.
+pub struct SchedulerClassifier;
 
-impl TrafficClassifier {
+impl SchedulerClassifier {
     /// Classify traffic based on port and protocol
+    ///
+    /// For richer classification, use `traffic_classifier::TrafficClassifier::classify()`
     pub fn classify(dst_port: u16, protocol: &str) -> Priority {
-        // Gaming ports
-        if matches!(dst_port,
-            3074 | // Xbox Live
-            3478..=3480 | // PlayStation
-            27015..=27030 | // Steam/Valve
-            5060..=5061 | // SIP (VoIP)
-            7777..=7800 | // Common game servers
-            9000..=9010   // Various games
-        ) {
+        use crate::low_latency::{is_gaming_port, is_voip_port};
+
+        // Use centralized port detection from low_latency module
+        if is_gaming_port(dst_port) {
             return Priority::Realtime;
         }
 
-        // VoIP/RTC
-        if matches!(dst_port,
-            5004 | // RTP
-            5060..=5061 | // SIP
-            10000..=20000 // RTP range
-        ) {
+        if is_voip_port(dst_port) {
             return Priority::Realtime;
         }
 
@@ -248,9 +245,8 @@ impl TrafficClassifier {
             return Priority::Background;
         }
 
-        // Bulk transfer ports
+        // Bulk transfer ports (BitTorrent)
         if matches!(dst_port, 6881..=6889 | 51413) {
-            // BitTorrent
             return Priority::Bulk;
         }
 
@@ -277,6 +273,10 @@ impl TrafficClassifier {
         Priority::Normal
     }
 }
+
+/// Deprecated: Use `SchedulerClassifier` instead
+#[deprecated(since = "0.2.0", note = "Renamed to SchedulerClassifier for clarity")]
+pub type TrafficClassifier = SchedulerClassifier;
 
 #[cfg(test)]
 mod tests {
@@ -335,12 +335,15 @@ mod tests {
     }
 
     #[test]
-    fn test_traffic_classifier() {
-        assert_eq!(TrafficClassifier::classify(3074, "UDP"), Priority::Realtime);
+    fn test_scheduler_classifier() {
         assert_eq!(
-            TrafficClassifier::classify(443, "QUIC"),
+            SchedulerClassifier::classify(3074, "UDP"),
+            Priority::Realtime
+        );
+        assert_eq!(
+            SchedulerClassifier::classify(443, "QUIC"),
             Priority::Interactive
         );
-        assert_eq!(TrafficClassifier::classify(6881, "TCP"), Priority::Bulk);
+        assert_eq!(SchedulerClassifier::classify(6881, "TCP"), Priority::Bulk);
     }
 }
