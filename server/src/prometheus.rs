@@ -371,3 +371,71 @@ impl Default for PrometheusMetrics {
         Self::new().expect("Failed to create Prometheus metrics")
     }
 }
+
+/// Standalone HTTP server on port 80 for Cloudflare Workers to reach
+/// Returns JSON stats at /stats and health at /health
+pub async fn start_http_server(
+    addr: SocketAddr,
+    stats: Arc<oxidize_common::oxtunnel_protocol::TunnelStats>,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+
+    info!("Starting HTTP server on {} for external access", addr);
+
+    let make_svc = make_service_fn(move |_conn| {
+        let stats = stats.clone();
+        async move {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                let stats = stats.clone();
+                async move {
+                    match req.uri().path() {
+                        "/health" | "/healthz" | "/ready" | "/" => Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                                .header("Cache-Control", "no-cache")
+                                .body(Body::from(r#"{"status":"healthy","ready":true}"#))
+                                .unwrap(),
+                        ),
+                        "/stats" => {
+                            let connections = stats.active_sessions.load(Ordering::Relaxed);
+                            let tx_bytes = stats.total_tx_bytes.load(Ordering::Relaxed);
+                            let rx_bytes = stats.total_rx_bytes.load(Ordering::Relaxed);
+                            let tx_packets = stats.total_tx_packets.load(Ordering::Relaxed);
+                            let rx_packets = stats.total_rx_packets.load(Ordering::Relaxed);
+
+                            let json = format!(
+                                r#"{{"connections":{},"tx_bytes":{},"rx_bytes":{},"tx_packets":{},"rx_packets":{}}}"#,
+                                connections, tx_bytes, rx_bytes, tx_packets, rx_packets
+                            );
+
+                            Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .header("Access-Control-Allow-Origin", "*")
+                                .header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                                .header("Cache-Control", "no-cache")
+                                .body(Body::from(json))
+                                .unwrap())
+                        }
+                        _ => Ok(Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(Body::from("Not Found"))
+                            .unwrap()),
+                    }
+                }
+            }))
+        }
+    });
+
+    let server = Server::bind(&addr).serve(make_svc);
+
+    if let Err(e) = server.await {
+        error!("HTTP server error: {}", e);
+    }
+
+    Ok(())
+}

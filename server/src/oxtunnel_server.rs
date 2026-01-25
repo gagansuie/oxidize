@@ -577,7 +577,7 @@ impl OxTunnelServer {
 
     /// Run the OxTunnel server
     pub async fn run(self) -> Result<()> {
-        // Linux: Try AF_XDP first, fall back to standard sockets
+        // Linux: Always use AF_XDP for maximum performance (no fallback)
         #[cfg(target_os = "linux")]
         {
             let interface = self
@@ -585,41 +585,12 @@ impl OxTunnelServer {
                 .xdp_interface
                 .clone()
                 .unwrap_or_else(Self::detect_default_interface);
-
-            // Try AF_XDP - if it fails, fall back to standard UDP
-            match Self::try_xdp(
-                &interface,
-                self.config.xdp_queue_id,
-                self.config.listen_addr.port(),
-            ) {
-                Ok(_) => {
-                    // XDP socket created successfully, use XDP path
-                    return self.run_with_xdp(interface).await;
-                }
-                Err(e) => {
-                    warn!("⚠️ AF_XDP failed: {}, falling back to standard UDP", e);
-                    return self.run_standard().await;
-                }
-            }
+            self.run_with_xdp(interface).await
         }
 
         // Non-Linux: Standard UDP path
         #[cfg(not(target_os = "linux"))]
         self.run_standard().await
-    }
-
-    /// Test if AF_XDP is available
-    #[cfg(target_os = "linux")]
-    fn try_xdp(interface: &str, queue_id: u32, port: u16) -> Result<()> {
-        use oxidize_common::af_xdp::{XdpConfig, XdpSocket};
-        let config = XdpConfig {
-            interface: interface.to_string(),
-            queue_id,
-            quic_port: port,
-            ..XdpConfig::high_throughput(interface)
-        };
-        let _ = XdpSocket::new(config)?;
-        Ok(())
     }
 
     /// Auto-detect the default network interface

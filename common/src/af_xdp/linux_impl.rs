@@ -285,21 +285,35 @@ impl XdpSocket {
         }
 
         info!("Mapping rings...");
-        // Map rings
+        // Map rings - fill/completion use u64 (8 bytes), rx/tx use XdpDesc (16 bytes)
         let fill_ring = Self::map_ring(
             fd,
             XDP_UMEM_PGOFF_FILL_RING,
             &offsets.fr,
             config.fill_ring_size,
+            8, // u64 frame addresses
         )?;
         let comp_ring = Self::map_ring(
             fd,
             XDP_UMEM_PGOFF_COMPLETION_RING,
             &offsets.cr,
             config.comp_ring_size,
+            8, // u64 frame addresses
         )?;
-        let rx_ring = Self::map_ring(fd, XDP_PGOFF_RX_RING, &offsets.rx, config.rx_ring_size)?;
-        let tx_ring = Self::map_ring(fd, XDP_PGOFF_TX_RING, &offsets.tx, config.tx_ring_size)?;
+        let rx_ring = Self::map_ring(
+            fd,
+            XDP_PGOFF_RX_RING,
+            &offsets.rx,
+            config.rx_ring_size,
+            mem::size_of::<XdpDesc>(),
+        )?;
+        let tx_ring = Self::map_ring(
+            fd,
+            XDP_PGOFF_TX_RING,
+            &offsets.tx,
+            config.tx_ring_size,
+            mem::size_of::<XdpDesc>(),
+        )?;
 
         info!(
             "Binding socket to interface index {} queue {}...",
@@ -387,8 +401,14 @@ impl XdpSocket {
         })
     }
 
-    fn map_ring(fd: RawFd, pgoff: u64, offsets: &XdpRingOffset, size: u32) -> io::Result<XdpRing> {
-        let map_size = offsets.desc as usize + (size as usize) * mem::size_of::<XdpDesc>();
+    fn map_ring(
+        fd: RawFd,
+        pgoff: u64,
+        offsets: &XdpRingOffset,
+        size: u32,
+        elem_size: usize,
+    ) -> io::Result<XdpRing> {
+        let map_size = offsets.desc as usize + (size as usize) * elem_size;
         info!("  mmap: size={} pgoff={:#x}", map_size, pgoff);
         let map_addr = unsafe {
             libc::mmap(

@@ -31,7 +31,7 @@ struct Args {
     #[arg(long)]
     disable_metrics: bool,
 
-    #[arg(long, default_value = "0.0.0.0:80")]
+    #[arg(long, default_value = "0.0.0.0:8080")]
     http_addr: SocketAddr,
 
     #[arg(long)]
@@ -183,6 +183,19 @@ async fn main() -> Result<()> {
             }
         });
         info!("📊 Metrics server on http://{}", args.metrics_addr);
+    }
+
+    // Start HTTP server on port 80 for Cloudflare Workers to reach
+    if !args.disable_http {
+        let http_addr = args.http_addr;
+        let http_stats = server.stats();
+        tokio::spawn(async move {
+            if let Err(e) = relay_server::prometheus::start_http_server(http_addr, http_stats).await
+            {
+                error!("HTTP server error: {}", e);
+            }
+        });
+        info!("🌐 HTTP server on http://{}", args.http_addr);
     }
 
     info!("🚀 OxTunnel server running...");
