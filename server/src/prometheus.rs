@@ -198,20 +198,57 @@ impl PrometheusMetrics {
             .inc_by(stats.compression_saved as f64);
     }
 
-    /// Update tunnel-specific metrics
-    pub fn update_tunnel_stats(&self, active_sessions: u64, handshakes: u64, invalid_packets: u64) {
+    /// Update tunnel-specific metrics from TunnelStats
+    pub fn update_tunnel_stats(
+        &self,
+        active_sessions: u64,
+        handshakes: u64,
+        invalid_packets: u64,
+        tx_bytes: u64,
+        rx_bytes: u64,
+        tx_packets: u64,
+        rx_packets: u64,
+    ) {
         self.tunnel_active_sessions.set(active_sessions as f64);
-        // For counters, we need to track deltas, but for simplicity set absolute values
-        // In production, you'd track previous values and compute deltas
+        self.connections_active.set(active_sessions as f64);
+
+        // Update handshakes counter (delta-based)
         let current_handshakes = self.tunnel_handshakes_completed.get() as u64;
         if handshakes > current_handshakes {
             self.tunnel_handshakes_completed
                 .inc_by((handshakes - current_handshakes) as f64);
         }
+
+        // Update invalid packets counter (delta-based)
         let current_invalid = self.tunnel_invalid_packets.get() as u64;
         if invalid_packets > current_invalid {
             self.tunnel_invalid_packets
                 .inc_by((invalid_packets - current_invalid) as f64);
+        }
+
+        // Update traffic counters (set absolute values since these are already totals)
+        // Reset and set to avoid double-counting
+        let current_tx = self.bytes_sent_total.get() as u64;
+        if tx_bytes > current_tx {
+            self.bytes_sent_total.inc_by((tx_bytes - current_tx) as f64);
+        }
+
+        let current_rx = self.bytes_received_total.get() as u64;
+        if rx_bytes > current_rx {
+            self.bytes_received_total
+                .inc_by((rx_bytes - current_rx) as f64);
+        }
+
+        let current_tx_pkt = self.packets_sent_total.get() as u64;
+        if tx_packets > current_tx_pkt {
+            self.packets_sent_total
+                .inc_by((tx_packets - current_tx_pkt) as f64);
+        }
+
+        let current_rx_pkt = self.packets_received_total.get() as u64;
+        if rx_packets > current_rx_pkt {
+            self.packets_received_total
+                .inc_by((rx_packets - current_rx_pkt) as f64);
         }
     }
 

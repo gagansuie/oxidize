@@ -340,16 +340,16 @@ OxTunnel tunnels TCP traffic through QUIC datagrams with connection pooling on t
 ### Server (Unified)
 
 ```rust
-use relay_server::mobile_server::{MobileTunnelServer, MobileServerConfig};
+use relay_server::oxtunnel_server::{OxTunnelServer, OxTunnelServerConfig};
 
-// Server handles both QUIC and UDP clients with unified OxTunnel protocol
-let config = MobileServerConfig {
+// Server handles all clients (desktop, mobile, CLI) with unified OxTunnel protocol
+let config = OxTunnelServerConfig {
     listen_addr: "0.0.0.0:51820".parse()?,
     enable_encryption: true,
     ..Default::default()
 };
 
-let server = MobileTunnelServer::new(config).await?;
+let server = OxTunnelServer::new(config).await?;
 server.run().await?;
 ```
 
@@ -359,7 +359,7 @@ server.run().await?;
 use oxidize_common::unified_transport::{UnifiedTransportConfig, TransportType};
 
 // Desktop uses QUIC transport with NFQUEUE packet capture
-let config = UnifiedTransportConfig::desktop("relay.oxd.sh:443".parse()?);
+let config = UnifiedTransportConfig::desktop("<server_ip>:4433".parse()?);
 // Packets captured via NFQUEUE are batched and sent over QUIC datagrams
 ```
 
@@ -369,7 +369,7 @@ let config = UnifiedTransportConfig::desktop("relay.oxd.sh:443".parse()?);
 use oxidize_common::unified_transport::{UnifiedTransportConfig, TransportType};
 
 // Mobile uses same QUIC transport with VpnService/NEPacketTunnel capture
-let config = UnifiedTransportConfig::mobile("relay.oxd.sh:443".parse()?);
+let config = UnifiedTransportConfig::mobile("<server_ip>:4433".parse()?);
 // Same OxTunnel protocol, platform-specific packet capture
 ```
 

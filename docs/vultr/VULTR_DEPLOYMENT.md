@@ -249,13 +249,13 @@ strategy:
 
 ### DNS Load Balancing (Cloudflare)
 
-For multi-region, use Cloudflare's load balancing:
+For multi-region, server discovery is handled by the `/api/servers` endpoint:
 
 ```
-relay.oxd.sh
-  ├── PRIMARY (144.202.60.215) - Chicago
-  ├── WEST (lax server IP) - Los Angeles  
-  └── EU (ams server IP) - Amsterdam
+/api/servers returns:
+  ├── relay-chi-1 (91.242.214.137) - Chicago
+  ├── relay-lax-1 (x.x.x.x) - Los Angeles  
+  └── relay-ams-1 (x.x.x.x) - Amsterdam
 ```
 
 Configure in Cloudflare → Traffic → Load Balancing.

@@ -8,7 +8,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/oxidize"
 SERVICE_DIR="/etc/systemd/system"
 BINARY_NAME="oxidize-client"
-SERVER_ADDR="relay.oxd.sh:4433"
+SERVER_ADDR=""  # Must be provided as argument (e.g., 91.242.214.137:4433)
 
 # Colors
 RED='\033[0;31m'
@@ -27,9 +27,15 @@ print_banner() {
 }
 
 set_server_address() {
-    # Allow override via argument, otherwise use default (relay.oxd.sh:4433)
+    # Server address must be provided as argument
     if [ -n "$1" ] && [ "$1" != "uninstall" ]; then
         SERVER_ADDR="$1"
+    fi
+    if [ -z "$SERVER_ADDR" ]; then
+        echo -e "${RED}Error: Server address required.${NC}"
+        echo "Usage: $0 <server_ip:port>"
+        echo "Example: $0 91.242.214.137:4433"
+        exit 1
     fi
     echo -e "${GREEN}Server: $SERVER_ADDR${NC}"
 }

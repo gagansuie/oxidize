@@ -6,7 +6,7 @@
 
 **Neural networks predict packet loss before it happens, optimize routing in real-time, and accelerate your network automatically.**
 
-> 🔥 **0.7µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
+> 🔥 **0.2-1.0µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
@@ -74,7 +74,7 @@ Your ISP's routing is suboptimal:
 - **Lock-Free Streams** - No mutex contention on hot path
 - **ACK Batching** - Configurable batching reduces round-trips
 - **Latency Instrumentation** - Built-in µs-level timing for optimization
-- **LZ4 DEFAULT Mode** - ~6 GB/s compression (30x faster than HIGH mode)
+- **LZ4 Compression** - ~80 MB/s single-thread, scales with parallel compression
 - **Zero-Allocation Hot Path** - Ownership transfer instead of cloning in packet pipeline
 
 ### 📱 OxTunnel Protocol (Unified Cross-Platform)
@@ -140,161 +140,40 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
 - **Edge Caching** - LRU cache for static content at relay points
 
 
-### 🧠 Deep Learning Engine (Pure Rust, 10x Optimized)
-Self-improving network optimization using neural networks with **adaptive online learning**:
+### 🧠 Deep Learning Engine
+Adaptive online learning with <10µs inference:
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     AdaptiveMlEngine (Production)                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│  ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────┐  │
-│  │ ML Lookup Tables │  │ Live ML Inference  │  │ Online Learning  │  │
-│  │  - From ML model   │  │ - Candle/SafeTensors│  │ - 100K obs buffer│  │
-│  │  - <100ns lookup   │  │ - <1µs inference  │  │ - Hourly refresh │  │
-│  │  - 90%+ hit rate   │  │ - Edge cases only  │  │ - No restart     │  │
-│  └────────────────────┘  └────────────────────┘  └──────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+| Model | Latency | Purpose |
+|-------|---------|---------|
+| Loss Predictor | <10µs | Predicts packet loss 50-100ms ahead |
+| Congestion Control | <1µs | PPO-based CWND optimization |
+| Path Selector | <1µs | UCB1 bandit for best path selection |
+| FEC Decision | <100ns | Optimal redundancy ratio |
 
-**Core Models (Always Active):**
-| Model | Architecture | Latency | Purpose |
-|-------|--------------|---------|----------|
-| **Loss Predictor** | Transformer | <10µs | Predicts packet loss 50-100ms ahead |
-| **Congestion Control** | PPO (continuous) | <1µs | Optimal CWND via lookup + ML fallback |
-| **Compression Oracle** | Entropy heuristics | <1µs | Skip already-compressed data |
-| **Path Selector** | UCB1 bandit | <1µs | Learns best path per traffic type |
-| **FEC Decision** | Lookup table | <100ns | Optimal redundancy ratio |
+See [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) and [ADVANCED_ML.md](docs/ADVANCED_ML.md) for details.
 
-**Performance Benchmarks:**
-```
-╔════════════════════════════════════════════════════════════════╗
-║                    ML ENGINE BENCHMARKS                         ║
-╠════════════════════════════════════════════════════════════════╣
-║ Lookup Table Hit:      <100ns (90%+ of decisions)                ║
-║ Live ML Inference:     <1µs  (candle optimized)                  ║
-║ Transformer:           <10µs (loss prediction)                  ║
-║ Online Learning:       Continuous (no restart)                  ║
-║ Table Refresh:         Hourly (from observations)               ║
-║ Memory Footprint:      <10MB (all models + tables)              ║
-║ Observation Buffer:    100K samples (circular)                  ║
-╚═════════════════════════════════════════════════════════════════╝
-```
+**Auto-detected:** Gaming ports (Xbox, PlayStation, Steam, VoIP) use QUIC datagrams. Streaming services (Netflix, Disney+, etc.) are bypassed for your residential IP.
 
-**Advanced ML Features (Scale-Ready):**
-| Feature | Purpose | Latency Impact | When Needed |
-|---------|---------|----------------|-------------|
-| **Federated Learning** | Privacy-preserving aggregation with DP | Async | Multi-server |
-| **Multi-agent RL** | Distributed congestion control | ~50µs/action | Multi-flow |
-| **A/B Testing** | Statistical model deployment experiments | ~1µs | Always |
+### 📦 Compression
+- **LZ4** - Multi-threaded, ~80 MB/s (single), ~4 GB/s (parallel)
+- **ROHC Headers** - 44% size reduction (UDP/TCP/IP/RTP profiles)
+- **Smart Detection** - Skips already-compressed data (TLS, media, archives)
 
-See [ADVANCED_ML.md](docs/ADVANCED_ML.md) and [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) for detailed documentation.
+### 🔒 Security
+- **TLS 1.3** with Let's Encrypt
+- **Per-IP rate limiting** with auto-blocking
+- **DDoS protection** via iptables + application-level limits
 
-**Gaming Ports (QUIC Datagrams):**
-| Platform | Ports |
-|----------|-------|
-| Xbox Live | 3074, 3478-3480 |
-| PlayStation | 3658-3659 |
-| Steam/Valve | 27015-27017 |
-| Unreal Engine | 7777-7779 |
-| VoIP/SIP | 5060-5061 |
-
-**Bypass Domains (Direct, Your IP):**
-Netflix, Disney+, Hulu, Prime Video, HBO Max, Spotify - automatically bypassed so streaming services see your residential IP.
-
-### 📦 Compression (Pure Rust, Enabled by Default)
-- **Parallel LZ4 Compression** - Multi-threaded compression scales with CPU cores (10+ Gbps)
-- **Per-Connection Dictionaries** - Learns per-flow patterns for 20-40% better compression
-- **ROHC Header Compression** - 44% size reduction for UDP/IP headers
-  - UDP, TCP, IP, RTP, ESP, IPv6 profiles
-  - Fast state transitions (IR → FO → SO in 5 packets vs standard 10)
-  - LRU context eviction for inactive flows
-  - W-LSB delta encoding for sequence numbers
-  - **Enabled by default** - no configuration needed
-- **SIMD-Accelerated** - AVX2/NEON when available
-- **Intelligent Selection** - Automatically chooses best compression per packet
-- **Smart Entropy Detection** - Shannon entropy + magic byte detection skips encrypted/compressed data
-  - Detects gzip, ZIP, LZ4, Zstd, TLS records, JPEG, PNG, MP4
-  - Entropy threshold: >7.5 bits/byte = skip compression
-
-**ROHC Performance Impact:**
-| Traffic Type | Without ROHC | With ROHC | Savings |
-|--------------|--------------|-----------|--------|
-| UDP Gaming (64B) | 62% header overhead | 3% | **59%** |
-| VoIP RTP (160B) | 25% header overhead | 1% | **24%** |
-| SSH keystrokes (80B) | 75% header overhead | 10% | **65%** |
-
-### 🔒 Security & DDoS Protection
-- **TLS 1.3** - Real certificate support with Let's Encrypt
-- **Per-IP Rate Limiting** - Connection, PPS, and bandwidth limits
-- **Auto-blocking** - Automatic IP blocking after violations
-- **QUIC Security** - Stateless retry, address validation, anti-amplification
-- **Connection Multiplexing** - Thousands of concurrent flows
-
-### 🌐 Infrastructure & Resilience
-- **Connection Migration** - Seamless WiFi ↔ LTE handoff
-- **Multi-Server Ready** - Relay mesh for scaling when needed
-- **Predictive Prefetching** - DNS and connection pre-warming
-- **Health Monitoring** - Automatic failover on relay issues
-
-### 🚀 Server-to-Internet Optimizations
-The relay server optimizes traffic from server to destination (your game server, websites, etc.):
-
-| Optimization | Benefit | Implementation |
-|--------------|---------|----------------|
-| **BBR Congestion Control** | 2-25x better throughput on lossy links | `tcp_congestion_control = bbr` |
-| **TCP Fast Open** | -1 RTT on repeat connections | `tcp_fastopen = 3` |
-| **UDP GSO/GRO** | 64 packets per syscall | Kernel 4.18+ |
-| **ECN (RFC 9000)** | Congestion signals without loss | DCTCP-style response |
-| **Jumbo Frames** | 9000 MTU on datacenter NICs | Reduces header overhead |
-| **NUMA-Aware** | Memory close to CPU | <100ns memory access |
-| **Peering** | Direct routes to game servers | Latitude.sh Chicago |
-
-**Server Kernel Tuning (Applied Automatically):**
-```
-net.core.rmem_max = 268MB      # Large receive buffers
-net.core.wmem_max = 268MB      # Large send buffers  
-net.core.netdev_max_backlog = 500K  # Handle burst traffic
-net.ipv4.tcp_congestion_control = bbr  # Google BBR
-net.ipv4.tcp_fastopen = 3      # Client + server TFO
-```
-
-**Why This Matters:**
-```
-Without optimization:  Server → 5 hops → ISP peering → 8 hops → Game Server
-With Oxidize:          Server → 2 hops → Direct peering → Game Server
-                       (Latitude.sh has direct peering with major gaming networks)
-```
-
-### 📊 Observability
-- **Prometheus Metrics** - Latency, throughput, compression ratios
-- **Speed Test** - Built-in benchmarking with JSON output
+### 🌐 Infrastructure
+- **Connection migration** - Seamless WiFi ↔ LTE handoff
+- **BBR congestion control** - Optimal for lossy links
+- **Prometheus metrics** - Real-time observability
 
 ## Speed Test
 
-Test your connection improvement before committing:
-
 ```bash
-# Human-readable results
 oxidize-client --server SERVER_IP:4433 --speedtest
-
-# JSON output for scripting
-oxidize-client --server SERVER_IP:4433 --speedtest --json
-```
-
-Sample output:
-```
-╔════════════════════════════════════════════════════════════════╗
-║              Oxidize Speed Test Results                        ║
-╠════════════════════════════════════════════════════════════════╣
-║                      Direct      Via Relay      Improvement    ║
-╠════════════════════════════════════════════════════════════════╣
-║  Latency (ms):        45.2          38.1           +15.7%      ║
-║  Download (Mbps):     85.2          92.4           +8.5%       ║
-║  Upload (Mbps):       42.1          48.7           +15.7%      ║
-║  Jitter (ms):         12.3           4.2           +65.9%      ║
-╚════════════════════════════════════════════════════════════════╝
-
-✨ Summary: Oxidize provides 16% better latency, 8% better download speed
+oxidize-client --server SERVER_IP:4433 --speedtest --json  # For scripting
 ```
 
 ## Quick Start
@@ -302,13 +181,8 @@ Sample output:
 ### One-Click Client Install
 
 ```bash
-# Install and auto-start (defaults to relay.oxd.sh:4433)
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash
-```
-
-```bash
-# Or specify a custom server
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- relay.oxd.sh:4433
+# Install with server address (required)
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- <server_ip>:4433
 ```
 
 The installer handles everything: downloads binary, configures service, and starts automatically.
@@ -322,392 +196,107 @@ The installer handles everything: downloads binary, configures service, and star
 cargo build --release
 
 # Run server (on your relay server)
-./target/release/oxidize-server --listen 0.0.0.0:4433
+./target/release/oxidize-server --listen 0.0.0.0:51820
 
-# Run client (defaults to relay.oxd.sh:4433)
-./target/release/oxidize-client
-
-# Or specify a custom server
-./target/release/oxidize-client --server relay.oxd.sh:4433
+# Run client (server address required)
+./target/release/oxidize-client --server <server_ip>:51820
 
 # Run speed test
 ./target/release/oxidize-client --speedtest
 ```
 
+### Server Deployment (AF_XDP)
+
+For maximum performance on bare metal Linux servers:
+
+```bash
+# 1. Setup system for AF_XDP (configures NIC, huge pages, sysctl)
+sudo ./scripts/xdp-setup.sh eth0 51820
+
+# 2. Run server (AF_XDP is automatic on Linux)
+sudo ./target/release/oxidize-server --listen 0.0.0.0:51820
+```
+
+AF_XDP provides 10-25 Gbps throughput with <1µs latency. Requires:
+- Linux 5.4+ kernel
+- Root privileges
+- XDP-capable NIC (Intel i40e/ixgbe, Mellanox mlx5, etc.)
+
 ## Configuration
 
-Create `config.toml`:
-
 ```toml
+# config.toml
 max_connections = 10000
 enable_compression = true
-enable_tcp_acceleration = true
+congestion_algorithm = "adaptive_ml"  # or "cubic", "gaming"
 rate_limit_per_ip = 100
-
-# ROHC header compression (enabled by default)
-enable_rohc = true
-rohc_max_size = 1400
-
-# Congestion control (adaptive_ml, cubic, gaming)
-congestion_algorithm = "adaptive_ml"
-
-# Priority scheduling
-enable_priority_scheduler = true
-
-# Performance optimizations are always enabled:
-# - Zero-copy buffer pooling
-# - Lock-free stream handling  
-# - ACK batching (8 per batch)
-# - Latency instrumentation
 ```
 
-### Feature Interactions
 
-| Feature Combo | Interaction | Status |
-|--------------|-------------|--------|
-| FEC + Compression | FEC adds redundancy before compression | ✅ Auto-adapts |
-| ROHC + Small Packets | ROHC best for <200B packets | ✅ Auto-selects per packet |
-| Zero-copy + Compression | Compression into pooled buffer | ✅ No conflict |
-| Priority Scheduler + ACK Batching | Real-time traffic prioritized | ✅ ACKs respect priority |
+## Performance
 
+| Scenario | Improvement |
+|----------|-------------|
+| Mobile networks | +30-50% (packet loss handling) |
+| Congested ISPs | +40-60% (better routing) |
+| Gaming | +20-40% (stable latency) |
 
-## Real-World Performance
-
-### 🎯 Relay Overhead: 0.004%
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                    PERFORMANCE BREAKDOWN                        │
-├────────────────────────────────────────────────────────────────┤
-│  Per-packet processing:     0.7µs (with ML inference)          │
-│  Concurrent users:          10,000 - 50,000 per instance       │
-│  PPS capacity:              ~100K packets/sec                  │
-│  Memory footprint:          <100 MB                            │
-│                                                                │
-│  Verdict: PRODUCTION READY                                     │
-└────────────────────────────────────────────────────────────────┘
-```
-
-### 🎮 Gaming Overhead Analysis
-
-| Workload | Tick Rate | Tick Period | Oxidize Overhead |
-|----------|-----------|-------------|------------------|
-| Competitive FPS | 128 Hz | 7.8ms | **0.009%** |
-| Standard Gaming | 64 Hz | 15.6ms | **0.004%** |
-| VoIP (20ms frames) | 50 Hz | 20ms | **0.0035%** |
-| Video Streaming | 60 Hz | 16.7ms | **0.004%** |
-
-**Why it matters:** Batching and QUIC datagrams eliminate latency *spikes* - the micro-stutters from syscalls and head-of-line blocking that ruin gaming feel.
-
-### When Oxidize Helps
-
-- Mobile networks: +30-50% improvement (packet loss handling)
-- Congested ISPs: +40-60% improvement (better routing)
-- Gaming: +20-40% improvement (stable latency)
-- API-heavy apps: +50-70% improvement (compression + multiplexing)
-
-### When It Won't
-
-- Already-optimal fiber connections
-- Video streaming (already compressed)
-- Local network traffic
-
-**Honest benchmarks, no marketing BS.**
-
-## Production Ready
-
-✅ TLS 1.3 &nbsp;·&nbsp; ✅ Rate limiting &nbsp;·&nbsp; ✅ Prometheus metrics &nbsp;·&nbsp; ✅ DDoS protection &nbsp;·&nbsp; ✅ 230+ tests &nbsp;·&nbsp; ✅ Zero external deps
-
-### ✅ Implemented Features Summary
-
-| Category | Feature | Status |
-|----------|---------|--------|
-| **Protocol** | OxTunnel (unified cross-platform) | ✅ Implemented |
-| **Protocol** | V2 Variable Headers (4B avg) | ✅ Implemented |
-| **Protocol** | QUIC Datagrams (gaming/VoIP) | ✅ Implemented |
-| **Protocol** | 0-RTT Session Resumption | ✅ Implemented |
-| **Transport** | QUIC Primary + UDP Fallback | ✅ Implemented |
-| **Transport** | Connection Migration (WiFi↔LTE) | ✅ Implemented |
-| **Transport** | Multi-path Aggregation | ✅ Implemented |
-| **Kernel Bypass** | AF_XDP/XDP (10-25 Gbps) | ✅ Implemented |
-| **Compression** | LZ4 (~4 GB/s) | ✅ Implemented |
-| **Compression** | ROHC Headers (44% reduction) | ✅ Implemented |
-| **Compression** | Per-Connection Dictionaries | ✅ Implemented |
-| **ML Engine** | Transformer Loss Predictor | ✅ Implemented |
-| **ML Engine** | PPO Congestion Controller | ✅ Implemented |
-| **ML Engine** | Speculative Pre-computation | ✅ Implemented |
-| **ML Engine** | UCB1 Path Selection | ✅ Implemented |
-| **Congestion** | Adaptive ML (online learning) | ✅ Implemented |
-| **Congestion** | ML-Augmented Pacing | ✅ Implemented |
-| **Multipath** | MPTCP-style Redundancy | ✅ Implemented |
-| **Multipath** | ML Handoff Prediction (WiFi→LTE) | ✅ Implemented |
-| **Traffic** | Deep Packet Inspection | ✅ Implemented |
-| **Traffic** | Application Fingerprinting | ✅ Implemented |
-| **Protocol** | Trusted Network Detection | ✅ Implemented |
-| **Protocol** | Dynamic Buffer Pool | ✅ Implemented |
-| **Protocol** | NUMA-Aware Allocation | ✅ Implemented |
-| **SIMD** | AVX-512/AVX2 Packet Parsing | ✅ Implemented |
-| **FEC** | Adaptive Reed-Solomon | ✅ Implemented |
-| **Security** | TLS 1.3 / Let's Encrypt | ✅ Implemented |
-| **Security** | Rate Limiting / DDoS Protection | ✅ Implemented |
-| **Observability** | Prometheus Metrics | ✅ Implemented |
-| **Apps** | Desktop (Linux/macOS/Windows) | ✅ Implemented |
-| **Apps** | Mobile (Android/iOS) | 🚧 Coming Soon |
+**Won't help:** Already-optimal fiber, video streaming, local traffic.
 
 ## Monitoring
 
 ```bash
-# Metrics endpoint
 curl http://localhost:9090/metrics
 ```
 
-**Latency Metrics:**
-```
-║ Avg Process Latency: 0.7µs    # Per-packet processing time
-║ Avg Forward Latency: 12.3µs   # Time to forward to destination
-║ Avg Encode Latency:  0.2µs    # Message encoding time
-║ Avg Decode Latency:  0.3µs    # Message decoding time
-```
+## Apps
 
-Use these metrics to identify bottlenecks and tune `ack_batch_size` for your workload.
+### Desktop
+Modern GUI built with Tauri. Requires daemon for full traffic tunneling.
 
-## Desktop App
+**macOS:** Right-click → Open to bypass Gatekeeper, or `xattr -cr /Applications/Oxidize.app`
 
-The Oxidize desktop app provides a modern GUI for managing connections.
-
-> **⚠️ Daemon Required**: The desktop app requires the daemon to be installed for full traffic tunneling and IP protection. Install via Settings → Install Daemon.
-
-### Features
-- **Full IP Protection** - All traffic tunneled through relay, your real IP is hidden
-- **Auto-connect** - Automatically connects to closest region on launch (configurable)
-- **Closest Region Detection** - Uses IP geolocation + haversine distance to find optimal server
-- **Server List** - Browse all available regions with status, latency, and server count
-- **Connection Stats** - Real-time bytes sent/received and uptime
-- **Launch at Startup** - Optional system startup integration
-
-### Settings
-| Setting | Description |
-|---------|-------------|
-| Launch at Startup | Start Oxidize when your computer boots |
-| Auto-connect | Automatically connect to closest region on launch |
-| Install Daemon | Required for connection - installs system service |
-
-### macOS Security Prompt
-
-macOS may show a security warning when opening unsigned apps:
-
-> "Oxidize.app cannot be opened because the developer cannot be verified"
-
-**Workaround:** Right-click the app → Select "Open" → Click "Open" in the dialog.
-
-Or via Terminal: `xattr -cr /Applications/Oxidize.app`
-
----
-
-## Mobile Apps
-
-Native iOS and Android apps with the same core functionality as desktop.
-
-### Download
-
-| Platform | Store | Status |
-|----------|-------|--------|
-| **Android** | [Google Play Store](https://play.google.com/store/apps/details?id=sh.oxd.app) | Coming Soon |
-| **iOS** | [Apple App Store](https://apps.apple.com/app/oxidize/id0000000000) | Coming Soon |
-
-### Features
-- **Same OxTunnel protocol** - Identical to desktop, unified codebase
-- **VpnService (Android)** / **NEPacketTunnel (iOS)** - Native packet capture
-- **Auto-connect** - Connect on launch (configurable)
-- **Region selection** - Browse and select optimal servers
-- **Connection stats** - Real-time bandwidth and latency
-
-### Mobile-Specific Notes
-- **No daemon required** - Mobile uses native VPN APIs
-- **Battery optimized** - Efficient QUIC transport
-- **Background support** - Stays connected when app is backgrounded
-
-### Development
-
-Mobile apps are built with [Tauri](https://tauri.app/) and deploy via [Fastlane](https://fastlane.tools/):
+### Mobile (Coming Soon)
+Same OxTunnel protocol. Uses native VPN APIs (VpnService/NEPacketTunnel).
 
 ```bash
-# Android (requires Android SDK + NDK)
-cd app && npx tauri android build
-
-# iOS (requires macOS + Xcode)
-cd app && npx tauri ios init && npx tauri ios build
+cd app && npx tauri android build   # Android
+cd app && npx tauri ios build       # iOS
 ```
 
-For deployment setup, see [MOBILE_DEPLOYMENT.md](docs/MOBILE_DEPLOYMENT.md).
+## Daemon
 
----
+OxTunnel captures TCP+UDP via NFQUEUE and tunnels over QUIC datagrams.
 
-## Daemon Management
-
-The daemon runs **OxTunnel** - our unified protocol that captures packets via NFQUEUE and tunnels them over QUIC:
-
-### How OxTunnel Works (Linux)
-```
-App Traffic → NFQUEUE (kernel) → OxTunnel Batching → QUIC Datagrams → Relay Server
-     ↓                                                                      ↓
- TCP + UDP                                                           TCP: Connection proxy
- captured                                                            UDP: Direct forward
-```
-
-### Features
-- **Full traffic capture** - Intercepts **both TCP and UDP** at kernel level via NFQUEUE
-- **TCP connection pooling** - Server maintains persistent TCP connections to destinations
-- **UDP direct forwarding** - Low-latency UDP packet forwarding
-- **64 packets/batch** - Reduces syscalls, improves throughput
-- **QUIC datagrams** - Zero head-of-line blocking for gaming/VoIP
-- **Pure userspace** - No kernel modules, no TUN devices
-- **Same protocol as mobile** - Unified OxTunnel on all platforms
-
-### Commands
 ```bash
-# Check status
-sudo systemctl status oxidize-daemon
-
-# Start/Stop/Restart
-sudo systemctl start oxidize-daemon
-sudo systemctl stop oxidize-daemon
-sudo systemctl restart oxidize-daemon
-
-# View logs
-sudo journalctl -u oxidize-daemon -f
-
-# Manual run (for debugging)
-sudo ./target/release/oxidize-daemon
-```
-
-### NFQUEUE iptables Rules
-When connected, the daemon automatically configures rules for **both TCP and UDP**:
-```bash
-# Check active rules
-sudo iptables -L OUTPUT -v -n --line-numbers
-
-# Expected output shows both protocols captured:
-# NFQUEUE udp  -- 0.0.0.0/0  0.0.0.0/0  NFQUEUE num 0 bypass
-# NFQUEUE tcp  -- 0.0.0.0/0  0.0.0.0/0  NFQUEUE num 0 bypass
+sudo systemctl status oxidize-daemon   # Check status
+sudo systemctl restart oxidize-daemon  # Restart
+sudo journalctl -u oxidize-daemon -f   # View logs
 ```
 
 ## Documentation
 
-- [CHANGELOG.md](docs/CHANGELOG.md) - **Recent changes and removed modules**
-- [OXTUNNEL.md](docs/OXTUNNEL.md) - OxTunnel protocol specification (replaces WireGuard)
-- [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - Deep learning engine (Transformer, PPO, UCB1)
-- [ADVANCED_ML.md](docs/ADVANCED_ML.md) - Scale-ready ML features (Federated Learning, Multi-agent RL, A/B Testing)
-- [SECURITY.md](docs/SECURITY.md) - Security hardening & DDoS protection
-- [VULTR_DEPLOYMENT.md](docs/vultr/VULTR_DEPLOYMENT.md) - Bare metal deployment guide
-- [LATITUDE_DEPLOYMENT.md](docs/latitude/LATITUDE_DEPLOYMENT.md) - Latitude.sh deployment guide
-- [ZERO-DOWNTIME.md](docs/ZERO-DOWNTIME.md) - Zero-downtime deployment
+- [OXTUNNEL.md](docs/OXTUNNEL.md) - Protocol specification
+- [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - ML engine details
+- [SECURITY.md](docs/SECURITY.md) - Security & DDoS protection
+- [Deployment guides](docs/) - Vultr, Latitude.sh setup
 
-## Testing
+## Development
 
 ```bash
-cargo test --all
+cargo test --all           # Run tests
+cargo bench --package oxidize-common  # Benchmarks
 ```
-
-## Benchmarks
-
-```bash
-# Run performance benchmarks
-cargo bench --package oxidize-common
-```
-
-**Sample Results:**
-```
-╔════════════════════════════════════════════════════════════════╗
-║                     KEY BENCHMARKS                             ║
-╠════════════════════════════════════════════════════════════════╣
-║ E2E Pipeline:        0.7µs per packet                          ║
-║ LZ4 Throughput:      ~4 GB/s (native LZ4, 10+ Gbps)            ║
-║ FEC Throughput:      ~4321 MB/s (never a bottleneck)           ║
-║ ROHC Compression:    44% size reduction                        ║
-║ Buffer Pool:         100% hit rate (zero allocs)               ║
-║ Batch Efficiency:    2.6x speedup (fewer syscalls)             ║
-║ Multipath Select:    9M ops/sec                                ║
-║ Sustained Load:      3M+ ops/sec (no degradation)              ║
-║ Concurrent Users:    10,000 - 50,000 per instance              ║
-╚════════════════════════════════════════════════════════════════╝
-```
-
-**ML Engine Benchmarks:**
-```
-╔════════════════════════════════════════════════════════════════╗
-║                   ML INFERENCE BENCHMARKS                       ║
-╠════════════════════════════════════════════════════════════════╣
-║ Transformer:         <10µs inference (loss prediction)          ║
-║ PPO Controller:      <10µs inference (CWND optimization)        ║
-║ Speculative Cache:   <1µs hit (100 decisions pre-computed)      ║
-║ Compression Oracle:  <1µs (entropy-based heuristics)            ║
-║ Path Selection:      <1µs (UCB1 bandit)                        ║
-║ Cache Hit Rate:      >95% (speculative pre-computation)         ║
-║ Memory Footprint:    <10MB (all models embedded)               ║
-╚════════════════════════════════════════════════════════════════╝
-```
-
-**Kernel Bypass Mode (Bare Metal):**
-```
-╔════════════════════════════════════════════════════════════════╗
-║              KERNEL BYPASS BENCHMARKS (AF_XDP)                 ║
-╠════════════════════════════════════════════════════════════════╣
-║ XDP Mode:            10-25 Gbps (event-driven, low power)      ║
-║ Per-Packet Latency:  <300ns (P99)                              ║
-║ Zero-Copy:           No memcpy in hot path                     ║
-║ Lock-Free Rings:     SPSC queues, no contention                ║
-║ Batch Processing:    64 packets per burst                      ║
-║ CPU Pinning:         Dedicated cores per queue                 ║
-║ NUMA Aware:          Memory allocation close to CPU            ║
-║ Huge Pages:          1GB/2MB pages for minimal TLB misses      ║
-╚════════════════════════════════════════════════════════════════╝
-```
-
-> **Note:** AF_XDP kernel bypass requires the `xdp` feature and Linux kernel 5.4+.
-> Event-driven architecture with no dedicated CPU cores needed. See deployment guides for setup.
 
 ## Uninstall
 
-### Linux / macOS
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash
-```
-
-### Windows (PowerShell as Admin)
-
-```powershell
-irm https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall-windows.ps1 | iex
-```
-
-### Options
-
 ```bash
 # Linux/macOS
-sudo ./scripts/uninstall.sh --repo /path/to/oxidize   # Also clean local builds
-./scripts/uninstall.sh --local-only                   # Only clean builds (no sudo)
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash
+
+# Windows (PowerShell as Admin)
+irm https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall-windows.ps1 | iex
 ```
-
-```powershell
-# Windows
-.\scripts\uninstall-windows.ps1 -Repo C:\path\to\oxidize   # Also clean local builds
-.\scripts\uninstall-windows.ps1 -LocalOnly                 # Only clean builds
-```
-
-### What Gets Removed
-
-| Component | Linux | macOS | Windows |
-|-----------|-------|-------|---------|
-| **Binaries** | `/usr/local/bin/oxidize-*` | Same | `%ProgramFiles%\Oxidize\` |
-| **Services** | systemd units | launchd plist | Windows service |
-| **Config** | `/etc/oxidize/` | Same | `%APPDATA%\Oxidize\` |
-| **Desktop entries** | `.desktop` files | N/A | Start menu shortcuts |
-| **App data** | `~/.local/share/com.oxidize.app` | `~/Library/Application Support/` | `%LOCALAPPDATA%\com.oxidize.app` |
-| **Firewall** | iptables NFQUEUE | PF rules | Firewall rule + WinDivert |
-| **Local builds** | `target/`, `node_modules/`, `gen/` | Same | Same |
-
-> **Review the scripts:** [uninstall.sh](scripts/uninstall.sh) · [uninstall-windows.ps1](scripts/uninstall-windows.ps1)
 
 ## License
 

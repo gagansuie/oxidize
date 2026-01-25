@@ -73,6 +73,11 @@ impl UdpBatcher {
         self.pending.len()
     }
 
+    /// Clear pending packets (for reuse)
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+
     /// Flush pending packets as batched I/O vectors
     /// Returns (destination, combined buffer, segment_size, count)
     pub fn flush(&mut self) -> Vec<GsoBatch> {

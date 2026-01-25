@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService};
+use relay_client::client::ClientStats;
 use relay_client::RelayClient;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::Mutex;
@@ -17,7 +19,6 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(unix)]
 const SOCKET_PATH: &str = "/var/run/oxidize/daemon.sock";
-const RELAY_HOST: &str = "relay.oxd.sh";
 const RELAY_PORT: u16 = 4433;
 
 /// Cross-platform IPC path
@@ -27,7 +28,11 @@ const PIPE_NAME: &str = r"\\.\pipe\oxidize-daemon";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum DaemonCommand {
-    Connect { server_id: String },
+    Connect {
+        server_id: String,
+        /// Server IP address (from API)
+        server_address: String,
+    },
     Disconnect,
     Status,
     Ping,
@@ -45,8 +50,9 @@ struct DaemonResponse {
 struct DaemonState {
     connected: bool,
     server_id: Option<String>,
+    server_addr: Option<String>,
     client_task: Option<tokio::task::JoinHandle<()>>,
-    metrics: Option<oxidize_common::RelayMetrics>,
+    client_stats: Option<Arc<ClientStats>>,
     connected_at: Option<std::time::Instant>,
 }
 
@@ -198,7 +204,10 @@ async fn handle_client(stream: UnixStream, state: Arc<Mutex<DaemonState>>) -> Re
 
 async fn handle_command(cmd: DaemonCommand, state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     match cmd {
-        DaemonCommand::Connect { server_id } => handle_connect(server_id, state).await,
+        DaemonCommand::Connect {
+            server_id,
+            server_address,
+        } => handle_connect(server_id, server_address, state).await,
         DaemonCommand::Disconnect => handle_disconnect(state).await,
         DaemonCommand::Status => handle_status(state).await,
         DaemonCommand::Ping => DaemonResponse {
@@ -209,7 +218,11 @@ async fn handle_command(cmd: DaemonCommand, state: &Arc<Mutex<DaemonState>>) -> 
     }
 }
 
-async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
+async fn handle_connect(
+    server_id: String,
+    server_address: String,
+    state: &Arc<Mutex<DaemonState>>,
+) -> DaemonResponse {
     let mut state_guard = state.lock().await;
 
     if state_guard.connected {
@@ -220,12 +233,12 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
         };
     }
 
-    // Resolve server address
-    let server_addr: SocketAddr = match format!("{}:{}", RELAY_HOST, RELAY_PORT)
+    // Resolve server address from provided IP
+    let server_addr: SocketAddr = match format!("{}:{}", server_address, RELAY_PORT)
         .parse::<SocketAddr>()
         .or_else(|_| {
             use std::net::ToSocketAddrs;
-            format!("{}:{}", RELAY_HOST, RELAY_PORT)
+            format!("{}:{}", server_address, RELAY_PORT)
                 .to_socket_addrs()
                 .ok()
                 .and_then(|mut addrs| addrs.next())
@@ -307,6 +320,9 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
     // Get platform name for logging
     let platform = PacketCaptureService::platform_name();
 
+    // Get stats handle BEFORE moving client into task
+    let client_stats = client.stats_handle();
+
     // Spawn client task with packet capture
     let task = tokio::spawn(async move {
         info!("🚀 Starting relay client ({} mode)...", platform);
@@ -326,8 +342,9 @@ async fn handle_connect(server_id: String, state: &Arc<Mutex<DaemonState>>) -> D
 
     state_guard.connected = true;
     state_guard.server_id = Some(server_id.clone());
+    state_guard.server_addr = Some(server_addr.to_string());
     state_guard.client_task = Some(task);
-    state_guard.metrics = None; // OxTunnel client doesn't have RelayMetrics yet
+    state_guard.client_stats = Some(client_stats);
     state_guard.connected_at = Some(std::time::Instant::now());
 
     DaemonResponse {
@@ -367,32 +384,21 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         .map(|t| t.elapsed().as_secs())
         .unwrap_or(0);
 
-    let (bytes_sent, bytes_received, packets_sent, packets_received, compression_saved) =
-        if let Some(ref metrics) = state_guard.metrics {
+    let (bytes_sent, bytes_received, packets_sent, packets_received) =
+        if let Some(ref stats) = state_guard.client_stats {
             (
-                metrics
-                    .bytes_sent
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .bytes_received
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .packets_sent
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .packets_received
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                metrics
-                    .compression_saved
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                stats.bytes_sent.load(Ordering::Relaxed),
+                stats.bytes_received.load(Ordering::Relaxed),
+                stats.packets_sent.load(Ordering::Relaxed),
+                stats.packets_received.load(Ordering::Relaxed),
             )
         } else {
-            (0, 0, 0, 0, 0)
+            (0, 0, 0, 0)
         };
 
     state_guard.connected = false;
     state_guard.server_id = None;
-    state_guard.metrics = None;
+    state_guard.client_stats = None;
     state_guard.connected_at = None;
 
     info!(
@@ -409,7 +415,6 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             "bytes_received": bytes_received,
             "packets_sent": packets_sent,
             "packets_received": packets_received,
-            "compression_saved": compression_saved,
         })),
     }
 }
@@ -422,47 +427,31 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         bytes_received,
         packets_sent,
         packets_received,
+        handshakes,
         compression_saved,
         fec_recovered,
         fec_sent,
         loss_predictions,
         congestion_adjustments,
         path_switches,
-    ) = if let Some(ref metrics) = state_guard.metrics {
+        tunnel_latency_us,
+    ) = if let Some(ref stats) = state_guard.client_stats {
         (
-            metrics
-                .bytes_sent
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .bytes_received
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .packets_sent
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .packets_received
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .compression_saved
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .fec_packets_recovered
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .fec_packets_sent
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .loss_predictions
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .congestion_adjustments
-                .load(std::sync::atomic::Ordering::Relaxed),
-            metrics
-                .path_switches
-                .load(std::sync::atomic::Ordering::Relaxed),
+            stats.bytes_sent.load(Ordering::Relaxed),
+            stats.bytes_received.load(Ordering::Relaxed),
+            stats.packets_sent.load(Ordering::Relaxed),
+            stats.packets_received.load(Ordering::Relaxed),
+            stats.handshakes_completed.load(Ordering::Relaxed),
+            stats.compression_saved.load(Ordering::Relaxed),
+            stats.fec_recovered.load(Ordering::Relaxed),
+            stats.fec_sent.load(Ordering::Relaxed),
+            stats.loss_predictions.load(Ordering::Relaxed),
+            stats.congestion_adjustments.load(Ordering::Relaxed),
+            stats.path_switches.load(Ordering::Relaxed),
+            stats.tunnel_latency_us.load(Ordering::Relaxed),
         )
     } else {
-        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     };
 
     let uptime = state_guard
@@ -481,17 +470,20 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         data: Some(serde_json::json!({
             "connected": state_guard.connected,
             "server_id": state_guard.server_id,
+            "server_addr": state_guard.server_addr,
             "uptime_secs": uptime,
             "bytes_sent": bytes_sent,
             "bytes_received": bytes_received,
             "packets_sent": packets_sent,
             "packets_received": packets_received,
+            "handshakes_completed": handshakes,
             "compression_saved": compression_saved,
             "fec_recovered": fec_recovered,
             "fec_sent": fec_sent,
             "loss_predictions": loss_predictions,
             "congestion_adjustments": congestion_adjustments,
             "path_switches": path_switches,
+            "tunnel_latency_us": tunnel_latency_us,
         })),
     }
 }

@@ -140,6 +140,7 @@ pub fn run() {
             commands::get_status,
             commands::get_regions,
             commands::get_closest_region,
+            commands::get_next_server_for_region,
             commands::get_config,
             commands::set_config,
             commands::get_version,

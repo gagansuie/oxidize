@@ -432,6 +432,30 @@ fn bench_end_to_end() {
         }
         let _ = batcher.flush();
     });
+    comparison.add(result);
+
+    // Optimized hot-path: reuse batcher
+    let mut reusable_batcher = UdpBatcher::new();
+    let data = packet.clone();
+    let result = bench.run("Hot-path (reuse)", 1400, || {
+        let compressed = compress_data(&data).unwrap();
+        let encoded = encoder.encode(&compressed).unwrap();
+        reusable_batcher.clear();
+        for shard in encoded {
+            reusable_batcher.queue(dest, bytes::Bytes::from(shard));
+        }
+        let _ = reusable_batcher.flush();
+    });
+    comparison.add(result);
+
+    // Fast-path: skip compression (high-entropy/encrypted data) + no FEC (low loss)
+    let data = packet.clone();
+    let result = bench.run("Fast-path (no compress)", 1400, || {
+        // Skip compression for encrypted data, skip FEC for low-loss
+        reusable_batcher.clear();
+        reusable_batcher.queue(dest, bytes::Bytes::copy_from_slice(&data));
+        let _ = reusable_batcher.flush();
+    });
     // Store in 100s of nanoseconds for precision
     E2E_LATENCY.store(result.avg_time_ns / 100, Ordering::Relaxed);
     comparison.add(result);

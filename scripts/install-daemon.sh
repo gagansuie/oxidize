@@ -76,29 +76,17 @@ mkdir -p /etc/oxidize
 cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
 #!/bin/bash
 # Oxidize iptables exclusion rules
-# Only sets up exclusions - daemon adds NFQUEUE rule after QUIC connects
+# Relay server exclusion is added dynamically by daemon when connecting
 
-RELAY_HOST="relay.oxd.sh"
-
-# Resolve relay IPv4 address
-RELAY_IP=$(getent ahostsv4 $RELAY_HOST | awk '{print $1}' | head -1)
-
-# Clear old rules
+# Clear old NFQUEUE rules
 iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 
-# Add exclusion for relay server
-if [ -n "$RELAY_IP" ]; then
-    iptables -D OUTPUT -d $RELAY_IP -j ACCEPT 2>/dev/null || true
-    iptables -I OUTPUT -d $RELAY_IP -j ACCEPT
-    echo "Relay exclusion: $RELAY_IP"
-fi
-
-# Add exclusions for common ports
+# Add exclusions for common ports (always needed)
 iptables -I OUTPUT -p udp --dport 53 -j ACCEPT   # DNS
 iptables -I OUTPUT -p udp --dport 67 -j ACCEPT   # DHCP
 iptables -I OUTPUT -p udp --dport 68 -j ACCEPT   # DHCP
 
-echo "Exclusion rules applied (NFQUEUE added by daemon after connect)"
+echo "Base exclusion rules applied (relay exclusion added by daemon dynamically)"
 RULES
 chmod +x /etc/oxidize/nfqueue-rules.sh
 

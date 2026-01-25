@@ -4,7 +4,7 @@
 
 set -e
 
-SERVER="${1:-relay.oxd.sh}"
+SERVER="${1:?Error: Server IP required. Usage: $0 <server_ip>}"
 METRICS_PORT="${2:-9090}"
 INTERVAL="${3:-2}"
 

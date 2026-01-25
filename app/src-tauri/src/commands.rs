@@ -65,11 +65,15 @@ pub struct AppState {
     pub original_ip: Mutex<Option<String>>,
     pub cached_relay_latency: Mutex<Option<u32>>,
     pub last_latency_check: Mutex<Option<std::time::Instant>>,
+    /// Cached server data: server_id -> ipv4 address
+    pub server_ips: Mutex<std::collections::HashMap<String, String>>,
+    /// Round-robin index per region: region_id -> last used index
+    pub region_server_index: Mutex<std::collections::HashMap<String, usize>>,
+    /// Cached region server lists: region_id -> Vec<server_id>
+    pub region_servers: Mutex<std::collections::HashMap<String, Vec<String>>>,
 }
 
-// Relay server endpoint (used for ping test)
-const RELAY_HOST: &str = "relay.oxd.sh";
-const RELAY_PORT: u16 = 4433;
+const METRICS_PORT: u16 = 9090; // TCP port for latency measurement
 
 #[tauri::command]
 pub async fn connect(
@@ -124,16 +128,29 @@ pub async fn connect(
         *orig_ip = original_ip.clone();
     }
 
-    tracing::info!("Connecting via daemon with NFQUEUE packet capture");
-    daemon_connect(server_id.clone()).await?;
+    // Look up server IP from cache (populated by get_regions)
+    let server_address = {
+        let ips = state.server_ips.lock().await;
+        ips.get(&server_id).cloned()
+    };
+
+    let server_address = server_address.ok_or_else(|| {
+        format!(
+            "Server {} not found. Please refresh server list.",
+            server_id
+        )
+    })?;
+
+    tracing::info!("Connecting via daemon to {}:{}", server_address, 4433);
+    daemon_connect(server_id.clone(), server_address.clone()).await?;
 
     crate::set_connected(true);
 
-    // Fetch the relay server's external IP (this is what UDP traffic appears as)
-    let server_ip = get_server_ip().await.ok();
+    // Use the server address we connected to
+    let server_ip = get_server_ip(&server_address).await.ok();
 
     // Measure latency through relay
-    let relay_latency = ping_relay().await.ok();
+    let relay_latency = ping_relay(&server_address).await.ok();
 
     Ok(ConnectionStatus {
         connected: true,
@@ -252,9 +269,21 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
     // Get stored original IP from state
     let original_ip = state.original_ip.lock().await.clone();
 
+    // Get server address from daemon status (format: "ip:port")
+    let server_addr_str = data
+        .get("server_addr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // Extract just the IP part
+    let server_ip_only = server_addr_str.split(':').next().unwrap_or("").to_string();
+
     if connected {
-        // Fetch the relay server's external IP (this is what UDP traffic appears as)
-        let server_ip = get_server_ip().await.ok();
+        // Use server IP from daemon status
+        let server_ip = if server_ip_only.is_empty() {
+            None
+        } else {
+            Some(server_ip_only.clone())
+        };
 
         // Use cached latency, refresh every 5 seconds OR if cache is empty
         let relay_latency = {
@@ -268,10 +297,13 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
                     None => true,
                 };
 
-            if should_refresh {
+            if should_refresh && !server_ip_only.is_empty() {
                 // Try to get latency with reasonable timeout
-                match tokio::time::timeout(std::time::Duration::from_millis(1500), ping_relay())
-                    .await
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(1500),
+                    ping_relay(&server_ip_only),
+                )
+                .await
                 {
                     Ok(Ok(l)) => {
                         let mut cached_mut = state.cached_relay_latency.lock().await;
@@ -324,7 +356,18 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<ConnectionS
                 .get("compression_saved")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
-            latency_ms: relay_latency,
+            // Prefer UDP tunnel latency when available, fall back to TCP ping
+            latency_ms: {
+                let tunnel_latency_us = data
+                    .get("tunnel_latency_us")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if tunnel_latency_us > 0 {
+                    Some((tunnel_latency_us / 1000) as u32) // Convert us to ms
+                } else {
+                    relay_latency // Fall back to TCP-based measurement
+                }
+            },
             fec_recovered: data
                 .get("fec_recovered")
                 .and_then(|v| v.as_u64())
@@ -416,7 +459,7 @@ async fn ping_ip(ip: &str) -> Option<u32> {
 }
 
 #[tauri::command]
-pub async fn get_regions() -> Result<Vec<Region>, String> {
+pub async fn get_regions(state: tauri::State<'_, AppState>) -> Result<Vec<Region>, String> {
     let url = format!("{}/api/servers", API_BASE_URL);
 
     let response = reqwest::get(&url)
@@ -443,6 +486,13 @@ pub async fn get_regions() -> Result<Vec<Region>, String> {
         .iter()
         .filter_map(|s| s.ipv4.as_ref().map(|ip| (s.id.clone(), ip.clone())))
         .collect();
+
+    // Cache server IPs for use when connecting
+    {
+        let mut cached_ips = state.server_ips.lock().await;
+        *cached_ips = server_ips.clone();
+        tracing::info!("Cached {} server IPs", cached_ips.len());
+    }
 
     // Measure latency to each unique IP in parallel
     let unique_ips: Vec<String> = server_ips.values().cloned().collect();
@@ -496,8 +546,50 @@ pub async fn get_regions() -> Result<Vec<Region>, String> {
         (None, None) => std::cmp::Ordering::Equal,
     });
 
+    // Cache region -> server_ids mapping for round-robin
+    {
+        let mut region_servers = state.region_servers.lock().await;
+        for r in &regions {
+            region_servers.insert(r.id.clone(), r.server_ids.clone());
+        }
+        tracing::info!("Cached {} region server mappings", region_servers.len());
+    }
+
     tracing::info!("Fetched {} regions, measured latencies", regions.len());
     Ok(regions)
+}
+
+/// Get next server for a region using round-robin selection
+#[tauri::command]
+pub async fn get_next_server_for_region(
+    region_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let region_servers = state.region_servers.lock().await;
+    let server_ids = region_servers
+        .get(&region_id)
+        .ok_or_else(|| format!("Region {} not found", region_id))?;
+
+    if server_ids.is_empty() {
+        return Err(format!("No servers in region {}", region_id));
+    }
+
+    // Get and increment round-robin index
+    let mut indices = state.region_server_index.lock().await;
+    let current_index = indices.get(&region_id).copied().unwrap_or(0);
+    let next_index = (current_index + 1) % server_ids.len();
+    indices.insert(region_id.clone(), next_index);
+
+    let server_id = server_ids[current_index].clone();
+    tracing::info!(
+        "Round-robin: region {} -> server {} (index {}/{})",
+        region_id,
+        server_id,
+        current_index + 1,
+        server_ids.len()
+    );
+
+    Ok(server_id)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -553,7 +645,7 @@ fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
 /// Get the closest region based on user's IP geolocation
 #[tauri::command]
-pub async fn get_closest_region() -> Result<Region, String> {
+pub async fn get_closest_region(state: tauri::State<'_, AppState>) -> Result<Region, String> {
     // Get user's location via IP geolocation
     let geo_url = "http://ip-api.com/json/?fields=lat,lon,countryCode";
     let geo: GeoLocation = reqwest::get(geo_url)
@@ -571,7 +663,7 @@ pub async fn get_closest_region() -> Result<Region, String> {
     );
 
     // Get all regions
-    let regions = get_regions().await?;
+    let regions = get_regions(state).await?;
 
     if regions.is_empty() {
         return Err("No regions available".to_string());
@@ -609,14 +701,14 @@ pub fn get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Ping relay by measuring TCP connect time (reliable method)
+/// Ping relay by measuring TCP connect time to metrics port (reliable method)
 #[tauri::command]
-pub async fn ping_relay() -> Result<u32, String> {
+pub async fn ping_relay(server_ip: &str) -> Result<u32, String> {
     use std::time::Instant;
     use tokio::net::TcpStream;
 
-    // Resolve the relay host
-    let server_addr: SocketAddr = format!("{}:{}", RELAY_HOST, RELAY_PORT)
+    // Use provided server IP with METRICS_PORT (TCP)
+    let server_addr: SocketAddr = format!("{}:{}", server_ip, METRICS_PORT)
         .to_socket_addrs()
         .map_err(|e| format!("Failed to resolve: {}", e))?
         .next()
@@ -753,15 +845,9 @@ async fn get_external_ip() -> Result<String, String> {
 }
 
 /// Get the relay server's external IPv4 address
-async fn get_server_ip() -> Result<String, String> {
-    // Resolve relay hostname to IPv4 address directly
-    let ipv4_addr = format!("{}:0", RELAY_HOST)
-        .to_socket_addrs()
-        .map_err(|e| format!("Failed to resolve relay host: {}", e))?
-        .find(|addr| addr.is_ipv4())
-        .ok_or_else(|| "No IPv4 address found for relay".to_string())?;
-
-    Ok(ipv4_addr.ip().to_string())
+async fn get_server_ip(server_address: &str) -> Result<String, String> {
+    // Return the server IP directly (already resolved from API)
+    Ok(server_address.to_string())
 }
 
 async fn is_daemon_running() -> bool {
@@ -780,8 +866,13 @@ async fn is_daemon_running() -> bool {
     }
 }
 
-async fn daemon_connect(server_id: String) -> Result<String, String> {
-    let cmd = serde_json::json!({"type": "Connect", "server_id": server_id}).to_string();
+async fn daemon_connect(server_id: String, server_address: String) -> Result<String, String> {
+    let cmd = serde_json::json!({
+        "type": "Connect",
+        "server_id": server_id,
+        "server_address": server_address
+    })
+    .to_string();
     let response = send_daemon_command(&cmd).await?;
 
     if response["success"].as_bool().unwrap_or(false) {

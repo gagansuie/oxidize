@@ -109,3 +109,38 @@
     limit_item: nofile
     value: '2097152'
   become: yes
+
+# ============================================================================
+# DDoS Protection - iptables rate limiting
+# ============================================================================
+
+- name: Copy iptables DDoS protection script
+  copy:
+    src: "{{ playbook_dir }}/../../scripts/iptables-ddos-protection.sh"
+    dest: /usr/local/bin/iptables-ddos-protection.sh
+    mode: '0755'
+  become: yes
+
+- name: Apply iptables DDoS protection rules
+  command: /usr/local/bin/iptables-ddos-protection.sh 4433 9090
+  become: yes
+  register: iptables_result
+  changed_when: true
+
+- name: Display iptables rules applied
+  debug:
+    var: iptables_result.stdout_lines
+  when: iptables_result is defined
+
+- name: Install iptables-persistent for rule persistence
+  apt:
+    name: iptables-persistent
+    state: present
+  become: yes
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Save iptables rules
+  command: netfilter-persistent save
+  become: yes
+  changed_when: true

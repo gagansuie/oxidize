@@ -80,7 +80,6 @@ jobs:
     outputs:
       server_ips: ${{ steps.output.outputs.server_ips }}
       inventory: ${{ steps.output.outputs.inventory }}
-      load_balancer: ${{ steps.output.outputs.load_balancer }}
     
     steps:
       - name: Checkout
@@ -159,9 +158,6 @@ jobs:
           echo "inventory<<EOF" >> $GITHUB_OUTPUT
           echo "$INVENTORY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          
-          LOAD_BALANCER=$(terraform output -json load_balancer)
-          echo "load_balancer=$LOAD_BALANCER" >> $GITHUB_OUTPUT
 
       - name: Create IPv6 AAAA Records
         if: inputs.action != 'destroy'
@@ -184,19 +180,13 @@ jobs:
               jq -r '(.data.attributes.ip_addresses // [])[] | select(.family == "IPv6" and .primary == true) | .address // empty')
             
             if [ -n "$IPV6" ]; then
-              echo "Creating AAAA records for $SERVER_NAME: $IPV6"
+              echo "Creating AAAA record for $SERVER_NAME: $IPV6"
               
-              # Regional AAAA record (e.g., chi.relay.oxd.sh)
+              # Per-server AAAA record (e.g., relay-chi-1.oxd.sh) - optional for debugging
               curl -sf -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
                 -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"$SITE.relay\",\"content\":\"$IPV6\",\"ttl\":300,\"proxied\":false}" || true
-              
-              # Main AAAA record (relay.oxd.sh)
-              curl -sf -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
-                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"AAAA\",\"name\":\"relay\",\"content\":\"$IPV6\",\"ttl\":300,\"proxied\":false}" || true
+                --data "{\"type\":\"AAAA\",\"name\":\"$SERVER_NAME\",\"content\":\"$IPV6\",\"ttl\":300,\"proxied\":false}" || true
             else
               echo "No IPv6 found for $SERVER_NAME"
             fi
@@ -300,12 +290,6 @@ jobs:
           echo "### Servers" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo '${{ needs.terraform.outputs.server_ips }}' | jq -r 'to_entries[] | "\(.key): \(.value)"' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "### Load Balancer" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo '${{ needs.terraform.outputs.load_balancer }}' | jq -r '.hostname' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           

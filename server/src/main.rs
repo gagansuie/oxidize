@@ -7,8 +7,8 @@ use tracing::{error, info, warn};
 
 use relay_server::config::Config;
 use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
-use relay_server::mobile_server::{
-    generate_client_config, generate_server_config, MobileServerConfig, MobileTunnelServer,
+use relay_server::oxtunnel_server::{
+    generate_client_config, generate_server_config, OxTunnelServer, OxTunnelServerConfig,
 };
 use relay_server::prometheus::PrometheusMetrics;
 
@@ -30,6 +30,12 @@ struct Args {
 
     #[arg(long)]
     disable_metrics: bool,
+
+    #[arg(long, default_value = "0.0.0.0:80")]
+    http_addr: SocketAddr,
+
+    #[arg(long)]
+    disable_http: bool,
 
     #[arg(long)]
     generate_config: bool,
@@ -100,13 +106,13 @@ async fn main() -> Result<()> {
     info!("╚════════════════════════════════════════════════════════════════╝");
 
     // Initialize OxTunnel server
-    let server_config = MobileServerConfig {
+    let server_config = OxTunnelServerConfig {
         listen_addr: args.listen,
         enable_encryption: true,
         ..Default::default()
     };
 
-    let server = match MobileTunnelServer::new(server_config).await {
+    let server = match OxTunnelServer::new(server_config).await {
         Ok(s) => s,
         Err(e) => {
             error!("❌ FATAL: Failed to initialize OxTunnel server: {}", e);
@@ -158,11 +164,15 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             use std::sync::atomic::Ordering;
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 metrics_clone.update_tunnel_stats(
                     server_stats.active_sessions.load(Ordering::Relaxed),
                     server_stats.handshakes_completed.load(Ordering::Relaxed),
                     server_stats.invalid_packets.load(Ordering::Relaxed),
+                    server_stats.total_tx_bytes.load(Ordering::Relaxed),
+                    server_stats.total_rx_bytes.load(Ordering::Relaxed),
+                    server_stats.total_tx_packets.load(Ordering::Relaxed),
+                    server_stats.total_rx_packets.load(Ordering::Relaxed),
                 );
             }
         });

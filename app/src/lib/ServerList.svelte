@@ -26,7 +26,6 @@
 
     let regions = $state<Region[]>([]);
     let searchQuery = $state("");
-    let liveLatency = $state<number | null>(null);
     let loading = $state(true);
     let loadError = $state<string | null>(null);
 
@@ -52,17 +51,7 @@
                 regions = await invoke("get_regions");
                 loading = false;
 
-                // Measure live latency immediately and then every 5 seconds
-                const measureLatency = async () => {
-                    try {
-                        liveLatency = await invoke("ping_relay");
-                    } catch (e) {
-                        console.error("Failed to ping relay:", e);
-                    }
-                };
-
-                measureLatency();
-                interval = setInterval(measureLatency, 5000);
+                // Region latencies are already measured during get_regions call
             } catch (e) {
                 console.error(
                     `Failed to load regions (attempt ${retryCount + 1}):`,
@@ -92,10 +81,21 @@
         };
     });
 
-    function selectRegion(region: Region) {
-        // Pass region ID, best server ID (first in list), and location for display
-        const bestServerId = region.server_ids[0];
-        onselect?.(region.id, bestServerId, region.location);
+    async function selectRegion(region: Region) {
+        // Use round-robin to select next server in region
+        try {
+            const serverId: string = await invoke(
+                "get_next_server_for_region",
+                {
+                    regionId: region.id,
+                },
+            );
+            onselect?.(region.id, serverId, region.location);
+        } catch (e) {
+            console.error("Failed to get server for region:", e);
+            // Fallback to first server
+            onselect?.(region.id, region.server_ids[0], region.location);
+        }
     }
 
     function getLoadColor(load: number): string {
@@ -187,9 +187,8 @@
                         >
                     </div>
                     <div class="server-stats">
-                        {#if liveLatency !== null || region.latency_ms !== null}
-                            {@const displayLatency =
-                                liveLatency ?? region.latency_ms ?? 0}
+                        {#if region.latency_ms !== null}
+                            {@const displayLatency = region.latency_ms}
                             <span
                                 class="latency"
                                 style="color: {getLatencyColor(displayLatency)}"

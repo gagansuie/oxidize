@@ -108,8 +108,9 @@ impl EbpfLoader {
     /// Returns the program file descriptor on success
     ///
     /// Note: Full XDP program loading requires the aya crate and a compiled
-    /// eBPF program. This is a stub implementation for now.
-    /// TODO: Add aya dependency and eBPF build pipeline for full XDP support
+    /// eBPF program. Currently returns Unsupported error, causing graceful
+    /// fallback to standard UDP sockets. For XDP acceleration, deploy the
+    /// pre-compiled oxidize-xdp binary on servers with XDP-capable NICs.
     pub fn load_xdp_program(&self) -> io::Result<i32> {
         info!(
             "Loading XDP program on {} (port {}, mode {:?})",

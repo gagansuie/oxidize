@@ -401,11 +401,11 @@ curl -s "https://api.latitude.sh/servers" \
 
 ### DNS Propagation
 
-After adding records, verify propagation:
+After deployment, verify server connectivity:
 
 ```bash
-dig relay.oxd.sh +short
-dig chi.relay.oxd.sh +short
+# Server IPs are fetched from /api/servers endpoint
+curl https://oxd.sh/api/servers | jq '.servers[] | {id, ipv4}'
 ```
 
 ## Scaling
@@ -419,12 +419,14 @@ dig chi.relay.oxd.sh +short
 
 Deploy additional servers in different locations:
 
-| Location | Subdomain | Latency Target |
-|----------|-----------|----------------|
-| Chicago | chi.relay.oxd.sh | US Midwest |
-| New York | nyc.relay.oxd.sh | US East |
-| Los Angeles | lax.relay.oxd.sh | US West |
-| Frankfurt | fra.relay.oxd.sh | Europe |
+| Location | Server Name | Latency Target |
+|----------|-------------|----------------|
+| Chicago | relay-chi-1 | US Midwest |
+| New York | relay-nyc-1 | US East |
+| Los Angeles | relay-lax-1 | US West |
+| Frankfurt | relay-fra-1 | Europe |
+
+Server IPs are returned by the `/api/servers` endpoint.
 
 ## Cost Comparison
 

@@ -1,9 +1,11 @@
-//! Mobile Tunnel Server
+//! OxTunnel Server
 //!
-//! High-performance server endpoint for mobile clients using the custom
-//! Oxidize Mobile Tunnel Protocol. Replaces WireGuard with faster, lighter implementation.
+//! High-performance server endpoint for all clients (desktop, mobile, CLI) using the
+//! OxTunnel Protocol. Cross-platform, replaces WireGuard with faster, lighter implementation.
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use oxidize_common::af_xdp::{XdpConfig, XdpSocket};
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, CryptoEngine, HandshakeInit,
     HandshakeResponse, IpPool, PacketBatch, PacketHeader, TunnelBufferPool, TunnelSession,
@@ -17,6 +19,223 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
+
+// ============================================================================
+// Rate Limiter
+// ============================================================================
+
+/// Rate limiting configuration
+#[derive(Clone)]
+pub struct RateLimitConfig {
+    /// Max packets per second per IP
+    pub max_packets_per_sec: u32,
+    /// Max new connections per minute per IP
+    pub max_connections_per_min: u32,
+    /// Max total concurrent sessions per IP
+    pub max_sessions_per_ip: u32,
+    /// Ban duration for violating rate limits
+    pub ban_duration: Duration,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_packets_per_sec: 1000,              // 1000 pps per IP
+            max_connections_per_min: 10,            // 10 new connections/min per IP
+            max_sessions_per_ip: 5,                 // 5 concurrent sessions per IP
+            ban_duration: Duration::from_secs(300), // 5 minute ban
+        }
+    }
+}
+
+/// Per-IP rate limiting state
+struct IpRateState {
+    packet_count: u32,
+    last_packet_time: Instant,
+    connection_attempts: u32,
+    last_connection_time: Instant,
+    active_sessions: u32,
+    banned_until: Option<Instant>,
+}
+
+impl Default for IpRateState {
+    fn default() -> Self {
+        Self {
+            packet_count: 0,
+            last_packet_time: Instant::now(),
+            connection_attempts: 0,
+            last_connection_time: Instant::now(),
+            active_sessions: 0,
+            banned_until: None,
+        }
+    }
+}
+
+/// Rate limiter for DDoS protection
+pub struct RateLimiter {
+    config: RateLimitConfig,
+    ip_states: RwLock<HashMap<IpAddr, IpRateState>>,
+    stats: RateLimiterStats,
+}
+
+/// Rate limiter statistics
+#[derive(Default)]
+pub struct RateLimiterStats {
+    pub packets_dropped: std::sync::atomic::AtomicU64,
+    pub connections_rejected: std::sync::atomic::AtomicU64,
+    pub ips_banned: std::sync::atomic::AtomicU64,
+}
+
+impl RateLimiter {
+    pub fn new(config: RateLimitConfig) -> Self {
+        Self {
+            config,
+            ip_states: RwLock::new(HashMap::new()),
+            stats: RateLimiterStats::default(),
+        }
+    }
+
+    /// Check if a packet from this IP should be allowed
+    pub async fn check_packet(&self, ip: IpAddr) -> bool {
+        let mut states = self.ip_states.write().await;
+        let state = states.entry(ip).or_default();
+        let now = Instant::now();
+
+        // Check if IP is banned
+        if let Some(banned_until) = state.banned_until {
+            if now < banned_until {
+                self.stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+                return false;
+            } else {
+                state.banned_until = None;
+            }
+        }
+
+        // Reset counter if more than 1 second has passed
+        if now.duration_since(state.last_packet_time) >= Duration::from_secs(1) {
+            state.packet_count = 0;
+            state.last_packet_time = now;
+        }
+
+        state.packet_count += 1;
+
+        // Check rate limit
+        if state.packet_count > self.config.max_packets_per_sec {
+            warn!(
+                "Rate limit exceeded for {} ({} pps)",
+                ip, state.packet_count
+            );
+            self.stats.packets_dropped.fetch_add(1, Ordering::Relaxed);
+
+            // Ban if significantly over limit
+            if state.packet_count > self.config.max_packets_per_sec * 2 {
+                state.banned_until = Some(now + self.config.ban_duration);
+                self.stats.ips_banned.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    "IP {} banned for {} seconds",
+                    ip,
+                    self.config.ban_duration.as_secs()
+                );
+            }
+            return false;
+        }
+
+        true
+    }
+
+    /// Check if a new connection from this IP should be allowed
+    pub async fn check_connection(&self, ip: IpAddr) -> bool {
+        let mut states = self.ip_states.write().await;
+        let state = states.entry(ip).or_default();
+        let now = Instant::now();
+
+        // Check if IP is banned
+        if let Some(banned_until) = state.banned_until {
+            if now < banned_until {
+                self.stats
+                    .connections_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+                return false;
+            } else {
+                state.banned_until = None;
+            }
+        }
+
+        // Check session limit
+        if state.active_sessions >= self.config.max_sessions_per_ip {
+            warn!(
+                "Max sessions exceeded for {} ({} sessions)",
+                ip, state.active_sessions
+            );
+            self.stats
+                .connections_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        // Reset connection counter if more than 1 minute has passed
+        if now.duration_since(state.last_connection_time) >= Duration::from_secs(60) {
+            state.connection_attempts = 0;
+            state.last_connection_time = now;
+        }
+
+        state.connection_attempts += 1;
+
+        // Check connection rate limit
+        if state.connection_attempts > self.config.max_connections_per_min {
+            warn!(
+                "Connection rate limit exceeded for {} ({}/min)",
+                ip, state.connection_attempts
+            );
+            self.stats
+                .connections_rejected
+                .fetch_add(1, Ordering::Relaxed);
+
+            // Ban if significantly over limit
+            if state.connection_attempts > self.config.max_connections_per_min * 3 {
+                state.banned_until = Some(now + self.config.ban_duration);
+                self.stats.ips_banned.fetch_add(1, Ordering::Relaxed);
+                warn!("IP {} banned for connection flooding", ip);
+            }
+            return false;
+        }
+
+        true
+    }
+
+    /// Increment active session count for an IP
+    pub async fn add_session(&self, ip: IpAddr) {
+        let mut states = self.ip_states.write().await;
+        let state = states.entry(ip).or_default();
+        state.active_sessions = state.active_sessions.saturating_add(1);
+    }
+
+    /// Decrement active session count for an IP
+    pub async fn remove_session(&self, ip: IpAddr) {
+        let mut states = self.ip_states.write().await;
+        if let Some(state) = states.get_mut(&ip) {
+            state.active_sessions = state.active_sessions.saturating_sub(1);
+        }
+    }
+
+    /// Get rate limiter statistics
+    pub fn stats(&self) -> &RateLimiterStats {
+        &self.stats
+    }
+
+    /// Cleanup old entries (call periodically)
+    pub async fn cleanup(&self) {
+        let mut states = self.ip_states.write().await;
+        let now = Instant::now();
+        let stale_threshold = Duration::from_secs(600); // 10 minutes
+
+        states.retain(|_, state| {
+            // Keep if has active sessions or was recently active
+            state.active_sessions > 0
+                || now.duration_since(state.last_packet_time) < stale_threshold
+        });
+    }
+}
 
 // ============================================================================
 // Packet Forwarder
@@ -282,20 +501,24 @@ impl Drop for PacketForwarder {
 }
 
 // ============================================================================
-// Mobile Tunnel Server
+// OxTunnel Server
 // ============================================================================
 
-/// Configuration for the mobile tunnel server
+/// Configuration for the OxTunnel server
 #[derive(Clone)]
-pub struct MobileServerConfig {
+pub struct OxTunnelServerConfig {
     pub listen_addr: SocketAddr,
     pub enable_encryption: bool,
     pub session_timeout: Duration,
     pub keepalive_interval: Duration,
     pub ip_pool_base: Ipv4Addr,
+    /// Network interface for XDP (auto-detected if None)
+    pub xdp_interface: Option<String>,
+    /// XDP queue ID (usually 0)
+    pub xdp_queue_id: u32,
 }
 
-impl Default for MobileServerConfig {
+impl Default for OxTunnelServerConfig {
     fn default() -> Self {
         Self {
             listen_addr: "0.0.0.0:51820".parse().unwrap(),
@@ -303,13 +526,16 @@ impl Default for MobileServerConfig {
             session_timeout: Duration::from_secs(300),
             keepalive_interval: Duration::from_secs(25),
             ip_pool_base: Ipv4Addr::new(10, 0, 0, 0),
+            xdp_interface: None, // Auto-detect on Linux
+            xdp_queue_id: 0,
         }
     }
 }
 
-/// Mobile tunnel server for handling mobile client connections
-pub struct MobileTunnelServer {
-    config: MobileServerConfig,
+/// OxTunnel server for handling all client connections (desktop, mobile, CLI)
+#[allow(dead_code)]
+pub struct OxTunnelServer {
+    config: OxTunnelServerConfig,
     socket: Arc<UdpSocket>,
     server_id: [u8; 32],
     sessions: Arc<RwLock<HashMap<[u8; 32], TunnelSession>>>,
@@ -317,21 +543,22 @@ pub struct MobileTunnelServer {
     forwarder: Arc<PacketForwarder>,
     buffer_pool: Arc<TunnelBufferPool>,
     stats: Arc<TunnelStats>,
+    rate_limiter: Arc<RateLimiter>,
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
     #[allow(clippy::type_complexity)]
     response_rx: Arc<RwLock<mpsc::Receiver<(Vec<u8>, SocketAddr)>>>,
 }
 
-impl MobileTunnelServer {
-    /// Create a new mobile tunnel server
-    pub async fn new(config: MobileServerConfig) -> Result<Self> {
+impl OxTunnelServer {
+    /// Create a new OxTunnel server
+    pub async fn new(config: OxTunnelServerConfig) -> Result<Self> {
         let socket = UdpSocket::bind(config.listen_addr)
             .await
-            .context("Failed to bind mobile tunnel socket")?;
+            .context("Failed to bind OxTunnel socket")?;
 
         let (response_tx, response_rx) = mpsc::channel(4096);
 
-        info!("Mobile tunnel server listening on {}", config.listen_addr);
+        info!("OxTunnel server listening on {}", config.listen_addr);
 
         Ok(Self {
             server_id: generate_id(),
@@ -340,6 +567,7 @@ impl MobileTunnelServer {
             forwarder: Arc::new(PacketForwarder::new()),
             buffer_pool: Arc::new(TunnelBufferPool::new()),
             stats: Arc::new(TunnelStats::new()),
+            rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
             socket: Arc::new(socket),
             response_tx,
             response_rx: Arc::new(RwLock::new(response_rx)),
@@ -347,8 +575,191 @@ impl MobileTunnelServer {
         })
     }
 
-    /// Run the mobile tunnel server
+    /// Run the OxTunnel server
     pub async fn run(self) -> Result<()> {
+        // Linux: Try AF_XDP first, fall back to standard sockets
+        #[cfg(target_os = "linux")]
+        {
+            let interface = self
+                .config
+                .xdp_interface
+                .clone()
+                .unwrap_or_else(Self::detect_default_interface);
+
+            // Try AF_XDP - if it fails, fall back to standard UDP
+            match Self::try_xdp(
+                &interface,
+                self.config.xdp_queue_id,
+                self.config.listen_addr.port(),
+            ) {
+                Ok(_) => {
+                    // XDP socket created successfully, use XDP path
+                    return self.run_with_xdp(interface).await;
+                }
+                Err(e) => {
+                    warn!("⚠️ AF_XDP failed: {}, falling back to standard UDP", e);
+                    return self.run_standard().await;
+                }
+            }
+        }
+
+        // Non-Linux: Standard UDP path
+        #[cfg(not(target_os = "linux"))]
+        self.run_standard().await
+    }
+
+    /// Test if AF_XDP is available
+    #[cfg(target_os = "linux")]
+    fn try_xdp(interface: &str, queue_id: u32, port: u16) -> Result<()> {
+        use oxidize_common::af_xdp::{XdpConfig, XdpSocket};
+        let config = XdpConfig {
+            interface: interface.to_string(),
+            queue_id,
+            quic_port: port,
+            ..XdpConfig::high_throughput(interface)
+        };
+        let _ = XdpSocket::new(config)?;
+        Ok(())
+    }
+
+    /// Auto-detect the default network interface
+    #[cfg(target_os = "linux")]
+    fn detect_default_interface() -> String {
+        if let Ok(content) = std::fs::read_to_string("/proc/net/route") {
+            for line in content.lines().skip(1) {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() >= 2 && fields[1] == "00000000" {
+                    return fields[0].to_string();
+                }
+            }
+        }
+        "eth0".to_string()
+    }
+
+    /// Run with AF_XDP zero-copy I/O (Linux only, 10-25 Gbps)
+    #[cfg(target_os = "linux")]
+    async fn run_with_xdp(self, interface: String) -> Result<()> {
+        info!("🚀 Starting AF_XDP mode on interface: {}", interface);
+
+        let xdp_config = XdpConfig {
+            interface: interface.clone(),
+            queue_id: self.config.xdp_queue_id,
+            quic_port: self.config.listen_addr.port(),
+            ..XdpConfig::high_throughput(&interface)
+        };
+
+        let mut xdp_socket =
+            XdpSocket::new(xdp_config).context("Failed to create AF_XDP socket")?;
+
+        info!(
+            "✅ AF_XDP socket bound to {}:{}",
+            interface, self.config.xdp_queue_id
+        );
+
+        // Spawn background tasks
+        self.spawn_background_tasks();
+
+        info!(
+            "OxTunnel server started with AF_XDP, server_id: {:?}",
+            &self.server_id[..8]
+        );
+
+        // AF_XDP packet processing loop
+        loop {
+            // Poll for packets
+            if xdp_socket.poll(100) {
+                let packets = xdp_socket.recv(self.config.xdp_queue_id as usize);
+
+                // Collect frame addresses before processing
+                let addrs: Vec<u64> = packets.iter().map(|p| p.frame_addr).collect();
+
+                for pkt in packets {
+                    self.stats
+                        .total_rx_bytes
+                        .fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
+                    self.stats.total_rx_packets.fetch_add(1, Ordering::Relaxed);
+
+                    // Parse source address from packet (assuming UDP/IP)
+                    if let Some(peer_addr) = Self::parse_packet_addr(&pkt.data) {
+                        if !self.rate_limiter.check_packet(peer_addr.ip()).await {
+                            continue;
+                        }
+
+                        let handler = self.clone_handler();
+                        let packet = pkt.data;
+
+                        tokio::spawn(async move {
+                            if let Err(e) = handler.handle_packet(&packet, peer_addr).await {
+                                debug!("Error handling packet from {}: {}", peer_addr, e);
+                            }
+                        });
+                    }
+                }
+
+                // Return frames to UMEM
+                xdp_socket.return_frames(&addrs);
+            }
+
+            // Yield to allow other tasks to run
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parse_packet_addr(data: &[u8]) -> Option<SocketAddr> {
+        // Parse IP header to extract source address
+        if data.len() < 28 {
+            return None;
+        } // Min IP + UDP header
+
+        let version = (data[0] >> 4) & 0xF;
+        if version != 4 {
+            return None;
+        }
+
+        let ihl = (data[0] & 0xF) as usize * 4;
+        if data.len() < ihl + 8 {
+            return None;
+        }
+
+        let src_ip = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
+        let src_port = u16::from_be_bytes([data[ihl], data[ihl + 1]]);
+
+        Some(SocketAddr::new(IpAddr::V4(src_ip), src_port))
+    }
+
+    fn spawn_background_tasks(&self) {
+        // Cleanup task
+        let sessions_cleanup = Arc::clone(&self.sessions);
+        let ip_pool_cleanup = Arc::clone(&self.ip_pool);
+        let stats_cleanup = Arc::clone(&self.stats);
+        let timeout = self.config.session_timeout;
+        tokio::spawn(async move {
+            Self::cleanup_stale_sessions(sessions_cleanup, ip_pool_cleanup, stats_cleanup, timeout)
+                .await;
+        });
+
+        // Keepalive task
+        let sessions_ka = Arc::clone(&self.sessions);
+        let response_tx_ka = self.response_tx.clone();
+        let interval = self.config.keepalive_interval;
+        tokio::spawn(async move {
+            Self::send_keepalives(sessions_ka, response_tx_ka, interval).await;
+        });
+
+        // Rate limiter cleanup
+        let rate_limiter_cleanup = Arc::clone(&self.rate_limiter);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                rate_limiter_cleanup.cleanup().await;
+            }
+        });
+    }
+
+    /// Run with standard UDP sockets (non-Linux platforms)
+    #[allow(dead_code)]
+    async fn run_standard(self) -> Result<()> {
         let mut buf = vec![0u8; MAX_PACKET_SIZE];
 
         // Spawn cleanup task
@@ -387,14 +798,29 @@ impl MobileTunnelServer {
             Self::send_keepalives(sessions_ka, response_tx_ka, interval).await;
         });
 
+        // Spawn rate limiter cleanup task
+        let rate_limiter_cleanup = Arc::clone(&self.rate_limiter);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                rate_limiter_cleanup.cleanup().await;
+            }
+        });
+
         info!(
-            "Mobile tunnel server started, server_id: {:?}",
+            "OxTunnel server started, server_id: {:?}",
             &self.server_id[..8]
         );
 
         loop {
             match self.socket.recv_from(&mut buf).await {
                 Ok((len, peer_addr)) => {
+                    // Rate limit check - drop packet if rate exceeded
+                    if !self.rate_limiter.check_packet(peer_addr.ip()).await {
+                        debug!("Rate limited packet from {}", peer_addr);
+                        continue;
+                    }
+
                     self.stats
                         .total_rx_bytes
                         .fetch_add(len as u64, Ordering::Relaxed);
@@ -424,6 +850,7 @@ impl MobileTunnelServer {
             forwarder: Arc::clone(&self.forwarder),
             buffer_pool: Arc::clone(&self.buffer_pool),
             stats: Arc::clone(&self.stats),
+            rate_limiter: Arc::clone(&self.rate_limiter),
             response_tx: self.response_tx.clone(),
             enable_encryption: self.config.enable_encryption,
         }
@@ -511,6 +938,7 @@ struct MobileServerHandler {
     #[allow(dead_code)]
     buffer_pool: Arc<TunnelBufferPool>, // Reserved for zero-copy path
     stats: Arc<TunnelStats>,
+    rate_limiter: Arc<RateLimiter>,
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
     enable_encryption: bool,
 }
@@ -556,11 +984,27 @@ impl MobileServerHandler {
                 debug!("Received keepalive from {}", peer_addr);
                 // Update session activity
                 self.update_session_activity(peer_addr).await;
+
+                // Send ACK response for client RTT measurement
+                let mut buf = [0u8; HEADER_SIZE + 1];
+                if let Ok(len) = encode_packet(
+                    &mut buf,
+                    &[control::ACK],
+                    0, // Sequence doesn't matter for ACK
+                    flags::CONTROL,
+                    None,
+                ) {
+                    let _ = self
+                        .response_tx
+                        .send((buf[..len].to_vec(), peer_addr))
+                        .await;
+                }
                 Ok(())
             }
             control::DISCONNECT => {
                 info!("Client {} disconnecting", peer_addr);
                 self.remove_session_by_addr(peer_addr).await;
+                self.rate_limiter.remove_session(peer_addr.ip()).await;
                 Ok(())
             }
             control::ACK => {
@@ -575,6 +1019,12 @@ impl MobileServerHandler {
     }
 
     async fn handle_handshake_init(&self, payload: &[u8], peer_addr: SocketAddr) -> Result<()> {
+        // Rate limit connection attempts
+        if !self.rate_limiter.check_connection(peer_addr.ip()).await {
+            warn!("Connection rate limited for {}", peer_addr);
+            return Err(anyhow::anyhow!("Rate limited"));
+        }
+
         let init = HandshakeInit::decode(payload)
             .ok_or_else(|| anyhow::anyhow!("Invalid handshake init"))?;
 
@@ -583,6 +1033,9 @@ impl MobileServerHandler {
             peer_addr,
             &init.client_id[..8]
         );
+
+        // Track session for this IP
+        self.rate_limiter.add_session(peer_addr.ip()).await;
 
         // Allocate IP for this client
         let assigned_ip = self.ip_pool.allocate(init.client_id).await;
