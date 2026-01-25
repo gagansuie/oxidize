@@ -11,6 +11,7 @@ use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use oxidize_common::adaptive_fec::{AdaptiveFec, FecLevel};
 use oxidize_common::ai_engine::HeuristicEngine;
+use oxidize_common::edge_cache::{CacheConfig, EdgeCache};
 use oxidize_common::low_latency::LatencyTracker;
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
 use oxidize_common::parallel_compression::ParallelCompressor;
@@ -62,6 +63,12 @@ pub struct HighPerfConfig {
     pub enable_priority_scheduler: bool,
     /// Enable SIMD FEC acceleration
     pub enable_simd_fec: bool,
+    /// Enable edge caching for static content
+    pub enable_edge_cache: bool,
+    /// Maximum edge cache size in bytes
+    pub edge_cache_size: usize,
+    /// Maximum number of cache entries
+    pub edge_cache_entries: usize,
     /// Buffer pool size
     pub buffer_pool_size: usize,
     /// Maximum batch size
@@ -80,6 +87,9 @@ impl Default for HighPerfConfig {
             enable_parallel_compression: true,
             enable_priority_scheduler: true,
             enable_simd_fec: true,
+            enable_edge_cache: true,
+            edge_cache_size: 64 * 1024 * 1024, // 64MB
+            edge_cache_entries: 10000,
             buffer_pool_size: 256,
             max_batch_size: 64,
             batch_flush_us: 100,
@@ -130,6 +140,8 @@ pub struct HighPerfPipeline {
     handoff_predictor: HandoffPredictor,
     /// Deep packet inspection + app fingerprinting
     dpi: DeepPacketInspector,
+    /// Edge cache for static content
+    edge_cache: Mutex<EdgeCache>,
 }
 
 /// Atomic statistics for lock-free updates
@@ -180,6 +192,13 @@ impl HighPerfPipeline {
             mptcp_scheduler: MptcpRedundancyScheduler::default(),
             handoff_predictor: HandoffPredictor::new(),
             dpi: DeepPacketInspector::new(),
+            // Edge cache
+            edge_cache: Mutex::new(EdgeCache::new(CacheConfig {
+                max_size: config.edge_cache_size,
+                max_entries: config.edge_cache_entries,
+                enabled: config.enable_edge_cache,
+                ..Default::default()
+            })),
             config,
         }
     }
@@ -412,6 +431,46 @@ impl HighPerfPipeline {
             let mut pool = self.buffer_pool.lock().await;
             pool.put(buffer);
         }
+    }
+
+    // =========================================================================
+    // Edge Cache API
+    // =========================================================================
+
+    /// Get cached content by key
+    pub async fn cache_get(&self, key: &str) -> Option<Bytes> {
+        if !self.config.enable_edge_cache {
+            return None;
+        }
+        let mut cache = self.edge_cache.lock().await;
+        cache.get(key).map(|entry| entry.data.clone())
+    }
+
+    /// Put content into cache
+    pub async fn cache_put(&self, key: &str, data: Bytes, content_type: &str) {
+        if !self.config.enable_edge_cache {
+            return;
+        }
+        let mut cache = self.edge_cache.lock().await;
+        cache.put(
+            key.to_string(),
+            oxidize_common::edge_cache::CacheEntry::new(
+                data,
+                content_type,
+                std::time::Duration::from_secs(3600),
+            ),
+        );
+    }
+
+    /// Get cache hit rate
+    pub async fn cache_hit_rate(&self) -> f64 {
+        let cache = self.edge_cache.lock().await;
+        cache.stats.hit_rate()
+    }
+
+    /// Check if edge cache is enabled
+    pub fn is_edge_cache_enabled(&self) -> bool {
+        self.config.enable_edge_cache
     }
 }
 
