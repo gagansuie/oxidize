@@ -199,6 +199,7 @@ impl PrometheusMetrics {
     }
 
     /// Update tunnel-specific metrics from TunnelStats
+    #[allow(clippy::too_many_arguments)]
     pub fn update_tunnel_stats(
         &self,
         active_sessions: u64,
