@@ -102,10 +102,21 @@ jobs:
           CARGO_INCREMENTAL: 0
           RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
         env:
-          RUSTC_WRAPPER: ${{ steps.sccache-check.outputs.sccache_works == 'true' && 'sccache' || '' }}
+          RUSTC_WRAPPER: ""
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
