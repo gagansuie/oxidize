@@ -445,30 +445,43 @@ async fn ping_server(ipv4: Option<&str>, ipv6: Option<&str>) -> Option<u32> {
     // Try UDP ping first (more accurate for tunnel latency)
     // Prefer IPv6 over IPv4
     if let Some(ip6) = ipv6 {
-        if let Some(latency) = ping_udp(&format!("[{}]:4433", ip6)).await {
+        let addr = format!("[{}]:4433", ip6);
+        if let Some(latency) = ping_udp(&addr).await {
+            tracing::debug!("UDP ping to {} succeeded: {}ms", addr, latency);
             return Some(latency);
         }
+        tracing::debug!("UDP ping to {} failed, trying next", addr);
     }
 
     if let Some(ip4) = ipv4 {
-        if let Some(latency) = ping_udp(&format!("{}:4433", ip4)).await {
+        let addr = format!("{}:4433", ip4);
+        if let Some(latency) = ping_udp(&addr).await {
+            tracing::debug!("UDP ping to {} succeeded: {}ms", addr, latency);
             return Some(latency);
         }
+        tracing::debug!("UDP ping to {} failed, trying TCP fallback", addr);
     }
 
     // Fall back to TCP ping if UDP fails
     if let Some(ip6) = ipv6 {
-        if let Some(latency) = ping_tcp(&format!("[{}]:9090", ip6)).await {
+        let addr = format!("[{}]:9090", ip6);
+        if let Some(latency) = ping_tcp(&addr).await {
+            tracing::debug!("TCP ping to {} succeeded: {}ms", addr, latency);
             return Some(latency);
         }
+        tracing::debug!("TCP ping to {} failed", addr);
     }
 
     if let Some(ip4) = ipv4 {
-        if let Some(latency) = ping_tcp(&format!("{}:9090", ip4)).await {
+        let addr = format!("{}:9090", ip4);
+        if let Some(latency) = ping_tcp(&addr).await {
+            tracing::debug!("TCP ping to {} succeeded: {}ms", addr, latency);
             return Some(latency);
         }
+        tracing::debug!("TCP ping to {} failed", addr);
     }
 
+    tracing::warn!("All ping attempts failed for v4={:?} v6={:?}", ipv4, ipv6);
     None
 }
 
@@ -509,7 +522,9 @@ async fn ping_udp(addr: &str) -> Option<u32> {
     .await
     {
         Ok(Ok((len, _))) if len >= 4 && buf[..4] == PONG_MAGIC => {
-            Some(start.elapsed().as_millis() as u32)
+            // Use microseconds for precision, minimum 1ms
+            let micros = start.elapsed().as_micros();
+            Some(std::cmp::max(1, (micros / 1000) as u32))
         }
         _ => None,
     }
@@ -528,12 +543,17 @@ async fn ping_tcp(addr: &str) -> Option<u32> {
     )
     .await
     {
-        Ok(Ok(_)) => Some(start.elapsed().as_millis() as u32),
+        Ok(Ok(_)) => {
+            // Use microseconds for precision, minimum 1ms
+            let micros = start.elapsed().as_micros();
+            Some(std::cmp::max(1, (micros / 1000) as u32))
+        }
         Ok(Err(_)) => {
             // Connection refused but we got a response = valid RTT
-            let elapsed = start.elapsed().as_millis() as u32;
+            let micros = start.elapsed().as_micros();
+            let elapsed = (micros / 1000) as u32;
             if elapsed < 500 {
-                Some(elapsed)
+                Some(std::cmp::max(1, elapsed))
             } else {
                 None
             }
