@@ -4,7 +4,7 @@
 //! port to AF_XDP sockets for zero-copy processing.
 
 use std::ffi::CString;
-use std::io::{self, Error, ErrorKind};
+use std::io::{self, Error};
 use std::mem;
 use std::os::unix::io::RawFd;
 use std::ptr;
@@ -28,6 +28,7 @@ const BPF_PROG_TYPE_XDP: u32 = 6;
 const BPF_XDP: u32 = 37;
 
 // XDP flags
+#[allow(dead_code)]
 const XDP_FLAGS_UPDATE_IF_NOEXIST: u32 = 1 << 0;
 const XDP_FLAGS_SKB_MODE: u32 = 1 << 1;
 const XDP_FLAGS_DRV_MODE: u32 = 1 << 2;
@@ -35,8 +36,11 @@ const XDP_FLAGS_DRV_MODE: u32 = 1 << 2;
 // BPF instruction encoding
 const BPF_LD: u8 = 0x00;
 const BPF_LDX: u8 = 0x01;
+#[allow(dead_code)]
 const BPF_ST: u8 = 0x02;
+#[allow(dead_code)]
 const BPF_STX: u8 = 0x03;
+#[allow(dead_code)]
 const BPF_ALU: u8 = 0x04;
 const BPF_JMP: u8 = 0x05;
 const BPF_ALU64: u8 = 0x07;
@@ -47,20 +51,28 @@ const BPF_B: u8 = 0x10;
 const BPF_DW: u8 = 0x18;
 
 const BPF_IMM: u8 = 0x00;
+#[allow(dead_code)]
 const BPF_ABS: u8 = 0x20;
+#[allow(dead_code)]
 const BPF_IND: u8 = 0x40;
 const BPF_MEM: u8 = 0x60;
+#[allow(dead_code)]
 const BPF_ATOMIC: u8 = 0xc0;
 
+#[allow(dead_code)]
 const BPF_ADD: u8 = 0x00;
+#[allow(dead_code)]
 const BPF_SUB: u8 = 0x10;
+#[allow(dead_code)]
 const BPF_AND: u8 = 0x50;
+#[allow(dead_code)]
 const BPF_RSH: u8 = 0x70;
 const BPF_MOV: u8 = 0xb0;
 
 const BPF_K: u8 = 0x00;
 const BPF_X: u8 = 0x08;
 
+#[allow(dead_code)]
 const BPF_JA: u8 = 0x00;
 const BPF_JEQ: u8 = 0x10;
 const BPF_JNE: u8 = 0x50;
@@ -75,10 +87,14 @@ const BPF_FUNC_redirect_map: i32 = 51;
 const BPF_FUNC_xdp_adjust_meta: i32 = 54;
 
 // XDP actions
+#[allow(dead_code)]
 const XDP_ABORTED: i32 = 0;
+#[allow(dead_code)]
 const XDP_DROP: i32 = 1;
 const XDP_PASS: i32 = 2;
+#[allow(dead_code)]
 const XDP_TX: i32 = 3;
+#[allow(dead_code)]
 const XDP_REDIRECT: i32 = 4;
 
 /// BPF instruction
@@ -267,7 +283,7 @@ impl XdpProgram {
             return self.attach(true);
         }
 
-        Err(Error::new(ErrorKind::Other, "Failed to attach XDP program"))
+        Err(Error::other("Failed to attach XDP program"))
     }
 
     fn attach_netlink(&self, flags: u32) -> io::Result<()> {
@@ -708,7 +724,7 @@ impl XdpProgram {
             BpfInsn::new(BPF_JMP | BPF_JNE | BPF_K, 4, 0, 6, port_be),
             // REDIRECT (index 17):
             // 17-18: r1 = map_fd (BPF_LD_MAP_FD pseudo instruction)
-            BpfInsn::new(BPF_LD | BPF_DW | BPF_IMM, 1, 1, 0, xskmap_fd as i32),
+            BpfInsn::new(BPF_LD | BPF_DW | BPF_IMM, 1, 1, 0, xskmap_fd),
             BpfInsn::new(0, 0, 0, 0, 0), // 64-bit load continuation
             // 19: r2 = *(u32*)(r6 + 16) = ctx->rx_queue_index
             BpfInsn::new(BPF_LDX | BPF_W | BPF_MEM, 2, 6, 16, 0),
@@ -728,7 +744,7 @@ impl XdpProgram {
 
     fn get_ifindex(interface: &str) -> io::Result<u32> {
         let ifname = CString::new(interface)
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid interface name"))?;
+            .map_err(|_| Error::new(io::ErrorKind::InvalidInput, "Invalid interface name"))?;
         let idx = unsafe { libc::if_nametoindex(ifname.as_ptr()) };
         if idx == 0 {
             Err(Error::last_os_error())

@@ -765,8 +765,8 @@ fn run_platform_capture(
 
     // Add NFQUEUE rules with bypass (so traffic continues if queue isn't bound)
     let mut rules_added = true;
-    if config.capture_tcp {
-        if Command::new("iptables")
+    if config.capture_tcp
+        && Command::new("iptables")
             .args([
                 "-I",
                 "OUTPUT",
@@ -780,12 +780,11 @@ fn run_platform_capture(
             ])
             .output()
             .is_err()
-        {
-            rules_added = false;
-        }
+    {
+        rules_added = false;
     }
-    if config.capture_udp {
-        if Command::new("iptables")
+    if config.capture_udp
+        && Command::new("iptables")
             .args([
                 "-I",
                 "OUTPUT",
@@ -799,9 +798,8 @@ fn run_platform_capture(
             ])
             .output()
             .is_err()
-        {
-            rules_added = false;
-        }
+    {
+        rules_added = false;
     }
 
     if rules_added {
