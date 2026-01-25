@@ -681,6 +681,7 @@ impl OxTunnelServer {
         let mut poll_count = 0u64;
         loop {
             poll_count += 1;
+            #[allow(clippy::manual_is_multiple_of)]
             if poll_count % 10000 == 0 {
                 debug!("AF_XDP poll iteration {}", poll_count);
             }

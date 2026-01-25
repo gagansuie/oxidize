@@ -689,7 +689,8 @@ impl SharedForwarder {
                     self.stats
                         .bytes_forwarded
                         .fetch_add(n as u64, Ordering::Relaxed);
-                    if count.is_multiple_of(1000) {
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if count % 1000 == 0 {
                         info!(
                             "📤 Forwarded {} UDP packets (latest: {} bytes to {})",
                             count, n, dst_addr
