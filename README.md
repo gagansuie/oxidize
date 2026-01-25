@@ -9,7 +9,6 @@
 > 🔥 **0.2-1.0µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
-[![Release](https://github.com/gagansuie/oxidize/actions/workflows/release.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/release.yml)
 [![Downloads](https://img.shields.io/github/downloads/gagansuie/oxidize/total?logo=github&label=downloads)](https://github.com/gagansuie/oxidize/releases)
 [![codecov](https://codecov.io/gh/gagansuie/oxidize/graph/badge.svg)](https://codecov.io/gh/gagansuie/oxidize)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
