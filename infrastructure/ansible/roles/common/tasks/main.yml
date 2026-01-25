@@ -114,15 +114,44 @@
 # DDoS Protection - iptables rate limiting
 # ============================================================================
 
-- name: Copy iptables DDoS protection script
-  copy:
-    src: "{{ playbook_dir }}/../../scripts/iptables-ddos-protection.sh"
-    dest: /usr/local/bin/iptables-ddos-protection.sh
-    mode: '0755'
-  become: yes
-
-- name: Apply iptables DDoS protection rules
-  command: /usr/local/bin/iptables-ddos-protection.sh 4433 9090
+- name: Apply iptables DDoS protection rules inline
+  shell: |
+    set -e
+    TUNNEL_PORT=51820
+    METRICS_PORT=9090
+    echo "Applying iptables DDoS protection rules..."
+    
+    # Create chain if not exists
+    iptables -N OXIDIZE_RATELIMIT 2>/dev/null || true
+    iptables -F OXIDIZE_RATELIMIT
+    iptables -D INPUT -j OXIDIZE_RATELIMIT 2>/dev/null || true
+    
+    # Allow established
+    iptables -A OXIDIZE_RATELIMIT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # Rate limit new UDP connections (50/sec per IP)
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT -m state --state NEW \
+      -m hashlimit --hashlimit-name tunnel_conn --hashlimit-upto 50/sec \
+      --hashlimit-burst 100 --hashlimit-mode srcip -j ACCEPT
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT -m state --state NEW -j DROP
+    
+    # Rate limit UDP packets (2000/sec per IP)
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT \
+      -m hashlimit --hashlimit-name tunnel_pps --hashlimit-upto 2000/sec \
+      --hashlimit-burst 5000 --hashlimit-mode srcip -j ACCEPT
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT -j DROP
+    
+    # Metrics port limit
+    iptables -A OXIDIZE_RATELIMIT -p tcp --dport $METRICS_PORT -m connlimit --connlimit-above 10 -j DROP
+    iptables -A OXIDIZE_RATELIMIT -p tcp --dport $METRICS_PORT -j ACCEPT
+    iptables -A OXIDIZE_RATELIMIT -j RETURN
+    
+    # Insert chain
+    iptables -I INPUT 1 -j OXIDIZE_RATELIMIT
+    
+    echo "iptables DDoS protection applied"
+  args:
+    executable: /bin/bash
   become: yes
   register: iptables_result
   changed_when: true

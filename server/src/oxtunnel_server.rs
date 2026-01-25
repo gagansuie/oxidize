@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
-use oxidize_common::af_xdp::{XdpConfig, XdpSocket};
+use oxidize_common::af_xdp::{FlashSocket, XdpConfig};
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, CryptoEngine, HandshakeInit,
     HandshakeResponse, IpPool, PacketBatch, PacketHeader, TunnelBufferPool, TunnelSession,
@@ -607,39 +607,43 @@ impl OxTunnelServer {
         "eth0".to_string()
     }
 
-    /// Run with AF_XDP zero-copy I/O (Linux only, 10-25 Gbps)
+    /// Run with FLASH AF_XDP zero-copy I/O (Linux only, 18-25 Gbps)
+    /// FLASH = Fast Linked AF_XDP Sockets - multi-queue for linear scaling
     #[cfg(target_os = "linux")]
     async fn run_with_xdp(self, interface: String) -> Result<()> {
-        info!("🚀 Starting AF_XDP mode on interface: {}", interface);
+        info!("🚀 Starting FLASH AF_XDP mode on interface: {}", interface);
 
         let xdp_config = XdpConfig {
             interface: interface.clone(),
             queue_id: self.config.xdp_queue_id,
             quic_port: self.config.listen_addr.port(),
+            enable_flash: true,
+            num_queues: 0, // Auto-detect
             ..XdpConfig::high_throughput(&interface)
         };
 
-        let mut xdp_socket =
-            XdpSocket::new(xdp_config).context("Failed to create AF_XDP socket")?;
+        let mut flash_socket =
+            FlashSocket::new(xdp_config).context("Failed to create FLASH AF_XDP socket")?;
 
         info!(
-            "✅ AF_XDP socket bound to {}:{}",
-            interface, self.config.xdp_queue_id
+            "✅ FLASH AF_XDP ready on {} with {} queues",
+            interface,
+            flash_socket.num_queues()
         );
 
         // Spawn background tasks
         self.spawn_background_tasks();
 
         info!(
-            "OxTunnel server started with AF_XDP, server_id: {:?}",
+            "OxTunnel server started with FLASH AF_XDP, server_id: {:?}",
             &self.server_id[..8]
         );
 
-        // AF_XDP packet processing loop
+        // FLASH packet processing loop - receives from all queues
         loop {
-            // Poll for packets
-            if xdp_socket.poll(100) {
-                let packets = xdp_socket.recv(self.config.xdp_queue_id as usize);
+            // Poll for packets across all queues
+            if flash_socket.poll(100) {
+                let packets = flash_socket.recv(128); // FLASH batch size
 
                 // Collect frame addresses before processing
                 let addrs: Vec<u64> = packets.iter().map(|p| p.frame_addr).collect();
@@ -668,7 +672,7 @@ impl OxTunnelServer {
                 }
 
                 // Return frames to UMEM
-                xdp_socket.return_frames(&addrs);
+                flash_socket.return_frames(&addrs);
             }
 
             // Yield to allow other tasks to run

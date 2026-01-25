@@ -31,6 +31,10 @@ pub struct XdpConfig {
     pub quic_port: u16,
     /// Batch size for processing
     pub batch_size: usize,
+    /// FLASH: Number of queues for multi-queue mode (0 = auto-detect)
+    pub num_queues: u32,
+    /// FLASH: Enable linked sockets with shared UMEM
+    pub enable_flash: bool,
 }
 
 impl Default for XdpConfig {
@@ -50,6 +54,8 @@ impl Default for XdpConfig {
             busy_poll_budget: 64,
             quic_port: 4433,
             batch_size: 64,
+            num_queues: 0,      // 0 = auto-detect from NIC
+            enable_flash: true, // Enable FLASH by default
         }
     }
 }

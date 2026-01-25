@@ -1,6 +1,71 @@
 # ⚡ AF_XDP Zero-Copy Networking
 
-AF_XDP (Address Family XDP) provides **kernel-bypass zero-copy packet I/O** for maximum throughput on Linux servers. Oxidize uses AF_XDP as the default networking layer on Linux, achieving **10-25 Gbps** with sub-microsecond latency.
+AF_XDP (Address Family XDP) provides **kernel-bypass zero-copy packet I/O** for maximum throughput on Linux servers. Oxidize uses **FLASH (Fast Linked AF_XDP Sockets)** as the default networking layer on Linux, achieving **18-25 Gbps** with sub-microsecond latency.
+
+## FLASH: Fast Linked AF_XDP Sockets
+
+FLASH enables **multi-queue AF_XDP** for linear scaling across NIC hardware queues. Instead of a single socket bottlenecked on one queue, FLASH creates linked sockets sharing a single UMEM.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FLASH Multi-Queue Architecture                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   NIC with RSS                    FLASH Sockets                CPU Cores    │
+│  ┌─────────────┐                 ┌─────────────┐              ┌─────────┐  │
+│  │   Queue 0   │────────────────►│  Socket 0   │─────────────►│ Core 0  │  │
+│  │   Queue 1   │────────────────►│  Socket 1   │─────────────►│ Core 1  │  │
+│  │   Queue 2   │────────────────►│  Socket 2   │─────────────►│ Core 2  │  │
+│  │   Queue N   │────────────────►│  Socket N   │─────────────►│ Core N  │  │
+│  └─────────────┘                 └─────────────┘              └─────────┘  │
+│         │                               │                                   │
+│         │         ┌─────────────────────┘                                   │
+│         │         │                                                         │
+│         │    ┌────▼────┐                                                    │
+│         └───►│  UMEM   │◄─── Shared memory region (16-64 MB)               │
+│              └─────────┘                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### FLASH vs Single-Queue AF_XDP vs DPDK
+
+| Metric | Single AF_XDP | FLASH | DPDK |
+|--------|--------------|-------|------|
+| **Throughput** | 10-15 Gbps | **18-25 Gbps** | 25-100 Gbps |
+| **Latency** | <1µs | <1µs | <0.5µs |
+| **CPU Cores** | 1 | N (per queue) | N (dedicated) |
+| **Kernel bypass** | Partial | Partial | Full |
+| **Complexity** | Low | Medium | High |
+| **Driver changes** | None | None | Required |
+
+### FLASH Configuration
+
+```rust
+use oxidize_common::af_xdp::{FlashSocket, XdpConfig};
+
+let config = XdpConfig {
+    interface: "eth0".to_string(),
+    enable_flash: true,
+    num_queues: 0,  // 0 = auto-detect from /sys/class/net/<iface>/queues/
+    ..XdpConfig::high_throughput("eth0")
+};
+
+let mut flash = FlashSocket::new(config)?;
+println!("FLASH ready with {} queues", flash.num_queues());
+
+// Receive from all queues
+let packets = flash.recv(128);
+
+// Send (distributes across queues)
+flash.send(&[&packet1, &packet2]);
+```
+
+### Queue Auto-Detection
+
+FLASH automatically detects NIC queues via:
+1. `/sys/class/net/<iface>/queues/rx-*` directory count
+2. `ethtool -l <iface>` combined queue count
+3. Fallback to single queue if detection fails
 
 ## Architecture
 
