@@ -692,6 +692,11 @@ impl OxTunnelServer {
         info!("✅ XDP program loaded and attached to {}", interface);
         info!("🔥 FLASH AF_XDP ready - zero-copy packet processing enabled");
 
+        // CRITICAL: Populate fill ring BEFORE processing packets
+        // Without frames in the fill ring, XDP has nowhere to redirect packets
+        let initial_frames = flash_socket.populate_fill_rings();
+        info!("📦 Populated fill rings with {} frames", initial_frames);
+
         // Spawn background tasks
         self.spawn_background_tasks();
 
