@@ -683,9 +683,15 @@ impl OxTunnelServer {
         }
 
         // Register AF_XDP sockets in XSKMAP for each queue
-        for (queue_id, socket_fd) in flash_socket.socket_fds() {
-            if let Err(e) = xdp_prog.register_socket(queue_id, socket_fd) {
-                warn!("Failed to register socket for queue {}: {}", queue_id, e);
+        let socket_fds = flash_socket.socket_fds();
+        info!(
+            "📋 Registering {} AF_XDP sockets in XSKMAP",
+            socket_fds.len()
+        );
+        for (queue_id, socket_fd) in &socket_fds {
+            match xdp_prog.register_socket(*queue_id, *socket_fd) {
+                Ok(_) => info!("  ✅ Queue {} -> fd {}", queue_id, socket_fd),
+                Err(e) => warn!("  ❌ Queue {} failed: {}", queue_id, e),
             }
         }
 

@@ -699,7 +699,7 @@ impl XdpProgram {
         // REDIRECT (28-32):
         //   28-29: r1 = map_fd
         //   30: r2 = rx_queue_index
-        //   31: r3 = XDP_PASS
+        //   31: r3 = flags (must be 0 for redirect_map)
         //   32: call redirect_map
         //   33: exit
         //
@@ -774,8 +774,8 @@ impl XdpProgram {
             BpfInsn::new(0, 0, 0, 0, 0),
             // 30: r2 = rx_queue_index
             BpfInsn::new(BPF_LDX | BPF_W | BPF_MEM, 2, 6, 16, 0),
-            // 31: r3 = XDP_PASS
-            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, 3, 0, 0, XDP_PASS),
+            // 31: r3 = flags (must be 0 for redirect_map)
+            BpfInsn::new(BPF_ALU64 | BPF_MOV | BPF_K, 3, 0, 0, 0),
             // 32: call redirect_map
             BpfInsn::new(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_redirect_map),
             // 33: exit

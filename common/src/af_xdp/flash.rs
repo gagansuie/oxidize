@@ -112,8 +112,8 @@ impl FlashSocket {
                 .count();
 
             if rx_queues > 0 {
-                // Cap at reasonable number (don't use all queues)
-                let queues = std::cmp::min(rx_queues, 8) as u32;
+                // Use all RX queues - must match NIC for RSS to work
+                let queues = rx_queues as u32;
                 info!("FLASH: Detected {} RX queues on {}", queues, interface);
                 return Ok(queues);
             }
