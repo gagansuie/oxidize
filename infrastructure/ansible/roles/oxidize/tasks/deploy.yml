@@ -32,12 +32,14 @@
     port: 4433
     timeout: 30
     state: started
+  become: no
   ignore_errors: yes
 
 - name: Health check
   command: ss -ulnp
   register: health_check
   changed_when: false
+  become: no
 
 - name: Verify service is listening
   assert:
@@ -45,6 +47,7 @@
       - "'4433' in health_check.stdout"
     fail_msg: "Service is not listening on port 4433"
     success_msg: "Service is healthy and listening on port 4433"
+  become: no
 
 - name: Clean old backups (keep last 3)
   shell: ls -t /opt/oxidize/backup/oxidize-server.* | tail -n +4 | xargs rm -f
