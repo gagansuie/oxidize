@@ -808,6 +808,12 @@ fn run_platform_capture(
         warn!("⚠️ Failed to add some iptables rules - packet capture may not work");
     }
 
+    for ip in &config.exclude_ips {
+        let _ = Command::new("iptables")
+            .args(["-I", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
+            .output();
+    }
+
     let mut queue = match Queue::open() {
         Ok(q) => q,
         Err(e) => {
@@ -872,6 +878,12 @@ fn cleanup_iptables_rules(config: &CaptureConfig) {
 
     info!("📦 Cleaning up iptables NFQUEUE rules...");
     let queue_num = config.queue_num.to_string();
+
+    for ip in &config.exclude_ips {
+        let _ = Command::new("iptables")
+            .args(["-D", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
+            .output();
+    }
 
     if config.capture_tcp {
         let _ = Command::new("iptables")

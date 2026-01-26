@@ -602,7 +602,6 @@ impl OxTunnelServer {
 
     /// Run the OxTunnel server
     pub async fn run(self) -> Result<()> {
-        // Linux: Always use AF_XDP/FLASH for maximum performance
         #[cfg(target_os = "linux")]
         {
             let interface = self
@@ -613,7 +612,6 @@ impl OxTunnelServer {
             self.run_with_xdp(interface).await
         }
 
-        // Non-Linux: Standard UDP path
         #[cfg(not(target_os = "linux"))]
         self.run_standard().await
     }
