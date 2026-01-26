@@ -1,15 +1,19 @@
 //! OxTunnel Server
 //!
 //! High-performance server endpoint for all clients (desktop, mobile, CLI) using the
-//! OxTunnel Protocol. Cross-platform, replaces WireGuard with faster, lighter implementation.
+//! OxTunnel Protocol with AF_XDP/FLASH zero-copy I/O on Linux bare metal.
+//!
+//! Transport: AF_XDP/FLASH (Linux) with kernel bypass for 18-25 Gbps throughput,
+//! or standard UDP sockets on other platforms.
 
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use oxidize_common::af_xdp::{FlashSocket, XdpConfig};
+use oxidize_common::auth::ServerAuthConfig;
 use oxidize_common::oxtunnel_protocol::{
-    control, decode_packet, encode_packet, flags, generate_id, CryptoEngine, HandshakeInit,
-    HandshakeResponse, IpPool, PacketBatch, PacketHeader, TunnelBufferPool, TunnelSession,
-    TunnelStats, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
+    control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
+    CryptoEngine, HandshakeInit, HandshakeResponse, IpPool, PacketBatch, PacketHeader,
+    TunnelBufferPool, TunnelSession, TunnelStats, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -547,18 +551,38 @@ pub struct OxTunnelServer {
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
     #[allow(clippy::type_complexity)]
     response_rx: Arc<RwLock<mpsc::Receiver<(Vec<u8>, SocketAddr)>>>,
+    /// Authentication configuration (None = allow unauthenticated connections)
+    auth_config: Option<Arc<ServerAuthConfig>>,
 }
 
 impl OxTunnelServer {
     /// Create a new OxTunnel server
     pub async fn new(config: OxTunnelServerConfig) -> Result<Self> {
+        Self::with_auth(config, None).await
+    }
+
+    /// Create a new OxTunnel server with authentication
+    pub async fn with_auth(
+        config: OxTunnelServerConfig,
+        auth_config: Option<ServerAuthConfig>,
+    ) -> Result<Self> {
         let socket = UdpSocket::bind(config.listen_addr)
             .await
             .context("Failed to bind OxTunnel socket")?;
 
         let (response_tx, response_rx) = mpsc::channel(4096);
 
-        info!("OxTunnel server listening on {}", config.listen_addr);
+        if auth_config.is_some() {
+            info!(
+                "OxTunnel server listening on {} (authentication ENABLED)",
+                config.listen_addr
+            );
+        } else {
+            info!(
+                "OxTunnel server listening on {} (authentication DISABLED)",
+                config.listen_addr
+            );
+        }
 
         Ok(Self {
             server_id: generate_id(),
@@ -571,6 +595,7 @@ impl OxTunnelServer {
             socket: Arc::new(socket),
             response_tx,
             response_rx: Arc::new(RwLock::new(response_rx)),
+            auth_config: auth_config.map(Arc::new),
             config,
         })
     }
@@ -978,6 +1003,7 @@ impl OxTunnelServer {
             rate_limiter: Arc::clone(&self.rate_limiter),
             response_tx: self.response_tx.clone(),
             enable_encryption: self.config.enable_encryption,
+            auth_config: self.auth_config.clone(),
         }
     }
 
@@ -1066,6 +1092,7 @@ struct MobileServerHandler {
     rate_limiter: Arc<RateLimiter>,
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
     enable_encryption: bool,
+    auth_config: Option<Arc<ServerAuthConfig>>,
 }
 
 impl MobileServerHandler {
@@ -1104,7 +1131,23 @@ impl MobileServerHandler {
         }
 
         match payload[0] {
-            control::HANDSHAKE_INIT => self.handle_handshake_init(payload, peer_addr).await,
+            control::HANDSHAKE_INIT_AUTH => {
+                self.handle_authenticated_handshake(payload, peer_addr)
+                    .await
+            }
+            control::HANDSHAKE_INIT => {
+                // Legacy unauthenticated handshake - reject if auth is required
+                if self.auth_config.is_some() {
+                    warn!(
+                        "Rejecting unauthenticated handshake from {} - auth required",
+                        peer_addr
+                    );
+                    self.send_auth_rejected(peer_addr, "Authentication required")
+                        .await;
+                    return Err(anyhow::anyhow!("Authentication required"));
+                }
+                self.handle_handshake_init(payload, peer_addr).await
+            }
             control::KEEPALIVE => {
                 debug!("Received keepalive from {}", peer_addr);
                 // Update session activity
@@ -1220,6 +1263,116 @@ impl MobileServerHandler {
         );
 
         Ok(())
+    }
+
+    async fn handle_authenticated_handshake(
+        &self,
+        payload: &[u8],
+        peer_addr: SocketAddr,
+    ) -> Result<()> {
+        // Rate limit connection attempts
+        if !self.rate_limiter.check_connection(peer_addr.ip()).await {
+            warn!("Connection rate limited for {}", peer_addr);
+            return Err(anyhow::anyhow!("Rate limited"));
+        }
+
+        let init = AuthenticatedHandshakeInit::decode(payload)
+            .ok_or_else(|| anyhow::anyhow!("Invalid authenticated handshake"))?;
+
+        info!(
+            "Authenticated handshake from {}, client_id: {:?}",
+            peer_addr,
+            &init.client_id[..8]
+        );
+
+        // Verify authentication if configured
+        if let Some(ref auth_config) = self.auth_config {
+            let auth_payload = init.to_auth_payload();
+            if let Err(e) = auth_payload.verify(auth_config) {
+                warn!("Authentication failed for {}: {:?}", peer_addr, e);
+                self.send_auth_rejected(peer_addr, &format!("{:?}", e))
+                    .await;
+                return Err(anyhow::anyhow!("Authentication failed: {:?}", e));
+            }
+            info!("✅ Authentication verified for {}", peer_addr);
+        }
+
+        // Track session for this IP
+        self.rate_limiter.add_session(peer_addr.ip()).await;
+
+        // Allocate IP for this client
+        let assigned_ip = self.ip_pool.allocate(init.client_id).await;
+
+        // Generate encryption key if both sides support it
+        let encryption_key = if self.enable_encryption && init.encryption_supported {
+            Some(CryptoEngine::generate_key())
+        } else {
+            None
+        };
+
+        // Create session
+        let session = TunnelSession::new(peer_addr, assigned_ip, encryption_key.as_ref());
+
+        // Store session
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(init.client_id, session);
+        }
+
+        self.stats.active_sessions.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .handshakes_completed
+            .fetch_add(1, Ordering::Relaxed);
+
+        // Send response
+        let response = HandshakeResponse {
+            server_id: self.server_id,
+            assigned_ip,
+            encryption_key,
+        };
+
+        let mut payload_buf = [0u8; 70];
+        let payload_len = response.encode(&mut payload_buf);
+
+        let mut response_buf = [0u8; 128];
+        let total_len = encode_packet(
+            &mut response_buf,
+            &payload_buf[..payload_len],
+            0,
+            flags::CONTROL,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("Encode error: {}", e))?;
+
+        self.response_tx
+            .send((response_buf[..total_len].to_vec(), peer_addr))
+            .await
+            .context("Failed to queue handshake response")?;
+
+        info!(
+            "✅ Authenticated handshake completed with {}, assigned IP: {}, encryption: {}",
+            peer_addr,
+            assigned_ip,
+            encryption_key.is_some()
+        );
+
+        Ok(())
+    }
+
+    async fn send_auth_rejected(&self, peer_addr: SocketAddr, _reason: &str) {
+        let mut response_buf = [0u8; 64];
+        if let Ok(len) = encode_packet(
+            &mut response_buf,
+            &[control::AUTH_REJECTED],
+            0,
+            flags::CONTROL,
+            None,
+        ) {
+            let _ = self
+                .response_tx
+                .send((response_buf[..len].to_vec(), peer_addr))
+                .await;
+        }
     }
 
     async fn handle_data_packet(

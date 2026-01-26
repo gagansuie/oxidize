@@ -1,4 +1,4 @@
-//! Multi-path QUIC Support
+//! Multi-path Transport Support
 //!
 //! Enables simultaneous use of multiple network paths (WiFi + LTE)
 //! for bandwidth aggregation and seamless failover.

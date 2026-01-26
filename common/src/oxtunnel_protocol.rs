@@ -8,7 +8,7 @@
 //! - **Batch processing**: Process multiple packets per syscall
 //! - **Zero-copy buffers**: Pre-allocated buffer pools (no heap allocation per packet)
 //! - **Simpler handshake**: Faster connection establishment
-//! - **Native QUIC support**: Can tunnel over existing QUIC connections
+//! - **Native AF_XDP support**: Zero-copy kernel bypass on Linux
 //!
 //! ## Security Features:
 //! - **Replay attack protection**: Sliding window sequence number validation
@@ -295,6 +295,8 @@ pub mod control {
     pub const ACK: u8 = 0x05;
     pub const CONFIG_UPDATE: u8 = 0x06;
     pub const KEY_ROTATION: u8 = 0x07;
+    pub const HANDSHAKE_INIT_AUTH: u8 = 0x08; // Authenticated handshake
+    pub const AUTH_REJECTED: u8 = 0x09; // Authentication failed
 }
 
 // ============================================================================
@@ -1302,7 +1304,7 @@ impl IpPool {
 // Handshake Protocol
 // ============================================================================
 
-/// Handshake initiation message
+/// Handshake initiation message (legacy, unauthenticated)
 #[derive(Debug)]
 pub struct HandshakeInit {
     pub client_id: [u8; 32],
@@ -1334,6 +1336,84 @@ impl HandshakeInit {
             ]),
             encryption_supported: buf[41] != 0,
         })
+    }
+}
+
+/// Authenticated handshake initiation message
+/// Includes Ed25519 app signature + API key authentication
+#[derive(Debug)]
+pub struct AuthenticatedHandshakeInit {
+    pub client_id: [u8; 32],
+    pub timestamp: u64,
+    pub encryption_supported: bool,
+    /// Ed25519 signature of (client_id || timestamp) - proves official app
+    pub app_signature: [u8; 64],
+    /// API key (32 bytes) - identifies user/subscription
+    pub api_key: [u8; 32],
+    /// HMAC-SHA256 of (client_id || timestamp || api_key) - proves API key ownership
+    pub api_signature: [u8; 32],
+}
+
+impl AuthenticatedHandshakeInit {
+    /// Encoded size: 1 (type) + 32 (client_id) + 8 (timestamp) + 1 (encryption) + 64 (app_sig) + 32 (api_key) + 32 (api_sig) = 170 bytes
+    pub const ENCODED_SIZE: usize = 170;
+
+    pub fn encode(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < Self::ENCODED_SIZE {
+            return 0;
+        }
+        buf[0] = control::HANDSHAKE_INIT_AUTH;
+        buf[1..33].copy_from_slice(&self.client_id);
+        buf[33..41].copy_from_slice(&self.timestamp.to_le_bytes());
+        buf[41] = if self.encryption_supported { 1 } else { 0 };
+        buf[42..106].copy_from_slice(&self.app_signature);
+        buf[106..138].copy_from_slice(&self.api_key);
+        buf[138..170].copy_from_slice(&self.api_signature);
+        Self::ENCODED_SIZE
+    }
+
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::ENCODED_SIZE || buf[0] != control::HANDSHAKE_INIT_AUTH {
+            return None;
+        }
+
+        let mut client_id = [0u8; 32];
+        client_id.copy_from_slice(&buf[1..33]);
+
+        let timestamp = u64::from_le_bytes([
+            buf[33], buf[34], buf[35], buf[36], buf[37], buf[38], buf[39], buf[40],
+        ]);
+
+        let encryption_supported = buf[41] != 0;
+
+        let mut app_signature = [0u8; 64];
+        app_signature.copy_from_slice(&buf[42..106]);
+
+        let mut api_key = [0u8; 32];
+        api_key.copy_from_slice(&buf[106..138]);
+
+        let mut api_signature = [0u8; 32];
+        api_signature.copy_from_slice(&buf[138..170]);
+
+        Some(Self {
+            client_id,
+            timestamp,
+            encryption_supported,
+            app_signature,
+            api_key,
+            api_signature,
+        })
+    }
+
+    /// Convert to AuthPayload for verification
+    pub fn to_auth_payload(&self) -> crate::auth::AuthPayload {
+        crate::auth::AuthPayload {
+            client_id: self.client_id,
+            timestamp: self.timestamp,
+            app_signature: self.app_signature,
+            api_key: self.api_key,
+            api_signature: self.api_signature,
+        }
     }
 }
 

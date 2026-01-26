@@ -37,6 +37,10 @@ candle-nn = { workspace = true, optional = true }
 safetensors = { workspace = true, optional = true }
 rand = { workspace = true }
 hf-hub = { workspace = true, optional = true }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 

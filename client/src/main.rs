@@ -12,6 +12,7 @@ mod dns_cache;
 
 use client::{ClientConfig as OxTunnelConfig, RelayClient};
 use config::ClientConfig;
+use oxidize_common::auth::ClientAuthConfig;
 
 #[derive(Parser, Debug)]
 #[command(name = "oxidize-client")]
@@ -68,6 +69,14 @@ async fn main() -> Result<()> {
         }
     );
 
+    // Load auth config from environment if available
+    let auth_config = ClientAuthConfig::from_env();
+    if auth_config.is_some() {
+        info!("🔐 Authentication ENABLED (loaded from environment)");
+    } else {
+        warn!("⚠️  Authentication DISABLED - set OXIDIZE_APP_SIGNING_KEY, OXIDIZE_API_KEY, OXIDIZE_API_SECRET");
+    }
+
     // Create OxTunnel client config
     let oxtunnel_config = OxTunnelConfig {
         server_addr,
@@ -76,6 +85,9 @@ async fn main() -> Result<()> {
         enable_compression: config.enable_compression,
         keepalive_interval: Duration::from_secs(config.keepalive_interval),
         connection_timeout: Duration::from_secs(30),
+        #[cfg(target_os = "linux")]
+        xdp_interface: None, // Auto-detect or use optimized UDP
+        auth_config,
     };
 
     let client = RelayClient::new(oxtunnel_config).await?;

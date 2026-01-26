@@ -7,15 +7,15 @@ Oxidize is designed to be resilient against attacks. This guide covers security 
 **Yes, Oxidize provides full VPN-like protection:**
 
 | Capability | Traditional VPN | Oxidize |
-|------------|-----------------|---------|
-| Encrypts traffic | ✅ TLS/IPsec | ✅ TLS 1.3 + QUIC |
+|------------|-----------------|--------|
+| Encrypts traffic | ✅ TLS/IPsec | ✅ ChaCha20-Poly1305 |
 | Hides client IP | ✅ | ✅ (relay IP visible to destinations) |
 | Tunnels traffic | ✅ All system traffic | ✅ All TCP + UDP via NFQUEUE |
 | Kernel integration | ✅ tun/tap device | ✅ NFQUEUE (userspace, no kernel modules) |
-| Protocol | OpenVPN/WireGuard/IPsec | QUIC |
+| Protocol | OpenVPN/WireGuard/IPsec | AF_XDP/UDP |
 | DDoS Protection | ✅ | ✅ (attackers see relay IP, not yours) |
 
-**How it works:** The daemon uses NFQUEUE to intercept **all TCP and UDP traffic** at the kernel level, then tunnels it through an encrypted QUIC connection to the relay server. Destinations see the relay server's IP, not yours.
+**How it works:** The daemon uses NFQUEUE to intercept **all TCP and UDP traffic** at the kernel level, then tunnels it through an encrypted AF_XDP/UDP connection to the relay server. Destinations see the relay server's IP, not yours.
 
 > **Note:** The daemon is required for connection. Without it, no traffic is tunneled and your IP is not protected.
 
@@ -23,24 +23,24 @@ Oxidize is designed to be resilient against attacks. This guide covers security 
 
 ## Built-in Security Features
 
-### 1. QUIC Protocol Advantages
+### 1. Protocol Advantages
 
-QUIC provides inherent DDoS resistance:
+OxTunnel protocol provides DDoS resistance:
 
 ```
-✅ Connection ID (not IP-based) - harder to spoof
-✅ Encrypted headers - can't inspect/modify
+✅ Session tokens - harder to spoof
+✅ Encrypted payloads - can't inspect/modify  
 ✅ Stateless retry tokens - SYN flood protection
 ✅ Address validation - prevents IP spoofing
-✅ Amplification limits - small responses to unverified clients
+✅ Rate limiting - small responses to unverified clients
 ```
 
-### 2. TLS 1.3 Encryption
+### 2. ChaCha20-Poly1305 Encryption
 
-All traffic is encrypted with TLS 1.3:
-- Perfect forward secrecy
-- No downgrade attacks
-- Fast handshakes (0-RTT resumption when enabled)
+All traffic is encrypted with ChaCha20-Poly1305 AEAD:
+- Perfect forward secrecy via session keys
+- Authenticated encryption (AEAD)
+- Hardware-accelerated on modern CPUs
 
 ### 3. 0-RTT Session Resumption
 
@@ -56,10 +56,10 @@ max_early_data_size = 16384  # 16KB
 ```
 
 **Anti-replay protection (built-in):**
-- **rustls anti-replay** - Tracks recently used tickets with time-based window
+- **Ticket tracking** - Tracks recently used tickets with time-based window
 - **Single-use session tickets** - Each ticket can only be used once
 - **Time-bounded validity** - Tickets expire after a short window
-- **QUIC connection ID binding** - 0-RTT data bound to specific connection
+- **Session binding** - 0-RTT data bound to specific session
 
 **Benefits of 0-RTT:**
 - **Instant reconnects** - No handshake latency on reconnection

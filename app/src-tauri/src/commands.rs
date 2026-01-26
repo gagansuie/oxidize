@@ -60,6 +60,12 @@ pub struct AppConfig {
     pub auto_connect: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthCredentials {
+    pub api_key: String,
+    pub api_secret: String,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -74,6 +80,8 @@ pub struct AppState {
     pub region_server_index: Mutex<std::collections::HashMap<String, usize>>,
     /// Cached region server lists: region_id -> Vec<server_id>
     pub region_servers: Mutex<std::collections::HashMap<String, Vec<String>>>,
+    /// Device authentication credentials (fetched from API)
+    pub auth_credentials: Mutex<Option<DeviceAuthCredentials>>,
 }
 
 const METRICS_PORT: u16 = 9090; // TCP port for latency measurement
@@ -912,6 +920,116 @@ pub async fn set_config(
     Ok(())
 }
 
+/// Generate a persistent device ID using machine-specific info
+fn get_device_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    // Use hostname as part of device ID
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        hostname.hash(&mut hasher);
+    }
+
+    // Use username
+    if let Ok(user) = std::env::var("USER").or_else(|_| std::env::var("USERNAME")) {
+        user.hash(&mut hasher);
+    }
+
+    // Use home directory path
+    if let Some(home) = dirs::home_dir() {
+        home.to_string_lossy().hash(&mut hasher);
+    }
+
+    // Add OS info
+    std::env::consts::OS.hash(&mut hasher);
+    std::env::consts::ARCH.hash(&mut hasher);
+
+    format!("oxidize-{:016x}", hasher.finish())
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthResponse {
+    api_key: String,
+    api_secret: String,
+    #[serde(default)]
+    created: bool,
+}
+
+/// Authenticate device and get API credentials
+/// This is called on app startup to ensure the device has valid credentials
+#[tauri::command]
+pub async fn authenticate_device(
+    state: tauri::State<'_, AppState>,
+) -> Result<DeviceAuthCredentials, String> {
+    // Check if we already have cached credentials
+    {
+        let creds = state.auth_credentials.lock().await;
+        if let Some(ref c) = *creds {
+            tracing::info!("Using cached device credentials");
+            return Ok(c.clone());
+        }
+    }
+
+    let device_id = get_device_id();
+    tracing::info!("Authenticating device: {}", device_id);
+
+    let url = format!("{}/api/auth/device", API_BASE_URL);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "device_id": device_id,
+            "platform": std::env::consts::OS,
+            "app_version": env!("CARGO_PKG_VERSION")
+        }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to authenticate device: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Device auth failed ({}): {}", status, text));
+    }
+
+    let auth_response: DeviceAuthResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse auth response: {}", e))?;
+
+    let credentials = DeviceAuthCredentials {
+        api_key: auth_response.api_key,
+        api_secret: auth_response.api_secret,
+    };
+
+    // Cache credentials
+    {
+        let mut creds = state.auth_credentials.lock().await;
+        *creds = Some(credentials.clone());
+    }
+
+    if auth_response.created {
+        tracing::info!("New device registered successfully");
+    } else {
+        tracing::info!("Device authenticated successfully");
+    }
+
+    Ok(credentials)
+}
+
+/// Get current auth credentials (if authenticated)
+#[tauri::command]
+pub async fn get_auth_credentials(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<DeviceAuthCredentials>, String> {
+    let creds = state.auth_credentials.lock().await;
+    Ok(creds.clone())
+}
+
 #[cfg(all(unix, not(target_os = "android"), not(target_os = "ios")))]
 const DAEMON_SOCKET: &str = "/var/run/oxidize/daemon.sock";
 #[cfg(windows)]
@@ -1378,4 +1496,90 @@ pub async fn uninstall_daemon() -> Result<String, String> {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub async fn uninstall_daemon() -> Result<String, String> {
     Err("Daemon uninstallation not available on mobile.".to_string())
+}
+
+// ============================================================================
+// Mobile-specific commands (no daemon required)
+// ============================================================================
+
+/// Mobile connect - uses direct relay-client instead of daemon
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn mobile_connect(
+    server_id: String,
+    server_address: String,
+    mobile_state: tauri::State<'_, crate::mobile_client::MobileClientState>,
+) -> Result<ConnectionStatus, String> {
+    use std::net::SocketAddr;
+
+    tracing::info!("Mobile connecting to {} ({})", server_id, server_address);
+
+    let addr: SocketAddr = format!("{}:4433", server_address)
+        .parse()
+        .map_err(|e| format!("Invalid server address: {}", e))?;
+
+    mobile_state.connect(server_id.clone(), addr).await?;
+
+    crate::set_connected(true);
+
+    let stats = mobile_state.get_stats();
+
+    Ok(ConnectionStatus {
+        connected: true,
+        server: Some(server_id),
+        ip: None, // Will be assigned by server
+        original_ip: None,
+        uptime_secs: stats.uptime_secs,
+        bytes_sent: stats.bytes_sent,
+        bytes_received: stats.bytes_received,
+        packets_sent: stats.packets_sent,
+        packets_received: stats.packets_received,
+        compression_saved: 0,
+        latency_ms: None,
+        fec_recovered: 0,
+        fec_sent: 0,
+        loss_predictions: 0,
+        congestion_adjustments: 0,
+        path_switches: 0,
+    })
+}
+
+/// Mobile disconnect
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn mobile_disconnect(
+    mobile_state: tauri::State<'_, crate::mobile_client::MobileClientState>,
+) -> Result<String, String> {
+    mobile_state.disconnect().await?;
+    crate::set_connected(false);
+    Ok("Disconnected".to_string())
+}
+
+/// Mobile get status
+#[tauri::command]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn mobile_get_status(
+    mobile_state: tauri::State<'_, crate::mobile_client::MobileClientState>,
+) -> Result<ConnectionStatus, String> {
+    let stats = mobile_state.get_stats();
+    let server_id = mobile_state.server_id().await;
+
+    Ok(ConnectionStatus {
+        connected: stats.connected,
+        server: server_id,
+        ip: None,
+        original_ip: None,
+        uptime_secs: stats.uptime_secs,
+        bytes_sent: stats.bytes_sent,
+        bytes_received: stats.bytes_received,
+        packets_sent: stats.packets_sent,
+        packets_received: stats.packets_received,
+        compression_saved: 0,
+        latency_ms: None,
+        fec_recovered: 0,
+        fec_sent: 0,
+        loss_predictions: 0,
+        congestion_adjustments: 0,
+        path_switches: 0,
+    })
 }

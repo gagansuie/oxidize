@@ -31,16 +31,16 @@ Your ISP's routing is suboptimal:
 
 ```
 ❌ Direct (Your ISP):     You → Congested ISP routes → Destination     (120ms, 2% loss)
-✅ Via Oxidize:           You → QUIC tunnel → Premium edge → Destination (80ms, 0% loss)
+✅ Via Oxidize:           You → OxTunnel → Premium edge → Destination   (80ms, 0% loss)
 ```
 
 ## Architecture
 
 ```
 ┌─────────────────┐         ┌─────────────────┐
-│   Your Device   │  QUIC   │  Relay Server   │
+│   Your Device   │ OxTunnel│  Relay Server   │
 │  oxidize-client │ ──────► │  oxidize-server │ ──────► Internet
-└─────────────────┘         └─────────────────┘
+└─────────────────┘  (UDP)  └─────────────────┘
         ↑                           ↑
    TCP + UDP                   TCP + UDP
    captured                    forwarded
@@ -59,7 +59,7 @@ Your ISP's routing is suboptimal:
 ## Features
 
 ### 🚀 Core Performance
-- **QUIC Protocol** - 0-RTT resumption, stream multiplexing, fast loss recovery
+- **OxTunnel Protocol** - Custom UDP protocol with ChaCha20-Poly1305 encryption, LZ4 compression, adaptive FEC
 - **Smart Routing** - Bypass congested ISP routes with optimized paths
 - **Adaptive FEC** - Dynamic Reed-Solomon redundancy based on packet loss rate
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
@@ -70,7 +70,7 @@ Your ISP's routing is suboptimal:
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
 - **Ring Buffers** - Lock-free packet queuing
-- **Connection Pooling** - QUIC connection reuse, 10x handshake reduction
+- **Connection Pooling** - Session reuse, 10x handshake reduction
 - **SIMD Acceleration** - AVX-512/AVX2/NEON optimized operations (2x faster with AVX-512)
 - **Lock-Free Streams** - No mutex contention on hot path
 - **ACK Batching** - Configurable batching reduces round-trips
@@ -85,19 +85,19 @@ Custom high-performance tunnel protocol replacing WireGuard with **unified archi
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    OxTunnel Protocol (TCP + UDP)                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Linux:   App → NFQUEUE → OxTunnel → QUIC Datagrams → Server       │
-│  macOS:   App → PF/Utun → OxTunnel → QUIC Datagrams → Server       │
-│  Windows: App → WinDivert → OxTunnel → QUIC Datagrams → Server     │
-│  Android: App → VpnService → OxTunnel → QUIC Datagrams → Server    │
-│  iOS:     App → NEPacketTunnel → OxTunnel → QUIC Datagrams → Server│
+│  Linux:   App → NFQUEUE → OxTunnel → AF_XDP/UDP → Server           │
+│  macOS:   App → PF/Utun → OxTunnel → UDP Datagrams → Server        │
+│  Windows: App → WinDivert → OxTunnel → UDP Datagrams → Server      │
+│  Android: App → VpnService → OxTunnel → UDP Datagrams → Server     │
+│  iOS:     App → NEPacketTunnel → OxTunnel → UDP Datagrams → Server │
 └─────────────────────────────────────────────────────────────────────┘
-         All platforms: TCP + UDP tunneled, UDP fallback when QUIC blocked
+    Server: AF_XDP/FLASH zero-copy (18-25 Gbps) on Linux bare metal
 ```
 
-- **Same protocol everywhere** - All platforms use identical OxTunnel encapsulation
+- **Same protocol everywhere** - All platforms use identical OxTunnel encapsulation over UDP
 - **Platform-specific capture** - NFQUEUE (Linux), PF (macOS), WinDivert (Windows), VpnService (Android)
-- **QUIC primary transport** - Encrypted, multiplexed, 0-RTT for all platforms
-- **UDP fallback** - For networks that block QUIC
+- **AF_XDP/FLASH Server** - Kernel bypass on Linux bare metal, 18-25 Gbps zero-copy throughput
+- **0-RTT reconnection** - Instant session resumption via cached keys
 - **V2 Variable Headers** - 2-7 byte headers (avg 4B) with varint encoding, 55% smaller than V1
 - **64 packets/batch** - Reduces syscalls by 64x
 - **Zero-copy buffer pools** - 128 pre-allocated buffers, no heap allocation per packet
@@ -105,17 +105,17 @@ Custom high-performance tunnel protocol replacing WireGuard with **unified archi
 | Feature | WireGuard | OxTunnel |
 |---------|-----------|----------|
 | Header size | 32+ bytes | **4 bytes avg** (V2) |
-| Encryption | Double (WG + TLS) | Single (QUIC TLS 1.3) |
+| Encryption | Double (WG + TLS) | Single (ChaCha20-Poly1305) |
 | Handshake | Multi-round Noise | Single round-trip |
 | Buffer allocation | Per-packet malloc | Zero-copy pool |
 | Batch processing | No | 64 packets/batch |
 | Packet capture | TUN device | NFQUEUE/PF/WinDivert |
-| Transport | UDP only | QUIC + UDP fallback |
+| Transport | UDP only | OxTunnel (UDP + AF_XDP kernel bypass) |
 | Cross-platform | Separate implementations | Unified protocol |
 
 ### 🎭 MASQUE-Inspired Architecture
 Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-warp-with-a-masque/):
-- **QUIC Datagrams** - Real-time traffic (gaming/VoIP) bypasses stream ordering, eliminating head-of-line blocking
+- **UDP Datagrams** - Real-time traffic (gaming/VoIP) bypasses stream ordering, eliminating head-of-line blocking
 - **0-RTT Session Resumption** - Instant reconnects via cached session tickets
 - **Connection Migration** - Seamless WiFi ↔ cellular transitions without reconnecting
 - **Dual-Path Architecture** - Streams for reliable traffic, datagrams for latency-sensitive traffic
@@ -130,7 +130,7 @@ Inspired by [Cloudflare's MASQUE/WARP](https://blog.cloudflare.com/zero-trust-wa
 - **ECN (Explicit Congestion Notification)** - RFC 9000 compliant
   - DCTCP-style congestion response
   - Better signals than loss-based detection
-- **Multipath QUIC** - Aggregate bandwidth across paths
+- **Multipath UDP** - Aggregate bandwidth across paths
   - Adaptive path selection (RTT + loss + bandwidth scoring)
   - Seamless failover on path failure
   - Round-robin, weighted, or lowest-RTT scheduling
@@ -153,7 +153,7 @@ Adaptive online learning with <10µs inference:
 
 See [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) and [ADVANCED_ML.md](docs/ADVANCED_ML.md) for details.
 
-**Auto-detected:** Gaming ports (Xbox, PlayStation, Steam, VoIP) use QUIC datagrams. Streaming services (Netflix, Disney+, etc.) are bypassed for your residential IP.
+**Auto-detected:** Gaming ports (Xbox, PlayStation, Steam, VoIP) use UDP datagrams. Streaming services (Netflix, Disney+, etc.) are bypassed for your residential IP.
 
 ### 📦 Compression
 - **LZ4** - Multi-threaded, ~80 MB/s (single), ~4 GB/s (parallel)
@@ -267,7 +267,7 @@ cd app && npx tauri ios build       # iOS
 
 ## Daemon
 
-OxTunnel captures TCP+UDP via NFQUEUE and tunnels over QUIC datagrams.
+OxTunnel captures TCP+UDP via NFQUEUE and tunnels over encrypted UDP datagrams.
 
 ```bash
 sudo systemctl status oxidize-daemon   # Check status

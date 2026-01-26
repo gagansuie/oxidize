@@ -230,7 +230,7 @@ impl ConnectionInfo {
 }
 
 /// Stream framer for handling partial reads and multiple messages per buffer.
-/// Critical for correct QUIC stream handling where reads may be fragmented.
+/// Critical for correct stream handling where reads may be fragmented.
 #[derive(Debug)]
 pub struct MessageFramer {
     buffer: BytesMut,

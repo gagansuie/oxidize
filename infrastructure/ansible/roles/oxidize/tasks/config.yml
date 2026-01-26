@@ -47,3 +47,14 @@
     mode: '0644'
   become: yes
   when: not config_exists.stat.exists
+
+- name: Deploy authentication secrets
+  template:
+    src: auth.env.j2
+    dest: /etc/oxidize/auth.env
+    mode: '0600'
+    owner: root
+    group: root
+  become: yes
+  when: oxidize_app_public_key is defined and oxidize_api_secret is defined
+  notify: restart oxidize

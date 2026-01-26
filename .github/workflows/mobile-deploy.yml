@@ -29,6 +29,8 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_ERRORS: "1"
   RUSTC_WRAPPER: "sccache"
+  # Authentication - app signing key embedded at build time
+  OXIDIZE_APP_SIGNING_KEY: ${{ secrets.OXIDIZE_APP_SIGNING_KEY }}
 
 jobs:
   deploy-android:
@@ -97,6 +99,8 @@ jobs:
 
       - name: Build Android AAB
         working-directory: app
+        env:
+          OXIDIZE_APP_SIGNING_KEY: ${{ secrets.OXIDIZE_APP_SIGNING_KEY }}
         run: bunx tauri android build --target aarch64
 
       - name: Setup Google Play credentials
@@ -190,6 +194,8 @@ jobs:
 
       - name: Build and sign iOS app
         working-directory: app
+        env:
+          OXIDIZE_APP_SIGNING_KEY: ${{ secrets.OXIDIZE_APP_SIGNING_KEY }}
         run: fastlane ios build
 
       - name: Deploy to TestFlight

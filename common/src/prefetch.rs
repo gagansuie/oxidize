@@ -25,7 +25,7 @@ pub struct PrefetchHint {
 pub enum PrefetchResource {
     /// DNS resolution
     Dns(String),
-    /// TCP/QUIC connection
+    /// TCP/UDP connection
     Connection(String, u16), // host, port
     /// HTTP resource
     Http(String), // URL

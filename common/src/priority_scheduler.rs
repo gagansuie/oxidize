@@ -1,6 +1,6 @@
 //! HTTP/3 Priority Scheduler
 //!
-//! Implements smart stream scheduling for QUIC/HTTP3 connections.
+//! Implements smart packet scheduling for network connections.
 //! Prioritizes real-time traffic (gaming, VoIP) over bulk transfers.
 
 use std::cmp::Ordering;

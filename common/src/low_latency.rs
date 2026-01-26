@@ -1,9 +1,10 @@
 //! Low-Latency Optimizations for Gaming/VoIP
 //!
-//! Target: <5ms end-to-end latency for users near edge nodes.
+//! Target: <1ms end-to-end latency with AF_XDP/FLASH.
 //!
 //! Optimizations:
-//! - QUIC datagrams (no ordering overhead)
+//! - AF_XDP kernel bypass (zero-copy, no syscall per packet)
+//! - UDP datagrams (no ordering overhead)
 //! - Skip compression for tiny packets
 //! - Microsecond-level instrumentation
 //! - Hot path optimizations
@@ -33,7 +34,7 @@ impl LatencyBudget {
             target_us: 5000,
             network_us: 2000,      // ~200km to edge
             processing_us: 500,    // Hot path
-            serialization_us: 100, // QUIC datagrams
+            serialization_us: 100, // UDP datagrams
             compression_us: 50,    // LZ4 is fast
         }
     }
@@ -226,7 +227,7 @@ impl LatencyTimer {
 /// Gaming packet optimization settings
 #[derive(Debug, Clone)]
 pub struct GamingOptimizations {
-    /// Use QUIC datagrams instead of streams
+    /// Use UDP datagrams for real-time traffic
     pub use_datagrams: bool,
     /// Skip compression for packets under this size
     pub compression_threshold: usize,

@@ -56,14 +56,13 @@ rohc_max_size = 1500
 
 # Enable 0-RTT session resumption for instant reconnects
 # Saves ~1 RTT on reconnection by caching session tickets
-# Anti-replay protection is built-in via rustls + QUIC connection ID binding
+# Anti-replay protection is built-in via session state
 enable_0rtt = true
 
 # Path to session ticket cache file
 session_cache_path = "/tmp/oxidize-session-cache"
 
-# Enable QUIC datagrams for real-time traffic (gaming/VoIP)
-# Datagrams bypass stream ordering = no head-of-line blocking
+# Enable UDP datagrams for real-time traffic (gaming/VoIP)
 # Result: Ultra-low latency for gaming/VoIP traffic
 enable_datagrams = true
 
@@ -93,3 +92,15 @@ realtime_ports = [
     # Streaming
     1935,                     # RTMP
 ]
+
+# ============================================
+# Authentication
+# ============================================
+# Authentication keys are embedded in the app binary during build.
+# Users receive their API key from the Oxidize website after signup.
+#
+# For CLI usage, you can specify credentials here:
+# api_key = "YOUR_API_KEY_HEX_HERE"
+# api_secret = "YOUR_API_SECRET_HEX_HERE"
+#
+# The app signing key is embedded at compile time and not configurable.

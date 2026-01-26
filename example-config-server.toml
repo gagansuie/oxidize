@@ -66,17 +66,38 @@ rohc_max_size = 1500
 
 # === 0-RTT Session Resumption ===
 # Enable 0-RTT for faster client reconnects (saves ~1 RTT)
-# Anti-replay protection is built-in via rustls + QUIC connection ID binding
+# Anti-replay protection is built-in via session state
 enable_0rtt = true
 
 # Maximum early data size in bytes for 0-RTT
-# QUIC requires either 0 (disabled) or 4294967295 (u32::MAX)
+# Maximum size: 4294967295 (u32::MAX)
 max_early_data_size = 4294967295
 
 # === AI/Heuristic Engine ===
 # Enable AI-powered compression decisions using ML models
 # When disabled, uses simple threshold-based compression
 enable_ai_engine = true
+
+# ============================================
+# Authentication (REQUIRED for production)
+# ============================================
+# Generate keys with: oxidize-keygen --generate-all
+# The app public key verifies that connections come from official Oxidize apps
+# The API secret validates user API keys issued by your backend
+
+# Enable authentication (reject unauthenticated connections)
+# enable_auth = true
+
+# Ed25519 public key for app signature verification (64 hex chars)
+# This is the PUBLIC key - safe to store in config
+# app_public_key = "YOUR_APP_PUBLIC_KEY_HEX_HERE"
+
+# Secret for validating API key HMACs (64 hex chars)
+# Keep this secret! Only on server, never in client apps
+# api_secret = "YOUR_API_SECRET_HEX_HERE"
+
+# Maximum timestamp age in seconds (replay protection)
+# auth_timestamp_max_age = 300
 
 # ============================================
 # Performance Optimizations (Always Enabled)

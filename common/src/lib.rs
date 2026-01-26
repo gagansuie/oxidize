@@ -1,6 +1,9 @@
 // ============================================================================
-// OXIDIZE - High Performance QUIC Relay with AF_XDP Support
+// OXIDIZE - High Performance Relay with AF_XDP/FLASH Zero-Copy I/O
 // ============================================================================
+
+// Authentication
+pub mod auth;
 
 // Core performance modules
 pub mod adaptive_dict;
@@ -27,11 +30,15 @@ pub mod prefetch;
 pub mod priority_scheduler;
 pub mod traffic_classifier;
 
-// OxTunnel protocol (runs over QUIC)
+// OxTunnel protocol (runs over AF_XDP/UDP)
 pub mod oxtunnel_client;
 pub mod oxtunnel_protocol;
 pub mod rohc;
+pub mod ultra_transport;
 pub mod varint_header;
+
+// Platform-specific optimized transport
+pub mod platform_transport;
 
 // Mesh and caching
 pub mod edge_cache;

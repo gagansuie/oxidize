@@ -1,14 +1,18 @@
 //! OxTunnel Client
 //!
-//! High-performance tunnel client using the OxTunnel protocol over raw UDP.
-//! Replaces the previous QUIC-based implementation with a lighter-weight transport.
+//! High-performance tunnel client using OxTunnel protocol.
+//!
+//! ## Transport Layer
+//! - **Linux**: AF_XDP/FLASH kernel bypass for maximum performance
+//! - **Other platforms**: Optimized UDP with batching
 
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use oxidize_common::auth::ClientAuthConfig;
 use oxidize_common::oxtunnel_protocol::{
-    control, decode_packet, encode_packet, flags, generate_id, CryptoEngine, HandshakeInit,
-    HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
+    control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
+    CryptoEngine, HandshakeInit, HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
 };
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -18,8 +22,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+use oxidize_common::af_xdp::XdpConfig;
+
 /// Client configuration
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ClientConfig {
     pub server_addr: SocketAddr,
     pub enable_encryption: bool,
@@ -27,6 +35,11 @@ pub struct ClientConfig {
     pub enable_compression: bool,
     pub keepalive_interval: Duration,
     pub connection_timeout: Duration,
+    /// Network interface for AF_XDP (Linux only, requires root)
+    #[cfg(target_os = "linux")]
+    pub xdp_interface: Option<String>,
+    /// Authentication configuration (None = unauthenticated mode)
+    pub auth_config: Option<ClientAuthConfig>,
 }
 
 impl Default for ClientConfig {
@@ -38,6 +51,9 @@ impl Default for ClientConfig {
             enable_compression: true,
             keepalive_interval: Duration::from_secs(25),
             connection_timeout: Duration::from_secs(30),
+            #[cfg(target_os = "linux")]
+            xdp_interface: None, // Auto-detect or use UDP fallback
+            auth_config: None, // Unauthenticated by default
         }
     }
 }
@@ -82,28 +98,13 @@ pub struct RelayClient {
 
 impl RelayClient {
     /// Create a new OxTunnel client
-    /// Binds to appropriate address family based on server address (IPv6 preferred)
     pub async fn new(config: ClientConfig) -> Result<Self> {
-        // Bind to same address family as server for proper connectivity
-        let bind_addr = if config.server_addr.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        };
-        let socket = UdpSocket::bind(bind_addr).await?;
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.connect(&config.server_addr).await?;
 
         let client_id = generate_id();
 
-        info!(
-            "OxTunnel client created ({}), server: {}",
-            if config.server_addr.is_ipv6() {
-                "IPv6"
-            } else {
-                "IPv4"
-            },
-            config.server_addr
-        );
+        info!("OxTunnel client created, server: {}", config.server_addr);
 
         Ok(Self {
             config,
@@ -118,35 +119,63 @@ impl RelayClient {
     }
 
     /// Connect to the server (perform handshake)
+    /// Uses authenticated handshake if auth_config is set, otherwise legacy handshake
     pub async fn connect(&self) -> Result<()> {
         info!("Connecting to OxTunnel server...");
 
-        // Build handshake init packet
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        let handshake = HandshakeInit {
-            client_id: self.client_id,
-            timestamp,
-            encryption_supported: self.config.enable_encryption,
-        };
-
-        // Encode handshake payload
-        let mut payload_buf = [0u8; 64];
-        let payload_len = handshake.encode(&mut payload_buf);
-
-        // Wrap in OxTunnel packet with CONTROL flag
+        // Build handshake packet - authenticated or legacy
         let mut packet_buf = [0u8; MAX_PACKET_SIZE];
-        let packet_len = encode_packet(
-            &mut packet_buf,
-            &payload_buf[..payload_len],
-            0,
-            flags::CONTROL,
-            None,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to encode handshake: {}", e))?;
+        let packet_len = if let Some(ref auth_config) = self.config.auth_config {
+            // Authenticated handshake
+            info!("Using authenticated handshake");
+            let auth_payload =
+                oxidize_common::auth::AuthPayload::create(self.client_id, auth_config);
+
+            let handshake = AuthenticatedHandshakeInit {
+                client_id: self.client_id,
+                timestamp,
+                encryption_supported: self.config.enable_encryption,
+                app_signature: auth_payload.app_signature,
+                api_key: auth_payload.api_key,
+                api_signature: auth_payload.api_signature,
+            };
+
+            let mut payload_buf = [0u8; AuthenticatedHandshakeInit::ENCODED_SIZE + 16];
+            let payload_len = handshake.encode(&mut payload_buf);
+
+            encode_packet(
+                &mut packet_buf,
+                &payload_buf[..payload_len],
+                0,
+                flags::CONTROL,
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to encode authenticated handshake: {}", e))?
+        } else {
+            // Legacy unauthenticated handshake
+            let handshake = HandshakeInit {
+                client_id: self.client_id,
+                timestamp,
+                encryption_supported: self.config.enable_encryption,
+            };
+
+            let mut payload_buf = [0u8; 64];
+            let payload_len = handshake.encode(&mut payload_buf);
+
+            encode_packet(
+                &mut packet_buf,
+                &payload_buf[..payload_len],
+                0,
+                flags::CONTROL,
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to encode handshake: {}", e))?
+        };
 
         // Send handshake
         self.socket.send(&packet_buf[..packet_len]).await?;
@@ -164,6 +193,11 @@ impl RelayClient {
         // Decode OxTunnel packet first
         let (_header, payload) = decode_packet(&mut response_buf[..recv_len], None)
             .map_err(|e| anyhow::anyhow!("Failed to decode response packet: {}", e))?;
+
+        // Check for auth rejection
+        if !payload.is_empty() && payload[0] == control::AUTH_REJECTED {
+            return Err(anyhow::anyhow!("Authentication rejected by server"));
+        }
 
         // Parse handshake response from payload
         let response = HandshakeResponse::decode(payload)

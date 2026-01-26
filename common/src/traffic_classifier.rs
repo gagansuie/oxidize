@@ -1,7 +1,7 @@
 //! Traffic Classification and Smart Routing
 //!
 //! Classifies network traffic to determine optimal routing:
-//! - Gaming traffic → Through QUIC tunnel (low latency)
+//! - Gaming traffic → Through tunnel (low latency)
 //! - Streaming traffic → Direct/bypass (user's residential IP)
 //! - General traffic → Through tunnel (privacy)
 

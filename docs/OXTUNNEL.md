@@ -2,7 +2,7 @@
 
 OxTunnel is Oxidize's **unified cross-platform** tunnel protocol for desktop and mobile connectivity. It replaces WireGuard with a lighter, faster implementation optimized for modern networks and works seamlessly across all platforms.
 
-> **Full Traffic Support**: OxTunnel tunnels **both TCP and UDP** traffic through QUIC, ensuring all your network activity benefits from Oxidize's optimizations.
+> **Full Traffic Support**: OxTunnel tunnels **both TCP and UDP** traffic through AF_XDP/UDP, ensuring all your network activity benefits from Oxidize's optimizations.
 
 ## Unified Architecture
 
@@ -31,9 +31,9 @@ OxTunnel is Oxidize's **unified cross-platform** tunnel protocol for desktop and
 │         ┌────────────┼────────────┐                                     │
 │         │            │            │                                     │
 │  ┌──────▼──────┐ ┌───▼───┐ ┌──────▼──────┐                             │
-│  │    QUIC     │ │  UDP  │ │    QUIC     │                             │
-│  │  Datagrams  │ │Fallback│ │  Datagrams  │                             │
-│  │  (Primary)  │ │       │ │  (Primary)  │                             │
+│  │   AF_XDP    │ │  UDP  │ │    UDP      │                             │
+│  │  (Linux)    │ │(Other)│ │  (Mobile)   │                             │
+│  │  Zero-Copy  │ │       │ │             │                             │
 │  └──────┬──────┘ └───┬───┘ └──────┬──────┘                             │
 │         │            │            │                                     │
 │         └────────────┴────────────┘                                     │
@@ -48,8 +48,8 @@ OxTunnel is Oxidize's **unified cross-platform** tunnel protocol for desktop and
 
 **Key Benefits:**
 - **Same protocol** on desktop, Android, and iOS
-- **QUIC primary** for all platforms (encrypted, multiplexed, 0-RTT)
-- **UDP fallback** for networks that block QUIC
+- **AF_XDP primary** on Linux for kernel bypass (18-25 Gbps)
+- **Optimized UDP** for macOS/Windows/mobile
 - **Single server** handles all client types
 
 ## Why OxTunnel?
@@ -218,7 +218,7 @@ The OxTunnel implementation includes several low-level optimizations:
 - **ROHC header compression** - 44% size reduction for small UDP/VoIP packets
 
 ### No Double Work
-- **QUIC + OxTunnel** - When using QUIC transport (primary), OxTunnel encryption is disabled since QUIC already encrypts
+- **AF_XDP + OxTunnel** - Zero-copy packet processing with kernel bypass
 - **Smart compression** - AI engine skips compression for already-compressed or encrypted payloads
 
 ## Mobile Optimizations
@@ -244,14 +244,14 @@ OxTunnel is specifically optimized for mobile:
 
 | Platform | Capture | Protocols | Transport | Status |
 |----------|---------|-----------|-----------|--------|
-| Linux (server) | - | TCP + UDP + ICMP | QUIC/UDP | ✅ Full support |
-| Linux (client) | NFQUEUE | TCP + UDP + ICMP | QUIC | ✅ Full support |
-| macOS | PF/Utun | TCP + UDP + ICMP | QUIC | ✅ Full support |
-| Windows | WinDivert | TCP + UDP + ICMP | QUIC | ✅ Full support |
-| Android | VpnService | TCP + UDP + ICMP | QUIC/UDP | ✅ Full support |
-| iOS | NEPacketTunnel | TCP + UDP + ICMP | QUIC/UDP | ✅ Full support |
+| Linux (server) | - | TCP + UDP + ICMP | AF_XDP | ✅ Full support |
+| Linux (client) | NFQUEUE | TCP + UDP + ICMP | AF_XDP/UDP | ✅ Full support |
+| macOS | PF/Utun | TCP + UDP + ICMP | Optimized UDP | ✅ Full support |
+| Windows | WinDivert | TCP + UDP + ICMP | Optimized UDP | ✅ Full support |
+| Android | VpnService | TCP + UDP + ICMP | UDP | ✅ Full support |
+| iOS | NEPacketTunnel | TCP + UDP + ICMP | UDP | ✅ Full support |
 
-**All platforms use the same OxTunnel protocol** with platform-specific packet capture and unified QUIC transport.
+**All platforms use the same OxTunnel protocol** with platform-specific packet capture and optimized transport.
 
 ## ICMP (Ping) Support
 
@@ -273,9 +273,9 @@ sudo setcap cap_net_raw+ep /path/to/oxidize-server
 
 The server creates raw ICMP sockets and tracks Echo Request/Reply pairs using (id, seq, dst_ip) as keys for proper response routing back to clients.
 
-## TCP over QUIC Architecture
+## TCP Tunneling Architecture
 
-OxTunnel tunnels TCP traffic through QUIC datagrams with connection pooling on the server:
+OxTunnel tunnels TCP traffic through UDP datagrams with connection pooling on the server:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -284,7 +284,7 @@ OxTunnel tunnels TCP traffic through QUIC datagrams with connection pooling on t
 │                                                                     │
 │  Client Side:                                                       │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
-│  │   App    │───►│ NFQUEUE  │───►│  Client  │───►│   QUIC   │     │
+│  │   App    │───►│ NFQUEUE  │───►│  Client  │───►│   UDP    │     │
 │  │ (TCP/UDP)│    │ Capture  │    │ Batching │    │ Datagram │     │
 │  └──────────┘    └──────────┘    └──────────┘    └────┬─────┘     │
 │                                                       │            │
@@ -311,14 +311,14 @@ OxTunnel tunnels TCP traffic through QUIC datagrams with connection pooling on t
 | DATA | Forward payload | TCP payload extracted and sent to destination |
 | FIN/RST | Close connection | Connection removed from pool |
 
-### Benefits of TCP over QUIC
+### Benefits of TCP Tunneling
 
 | Benefit | Description |
 |---------|-------------|
-| **Multiplexing** | Multiple TCP flows share single QUIC connection |
+| **Multiplexing** | Multiple TCP flows share single UDP connection |
 | **0-RTT** | Instant reconnection with session resumption |
-| **Encryption** | All traffic encrypted by QUIC TLS 1.3 |
-| **Loss Recovery** | QUIC's superior loss recovery benefits TCP traffic |
+| **Encryption** | All traffic encrypted by ChaCha20-Poly1305 |
+| **Adaptive FEC** | ML-driven forward error correction for loss recovery |
 | **Connection Migration** | TCP flows survive network changes (WiFi→LTE) |
 
 ## Security Considerations
@@ -353,56 +353,64 @@ let server = OxTunnelServer::new(config).await?;
 server.run().await?;
 ```
 
-### Client (Desktop - QUIC + NFQUEUE)
+### Client (Desktop - AF_XDP/UDP + NFQUEUE)
 
 ```rust
-use oxidize_common::unified_transport::{UnifiedTransportConfig, TransportType};
+use relay_client::client::{RelayClient, ClientConfig};
 
-// Desktop uses QUIC transport with NFQUEUE packet capture
-let config = UnifiedTransportConfig::desktop("<server_ip>:4433".parse()?);
-// Packets captured via NFQUEUE are batched and sent over QUIC datagrams
+// Desktop uses AF_XDP (Linux) or optimized UDP with NFQUEUE packet capture
+let config = ClientConfig {
+    server_addr: "<server_ip>:4433".parse()?,
+    enable_encryption: true,
+    enable_compression: true,
+    #[cfg(target_os = "linux")]
+    xdp_interface: Some("eth0".to_string()), // AF_XDP on Linux
+    ..Default::default()
+};
+let client = RelayClient::new(config).await?;
 ```
 
-### Client (Mobile - QUIC + VpnService)
+### Client (Mobile - UDP + VpnService)
 
 ```rust
-use oxidize_common::unified_transport::{UnifiedTransportConfig, TransportType};
+use relay_client::client::{RelayClient, ClientConfig};
 
-// Mobile uses same QUIC transport with VpnService/NEPacketTunnel capture
-let config = UnifiedTransportConfig::mobile("<server_ip>:4433".parse()?);
+// Mobile uses optimized UDP with VpnService/NEPacketTunnel capture
+let config = ClientConfig {
+    server_addr: "<server_ip>:4433".parse()?,
+    enable_encryption: true,
+    enable_compression: true,
+    ..Default::default()
+};
 // Same OxTunnel protocol, platform-specific packet capture
 ```
 
 ### Transport Configuration
 
 ```rust
-use oxidize_common::unified_transport::{UnifiedTransportConfig, TransportType};
+use oxidize_common::platform_transport::{PlatformTransport, TransportConfig};
 
-// QUIC (primary - encrypted, multiplexed)
-let quic_config = UnifiedTransportConfig {
-    transport: TransportType::Quic,
-    enable_oxtunnel_encryption: false,  // QUIC already encrypts
+// Platform-optimized transport (auto-detects best option)
+let config = TransportConfig {
+    bind_addr: "0.0.0.0:0".parse()?,
     enable_batching: true,
     max_batch_size: 64,
-    ..Default::default()
+    socket_buffer_size: 2 * 1024 * 1024, // 2MB
 };
 
-// UDP fallback (when QUIC is blocked)
-let udp_config = UnifiedTransportConfig {
-    transport: TransportType::Udp,
-    enable_oxtunnel_encryption: true,   // Need encryption without QUIC
-    enable_batching: true,
-    max_batch_size: 32,
-    ..Default::default()
-};
+let transport = PlatformTransport::new(config)?;
+println!("Using: {}", PlatformTransport::platform_name());
+// Linux: "Linux (sendmmsg)" or AF_XDP
+// macOS: "macOS (kqueue)"
+// Windows: "Windows (IOCP)"
 ```
 
 ## Future Roadmap
 
-- [x] **QUIC transport** - Unified QUIC for all platforms ✅
+- [x] **AF_XDP transport** - Kernel bypass for Linux (18-25 Gbps) ✅
 - [x] **Unified protocol** - Same OxTunnel on desktop and mobile ✅
-- [x] **AF_XDP acceleration** - Kernel bypass for 10-25 Gbps (bare metal) ✅
-- [x] **0-RTT resumption** - Instant reconnects with session tickets + anti-replay protection ✅
+- [x] **Platform-optimized UDP** - kqueue (macOS), IOCP (Windows) ✅
+- [x] **0-RTT resumption** - Instant reconnects with session tickets ✅
 - [x] **Multi-path support** - Aggregate WiFi + LTE ✅
 - [x] **Hardware crypto** - AES-NI/ARMv8 via ring crate ✅
 

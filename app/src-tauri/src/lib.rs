@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(mobile)]
 use tauri::Manager;
+
+#[cfg(mobile)]
+mod mobile_client;
 #[cfg(desktop)]
 use tauri::{
     menu::{Menu, MenuItem},
@@ -149,6 +152,8 @@ pub fn run() {
             commands::daemon_get_status,
             commands::install_daemon,
             commands::uninstall_daemon,
+            commands::authenticate_device,
+            commands::get_auth_credentials,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

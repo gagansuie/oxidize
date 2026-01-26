@@ -25,6 +25,9 @@ Thumbs.db
 *.crt
 production.toml
 
+# Authentication keys (NEVER commit these)
+/auth-keys/
+
 # Enterprise (private)
 /enterprise/
 

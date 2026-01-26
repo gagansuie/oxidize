@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+use oxidize_common::auth::ServerAuthConfig;
 use relay_server::config::Config;
 use relay_server::graceful::{setup_signal_handlers, ShutdownCoordinator};
 use relay_server::oxtunnel_server::{
@@ -49,6 +50,10 @@ struct Args {
 
     #[arg(long)]
     endpoint: Option<String>,
+
+    /// Enable authentication (requires OXIDIZE_APP_PUBLIC_KEY and OXIDIZE_API_SECRET env vars)
+    #[arg(long)]
+    enable_auth: bool,
 }
 
 #[tokio::main]
@@ -119,7 +124,24 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let server = match OxTunnelServer::new(server_config).await {
+    // Load auth config if enabled
+    let auth_config = if args.enable_auth {
+        match ServerAuthConfig::from_env() {
+            Some(config) => {
+                info!("🔐 Authentication ENABLED (loaded from environment)");
+                Some(config)
+            }
+            None => {
+                error!("❌ FATAL: --enable-auth requires OXIDIZE_APP_PUBLIC_KEY and OXIDIZE_API_SECRET env vars");
+                return Err(anyhow::anyhow!("Missing auth environment variables"));
+            }
+        }
+    } else {
+        warn!("⚠️  Authentication DISABLED - server accepts all connections");
+        None
+    };
+
+    let server = match OxTunnelServer::with_auth(server_config, auth_config).await {
         Ok(s) => s,
         Err(e) => {
             error!("❌ FATAL: Failed to initialize OxTunnel server: {}", e);

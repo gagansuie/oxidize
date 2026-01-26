@@ -1,0 +1,7 @@
+---
+- name: restart oxidize
+  systemd:
+    name: oxidize
+    state: restarted
+    daemon_reload: yes
+  become: yes

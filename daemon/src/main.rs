@@ -274,6 +274,25 @@ async fn handle_connect(
         .output();
 
     // STEP 2: Create OxTunnel client
+    // On Linux, use AF_XDP/FLASH for maximum performance (requires root)
+    #[cfg(target_os = "linux")]
+    let xdp_interface = if nix::unistd::geteuid().is_root() {
+        // Auto-detect default interface for AF_XDP
+        match detect_default_interface() {
+            Some(iface) => {
+                info!("🚀 AF_XDP/FLASH enabled on interface: {}", iface);
+                Some(iface)
+            }
+            None => {
+                warn!("Could not detect interface, falling back to UDP");
+                None
+            }
+        }
+    } else {
+        warn!("Not running as root, AF_XDP disabled (using UDP)");
+        None
+    };
+
     let oxtunnel_config = relay_client::client::ClientConfig {
         server_addr,
         enable_encryption: true,
@@ -281,6 +300,9 @@ async fn handle_connect(
         enable_compression: true,
         keepalive_interval: std::time::Duration::from_secs(25),
         connection_timeout: std::time::Duration::from_secs(30),
+        #[cfg(target_os = "linux")]
+        xdp_interface,
+        auth_config: None,
     };
 
     let client = match RelayClient::new(oxtunnel_config).await {
@@ -555,4 +577,29 @@ async fn handle_windows_client(
     }
 
     Ok(())
+}
+
+/// Detect default network interface for AF_XDP (Linux only)
+#[cfg(target_os = "linux")]
+fn detect_default_interface() -> Option<String> {
+    // Read default route to find interface
+    if let Ok(content) = std::fs::read_to_string("/proc/net/route") {
+        for line in content.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 2 && fields[1] == "00000000" {
+                // Default route (destination 0.0.0.0)
+                return Some(fields[0].to_string());
+            }
+        }
+    }
+
+    // Fallback: try common interface names
+    for iface in &["eth0", "ens3", "enp0s3", "eno1"] {
+        let path = format!("/sys/class/net/{}", iface);
+        if std::path::Path::new(&path).exists() {
+            return Some(iface.to_string());
+        }
+    }
+
+    None
 }

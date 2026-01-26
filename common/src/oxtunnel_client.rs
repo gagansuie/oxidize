@@ -1,7 +1,7 @@
 //! OxTunnel Client Integration
 //!
 //! Provides packet batching, optional encryption, and OxTunnel encapsulation
-//! for the daemon's NFQUEUE pipeline. Works with both QUIC transport and raw UDP.
+//! for the daemon's NFQUEUE pipeline. Works with AF_XDP and optimized UDP.
 //!
 //! ## Performance Optimizations:
 //! - **Adaptive batch timeout**: Adjusts based on traffic rate (500µs-2000µs)
