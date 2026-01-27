@@ -27,10 +27,27 @@ use tracing::{debug, info, warn};
 #[allow(unused_imports)]
 use oxidize_common::af_xdp::XdpConfig;
 
+/// Transport mode for tunnel connection
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TransportMode {
+    /// UDP only (default, fastest)
+    Udp,
+    /// TCP fallback for restrictive networks
+    Tcp,
+    /// Auto-detect: try UDP first, fall back to TCP if blocked
+    #[default]
+    Auto,
+}
+
 /// Client configuration
 #[derive(Clone)]
 pub struct ClientConfig {
+    /// Server address for UDP (default port 51820)
     pub server_addr: SocketAddr,
+    /// TCP fallback server address (default port 51821)
+    pub tcp_fallback_addr: Option<SocketAddr>,
+    /// Transport mode selection
+    pub transport_mode: TransportMode,
     pub enable_encryption: bool,
     pub encryption_key: Option<[u8; 32]>,
     pub enable_compression: bool,
@@ -45,9 +62,12 @@ pub struct ClientConfig {
 
 impl Default for ClientConfig {
     fn default() -> Self {
-        let server_addr = "127.0.0.1:51820".parse().unwrap();
+        let server_addr: SocketAddr = "127.0.0.1:51820".parse().unwrap();
         Self {
             server_addr,
+            // TCP fallback on port 51821 (same host)
+            tcp_fallback_addr: Some(SocketAddr::new(server_addr.ip(), 51821)),
+            transport_mode: TransportMode::Auto,
             enable_encryption: true,
             encryption_key: None,
             enable_compression: true,
@@ -106,12 +126,31 @@ pub struct RelayClient {
 impl RelayClient {
     /// Create a new OxTunnel client
     pub async fn new(config: ClientConfig) -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        // Bind to appropriate address based on server address type (IPv4 or IPv6)
+        let bind_addr = if config.server_addr.is_ipv6() {
+            "[::]:0" // IPv6 any address
+        } else {
+            "0.0.0.0:0" // IPv4 any address
+        };
+
+        let socket = UdpSocket::bind(bind_addr).await?;
         socket.connect(&config.server_addr).await?;
 
         let client_id = generate_id();
 
-        info!("OxTunnel client created, server: {}", config.server_addr);
+        let addr_type = if config.server_addr.is_ipv6() {
+            "IPv6"
+        } else {
+            "IPv4"
+        };
+        info!(
+            "🌐 OxTunnel client created ({} mode), server: {}",
+            addr_type, config.server_addr
+        );
+
+        if let Some(ref tcp_addr) = config.tcp_fallback_addr {
+            info!("🔄 TCP fallback available: {}", tcp_addr);
+        }
 
         Ok(Self {
             config,

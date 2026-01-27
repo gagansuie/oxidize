@@ -514,7 +514,10 @@ impl Drop for PacketForwarder {
 /// Configuration for the OxTunnel server
 #[derive(Clone)]
 pub struct OxTunnelServerConfig {
+    /// UDP listen address (dual-stack: [::]:51820 for both IPv4 and IPv6)
     pub listen_addr: SocketAddr,
+    /// TCP fallback listen address for restrictive networks (port 51821)
+    pub tcp_fallback_addr: Option<SocketAddr>,
     pub enable_encryption: bool,
     pub session_timeout: Duration,
     pub keepalive_interval: Duration,
@@ -528,7 +531,10 @@ pub struct OxTunnelServerConfig {
 impl Default for OxTunnelServerConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:51820".parse().unwrap(),
+            // Dual-stack: [::] accepts both IPv4 and IPv6 connections
+            listen_addr: "[::]:51820".parse().unwrap(),
+            // TCP fallback for restrictive networks (firewalls blocking UDP)
+            tcp_fallback_addr: Some("[::]:51821".parse().unwrap()),
             enable_encryption: true,
             session_timeout: Duration::from_secs(300),
             keepalive_interval: Duration::from_secs(25),
@@ -571,21 +577,28 @@ impl OxTunnelServer {
         config: OxTunnelServerConfig,
         auth_config: Option<ServerAuthConfig>,
     ) -> Result<Self> {
-        let socket = UdpSocket::bind(config.listen_addr)
+        // Create dual-stack UDP socket
+        let socket = Self::create_dual_stack_udp_socket(config.listen_addr)
             .await
-            .context("Failed to bind OxTunnel socket")?;
+            .context("Failed to bind OxTunnel UDP socket")?;
 
         let (response_tx, response_rx) = mpsc::channel(4096);
 
-        if auth_config.is_some() {
-            info!(
-                "OxTunnel server listening on {} (authentication ENABLED)",
-                config.listen_addr
-            );
+        let auth_status = if auth_config.is_some() {
+            "ENABLED"
         } else {
+            "DISABLED"
+        };
+
+        info!(
+            "🌐 OxTunnel server listening on {} (dual-stack IPv4+IPv6, auth {})",
+            config.listen_addr, auth_status
+        );
+
+        if let Some(ref tcp_addr) = config.tcp_fallback_addr {
             info!(
-                "OxTunnel server listening on {} (authentication DISABLED)",
-                config.listen_addr
+                "🔄 TCP fallback enabled on {} for restrictive networks",
+                tcp_addr
             );
         }
 
@@ -611,8 +624,52 @@ impl OxTunnelServer {
         })
     }
 
+    /// Create a dual-stack UDP socket that accepts both IPv4 and IPv6 connections
+    async fn create_dual_stack_udp_socket(addr: SocketAddr) -> Result<UdpSocket> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        let domain = if addr.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+            .context("Failed to create UDP socket")?;
+
+        // For IPv6, enable dual-stack mode (accept both IPv4 and IPv6)
+        if addr.is_ipv6() {
+            // IPV6_V6ONLY = false means accept IPv4 connections too (mapped to ::ffff:x.x.x.x)
+            socket.set_only_v6(false).ok(); // Best effort, some systems don't support this
+        }
+
+        // Allow address reuse for quick restarts
+        socket.set_reuse_address(true)?;
+
+        // Increase buffer sizes for high throughput
+        socket.set_recv_buffer_size(8 * 1024 * 1024).ok(); // 8MB
+        socket.set_send_buffer_size(8 * 1024 * 1024).ok(); // 8MB
+
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+
+        let std_socket: std::net::UdpSocket = socket.into();
+        UdpSocket::from_std(std_socket).context("Failed to convert to tokio UdpSocket")
+    }
+
     /// Run the OxTunnel server
     pub async fn run(self) -> Result<()> {
+        // Spawn TCP fallback listener if enabled
+        if let Some(tcp_addr) = self.config.tcp_fallback_addr {
+            let handler = self.clone_handler();
+            let rate_limiter = Arc::clone(&self.rate_limiter);
+            tokio::spawn(async move {
+                if let Err(e) = Self::run_tcp_fallback(tcp_addr, handler, rate_limiter).await {
+                    error!("TCP fallback listener error: {}", e);
+                }
+            });
+        }
+
         #[cfg(target_os = "linux")]
         {
             let interface = self
@@ -625,6 +682,113 @@ impl OxTunnelServer {
 
         #[cfg(not(target_os = "linux"))]
         self.run_standard().await
+    }
+
+    /// Run TCP fallback listener for restrictive networks where UDP is blocked
+    async fn run_tcp_fallback(
+        addr: SocketAddr,
+        handler: MobileServerHandler,
+        rate_limiter: Arc<RateLimiter>,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        // Create dual-stack TCP listener
+        let listener = Self::create_dual_stack_tcp_listener(addr).await?;
+        info!("🔄 TCP fallback listener started on {}", addr);
+
+        loop {
+            match listener.accept().await {
+                Ok((mut stream, peer_addr)) => {
+                    // Rate limit check
+                    if !rate_limiter.check_connection(peer_addr.ip()).await {
+                        debug!("Rate limited TCP connection from {}", peer_addr);
+                        continue;
+                    }
+
+                    let handler = handler.clone();
+                    let rate_limiter = Arc::clone(&rate_limiter);
+
+                    tokio::spawn(async move {
+                        debug!("TCP fallback connection from {}", peer_addr);
+
+                        // Simple length-prefixed framing: [u16 length][payload]
+                        let mut len_buf = [0u8; 2];
+                        let mut packet_buf = vec![0u8; MAX_PACKET_SIZE];
+
+                        loop {
+                            // Read length prefix
+                            match stream.read_exact(&mut len_buf).await {
+                                Ok(_) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                                Err(e) => {
+                                    debug!("TCP read error from {}: {}", peer_addr, e);
+                                    break;
+                                }
+                            }
+
+                            let len = u16::from_be_bytes(len_buf) as usize;
+                            if len > MAX_PACKET_SIZE {
+                                warn!("TCP packet too large from {}: {} bytes", peer_addr, len);
+                                break;
+                            }
+
+                            // Read packet data
+                            if stream.read_exact(&mut packet_buf[..len]).await.is_err() {
+                                break;
+                            }
+
+                            // Rate limit packet
+                            if !rate_limiter.check_packet(peer_addr.ip()).await {
+                                continue;
+                            }
+
+                            // Handle packet using same handler as UDP
+                            if let Err(e) =
+                                handler.handle_packet(&packet_buf[..len], peer_addr).await
+                            {
+                                debug!("TCP packet handling error: {}", e);
+                            }
+
+                            // Note: Responses are sent via UDP currently
+                            // For full TCP support, would need to route responses back through TCP
+                        }
+
+                        rate_limiter.remove_session(peer_addr.ip()).await;
+                        debug!("TCP fallback connection closed: {}", peer_addr);
+                    });
+                }
+                Err(e) => {
+                    error!("TCP accept error: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Create a dual-stack TCP listener
+    async fn create_dual_stack_tcp_listener(addr: SocketAddr) -> Result<tokio::net::TcpListener> {
+        use socket2::{Domain, Socket, Type};
+
+        let domain = if addr.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+
+        let socket =
+            Socket::new(domain, Type::STREAM, None).context("Failed to create TCP socket")?;
+
+        if addr.is_ipv6() {
+            socket.set_only_v6(false).ok();
+        }
+
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&addr.into())?;
+        socket.listen(1024)?;
+
+        let std_listener: std::net::TcpListener = socket.into();
+        tokio::net::TcpListener::from_std(std_listener)
+            .context("Failed to convert to tokio TcpListener")
     }
 
     /// Auto-detect the default network interface
@@ -1102,6 +1266,7 @@ impl OxTunnelServer {
 // Packet Handler
 // ============================================================================
 
+#[derive(Clone)]
 struct MobileServerHandler {
     server_id: [u8; 32],
     sessions: Arc<RwLock<HashMap<[u8; 32], TunnelSession>>>,

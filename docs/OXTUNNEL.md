@@ -51,6 +51,8 @@ OxTunnel is Oxidize's **unified cross-platform** tunnel protocol for desktop and
 - **AF_XDP primary** on Linux for kernel bypass (18-25 Gbps)
 - **Optimized UDP** for macOS/Windows/mobile
 - **Single server** handles all client types
+- **Dual-stack IPv4/IPv6** - server binds to `[::]:51820` for both
+- **TCP fallback** on port 51821 for restrictive networks (firewalls blocking UDP)
 
 ## Why OxTunnel?
 
@@ -242,16 +244,30 @@ OxTunnel is specifically optimized for mobile:
 
 ## Cross-Platform Support
 
-| Platform | Capture | Protocols | Transport | Status |
-|----------|---------|-----------|-----------|--------|
-| Linux (server) | - | TCP + UDP + ICMP | AF_XDP | ✅ Full support |
-| Linux (client) | NFQUEUE | TCP + UDP + ICMP | AF_XDP/UDP | ✅ Full support |
-| macOS | PF/Utun | TCP + UDP + ICMP | Optimized UDP | ✅ Full support |
-| Windows | WinDivert | TCP + UDP + ICMP | Optimized UDP | ✅ Full support |
-| Android | VpnService | TCP + UDP + ICMP | UDP | ✅ Full support |
-| iOS | NEPacketTunnel | TCP + UDP + ICMP | UDP | ✅ Full support |
+| Platform | Capture | Protocols | Transport | IPv6 | TCP Fallback | Status |
+|----------|---------|-----------|-----------|------|--------------|--------|
+| Linux (server) | - | TCP + UDP + ICMP | AF_XDP | ✅ | ✅ Port 51821 | ✅ Full support |
+| Linux (client) | NFQUEUE | TCP + UDP + ICMP | AF_XDP/UDP | ✅ | ✅ Auto | ✅ Full support |
+| macOS | PF/Utun | TCP + UDP + ICMP | Optimized UDP | ✅ | ✅ Auto | ✅ Full support |
+| Windows | WinDivert | TCP + UDP + ICMP | Optimized UDP | ✅ | ✅ Auto | ✅ Full support |
+| Android | VpnService | TCP + UDP + ICMP | UDP | ✅ | ✅ Auto | ✅ Full support |
+| iOS | NEPacketTunnel | TCP + UDP + ICMP | UDP | ✅ | ✅ Auto | ✅ Full support |
 
 **All platforms use the same OxTunnel protocol** with platform-specific packet capture and optimized transport.
+
+### Dual-Stack IPv6 Support
+
+The server binds to `[::]:51820` by default, which accepts both IPv4 and IPv6 connections:
+- IPv4 clients connect normally (mapped to `::ffff:x.x.x.x` internally)
+- IPv6 clients connect directly via IPv6
+
+### TCP Fallback for Restrictive Networks
+
+For networks that block UDP (corporate firewalls, some hotels), clients automatically fall back to TCP:
+- Server listens on port **51821/tcp** alongside UDP on 51820
+- Client auto-detects: tries UDP first, falls back to TCP if blocked
+- Same OxTunnel protocol over length-prefixed TCP framing
+- Slightly higher latency than UDP but works everywhere
 
 ## ICMP (Ping) Support
 

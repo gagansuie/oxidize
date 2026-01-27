@@ -301,6 +301,9 @@ async fn handle_connect(
 
     let oxtunnel_config = relay_client::client::ClientConfig {
         server_addr,
+        // TCP fallback on port 51821 (same host as UDP server)
+        tcp_fallback_addr: Some(std::net::SocketAddr::new(server_addr.ip(), 51821)),
+        transport_mode: relay_client::client::TransportMode::Auto,
         enable_encryption: true,
         encryption_key: None,
         enable_compression: true,

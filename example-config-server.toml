@@ -1,8 +1,16 @@
 # Oxidize Server Configuration Example
 # Copy to /etc/oxidize/server.toml or ~/.config/oxidize/server.toml
 
-# Server listens on 0.0.0.0:51820 by default (pass --listen to override)
-# This config file controls behavior, not the listen address
+# ============================================
+# Network Configuration (Dual-Stack IPv4/IPv6)
+# ============================================
+# Server listens on [::]:51820 by default (dual-stack: accepts both IPv4 and IPv6)
+# Pass --listen to override the bind address
+
+# TCP fallback for restrictive networks (firewalls blocking UDP)
+# Listens on port 51821 by default alongside UDP on 51820
+# enable_tcp_fallback = true
+# tcp_fallback_port = 51821
 
 # Maximum number of concurrent connections
 # Recommended: 10000 per 4GB RAM

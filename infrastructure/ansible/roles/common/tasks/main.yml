@@ -64,33 +64,49 @@
   become: yes
   ignore_errors: yes
 
-- name: Disable IPv6 in UFW (prevents 'problem running' errors on bare metal)
+- name: Ensure IPv6 is enabled in UFW for dual-stack support
   lineinfile:
     path: /etc/default/ufw
     regexp: '^IPV6='
-    line: 'IPV6=no'
+    line: 'IPV6=yes'
   become: yes
 
-- name: Reset UFW to clean state
-  ufw:
-    state: reset
+- name: Reload UFW after config change
+  shell: ufw --force disable && ufw --force enable
   become: yes
+  ignore_errors: yes
 
-- name: Configure UFW - Allow SSH
-  ufw:
-    rule: allow
-    port: '22'
-    proto: tcp
+- name: Configure UFW - Allow SSH (IPv4 + IPv6)
+  shell: |
+    ufw allow 22/tcp
+  args:
+    executable: /bin/bash
   become: yes
+  register: ufw_ssh
+  changed_when: "'Rule added' in ufw_ssh.stdout or 'Skipping' in ufw_ssh.stdout"
+  failed_when: false
 
-- name: Configure UFW - Allow QUIC/OxTunnel
-  ufw:
-    rule: allow
-    port: '51820'
-    proto: udp
+- name: Configure UFW - Allow OxTunnel UDP (IPv4 + IPv6)
+  shell: |
+    ufw allow 51820/udp
+  args:
+    executable: /bin/bash
   become: yes
+  register: ufw_oxtunnel_udp
+  changed_when: "'Rule added' in ufw_oxtunnel_udp.stdout or 'Skipping' in ufw_oxtunnel_udp.stdout"
+  failed_when: false
 
-- name: Enable UFW
+- name: Configure UFW - Allow OxTunnel TCP fallback (IPv4 + IPv6)
+  shell: |
+    ufw allow 51821/tcp
+  args:
+    executable: /bin/bash
+  become: yes
+  register: ufw_oxtunnel_tcp
+  changed_when: "'Rule added' in ufw_oxtunnel_tcp.stdout or 'Skipping' in ufw_oxtunnel_tcp.stdout"
+  failed_when: false
+
+- name: Enable UFW with default deny
   ufw:
     state: enabled
     policy: deny
@@ -126,42 +142,75 @@
 # DDoS Protection - iptables rate limiting
 # ============================================================================
 
-- name: Apply iptables DDoS protection rules inline
+- name: Apply iptables DDoS protection rules (IPv4 + IPv6)
   shell: |
     set -e
-    TUNNEL_PORT=51820
+    TUNNEL_PORT_UDP=51820
+    TUNNEL_PORT_TCP=51821
     METRICS_PORT=9090
-    echo "Applying iptables DDoS protection rules..."
+    echo "Applying iptables DDoS protection rules (IPv4)..."
     
-    # Create chain if not exists
+    # IPv4 rules
     iptables -N OXIDIZE_RATELIMIT 2>/dev/null || true
     iptables -F OXIDIZE_RATELIMIT
     iptables -D INPUT -j OXIDIZE_RATELIMIT 2>/dev/null || true
     
-    # Allow established
     iptables -A OXIDIZE_RATELIMIT -m state --state ESTABLISHED,RELATED -j ACCEPT
     
-    # Rate limit new UDP connections (50/sec per IP)
-    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT -m state --state NEW \
+    # Rate limit UDP tunnel (50 new conn/sec, 2000 pps per IP)
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP -m state --state NEW \
       -m hashlimit --hashlimit-name tunnel_conn --hashlimit-upto 50/sec \
       --hashlimit-burst 100 --hashlimit-mode srcip -j ACCEPT
-    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT -m state --state NEW -j DROP
-    
-    # Rate limit UDP packets (2000/sec per IP)
-    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT \
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP -m state --state NEW -j DROP
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP \
       -m hashlimit --hashlimit-name tunnel_pps --hashlimit-upto 2000/sec \
       --hashlimit-burst 5000 --hashlimit-mode srcip -j ACCEPT
-    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT -j DROP
+    iptables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP -j DROP
+    
+    # Rate limit TCP fallback tunnel (20 new conn/sec per IP)
+    iptables -A OXIDIZE_RATELIMIT -p tcp --dport $TUNNEL_PORT_TCP -m state --state NEW \
+      -m hashlimit --hashlimit-name tunnel_tcp --hashlimit-upto 20/sec \
+      --hashlimit-burst 50 --hashlimit-mode srcip -j ACCEPT
+    iptables -A OXIDIZE_RATELIMIT -p tcp --dport $TUNNEL_PORT_TCP -m state --state NEW -j DROP
     
     # Metrics port limit
     iptables -A OXIDIZE_RATELIMIT -p tcp --dport $METRICS_PORT -m connlimit --connlimit-above 10 -j DROP
     iptables -A OXIDIZE_RATELIMIT -p tcp --dport $METRICS_PORT -j ACCEPT
     iptables -A OXIDIZE_RATELIMIT -j RETURN
-    
-    # Insert chain
     iptables -I INPUT 1 -j OXIDIZE_RATELIMIT
     
-    echo "iptables DDoS protection applied"
+    echo "Applying ip6tables DDoS protection rules (IPv6)..."
+    
+    # IPv6 rules (mirror of IPv4)
+    ip6tables -N OXIDIZE_RATELIMIT 2>/dev/null || true
+    ip6tables -F OXIDIZE_RATELIMIT
+    ip6tables -D INPUT -j OXIDIZE_RATELIMIT 2>/dev/null || true
+    
+    ip6tables -A OXIDIZE_RATELIMIT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # Rate limit UDP tunnel
+    ip6tables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP -m state --state NEW \
+      -m hashlimit --hashlimit-name tunnel6_conn --hashlimit-upto 50/sec \
+      --hashlimit-burst 100 --hashlimit-mode srcip -j ACCEPT
+    ip6tables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP -m state --state NEW -j DROP
+    ip6tables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP \
+      -m hashlimit --hashlimit-name tunnel6_pps --hashlimit-upto 2000/sec \
+      --hashlimit-burst 5000 --hashlimit-mode srcip -j ACCEPT
+    ip6tables -A OXIDIZE_RATELIMIT -p udp --dport $TUNNEL_PORT_UDP -j DROP
+    
+    # Rate limit TCP fallback tunnel
+    ip6tables -A OXIDIZE_RATELIMIT -p tcp --dport $TUNNEL_PORT_TCP -m state --state NEW \
+      -m hashlimit --hashlimit-name tunnel6_tcp --hashlimit-upto 20/sec \
+      --hashlimit-burst 50 --hashlimit-mode srcip -j ACCEPT
+    ip6tables -A OXIDIZE_RATELIMIT -p tcp --dport $TUNNEL_PORT_TCP -m state --state NEW -j DROP
+    
+    # Metrics port limit
+    ip6tables -A OXIDIZE_RATELIMIT -p tcp --dport $METRICS_PORT -m connlimit --connlimit-above 10 -j DROP
+    ip6tables -A OXIDIZE_RATELIMIT -p tcp --dport $METRICS_PORT -j ACCEPT
+    ip6tables -A OXIDIZE_RATELIMIT -j RETURN
+    ip6tables -I INPUT 1 -j OXIDIZE_RATELIMIT
+    
+    echo "iptables DDoS protection applied (IPv4 + IPv6)"
   args:
     executable: /bin/bash
   become: yes
