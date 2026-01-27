@@ -18,7 +18,7 @@ use relay_server::prometheus::PrometheusMetrics;
 #[command(about = "Oxidize - High-performance Network Relay Server with OxTunnel", long_about = None)]
 struct Args {
     /// Listen address - uses [::] for dual-stack (IPv6 + IPv4) by default
-    #[arg(short, long, default_value = "[::]:4433")]
+    #[arg(short, long, default_value = "[::]:51820")]
     listen: SocketAddr,
 
     #[arg(short, long, default_value = "config.toml")]

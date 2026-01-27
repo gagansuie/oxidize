@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use oxidize_common::auth::ClientAuthConfig;
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
-    CryptoEngine, HandshakeInit, HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
+    CryptoEngine, HandshakeInit, HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, MAX_PAYLOAD_SIZE,
+    PROTOCOL_MAGIC,
 };
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -44,8 +45,9 @@ pub struct ClientConfig {
 
 impl Default for ClientConfig {
     fn default() -> Self {
+        let server_addr = "127.0.0.1:51820".parse().unwrap();
         Self {
-            server_addr: "127.0.0.1:4433".parse().unwrap(),
+            server_addr,
             enable_encryption: true,
             encryption_key: None,
             enable_compression: true,
@@ -75,6 +77,11 @@ pub struct ClientStats {
     pub path_switches: AtomicU64,
     // UDP tunnel latency (measured via keepalive RTT, in microseconds)
     pub tunnel_latency_us: AtomicU64,
+    // Oversized packet handling
+    pub oversized_packets: AtomicU64,
+    pub oversized_packets_fragmented: AtomicU64,
+    pub oversized_packets_dropped: AtomicU64,
+    pub oversized_fragments_sent: AtomicU64,
 }
 
 impl ClientStats {
@@ -234,6 +241,47 @@ impl RelayClient {
             anyhow::bail!("Not connected");
         }
 
+        if data.len() > MAX_PAYLOAD_SIZE {
+            return self.handle_oversized_packet(data).await;
+        }
+
+        self.send_encoded_packet(data).await
+    }
+
+    async fn handle_oversized_packet(&self, data: &[u8]) -> Result<()> {
+        self.stats.oversized_packets.fetch_add(1, Ordering::Relaxed);
+
+        match Self::fragment_ipv4_packet(data, MAX_PAYLOAD_SIZE) {
+            Ok(fragments) => {
+                self.stats
+                    .oversized_packets_fragmented
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .oversized_fragments_sent
+                    .fetch_add(fragments.len() as u64, Ordering::Relaxed);
+
+                debug!(
+                    "Fragmented oversized IPv4 packet ({} bytes) into {} fragments",
+                    data.len(),
+                    fragments.len()
+                );
+
+                for fragment in fragments {
+                    self.send_encoded_packet(&fragment).await?;
+                }
+            }
+            Err(err) => {
+                self.stats
+                    .oversized_packets_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!("Dropping oversized packet: {}", err);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_encoded_packet(&self, data: &[u8]) -> Result<()> {
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
 
         // Encode packet with OxTunnel framing
@@ -261,13 +309,117 @@ impl RelayClient {
         Ok(())
     }
 
+    fn fragment_ipv4_packet(
+        packet: &[u8],
+        max_packet_len: usize,
+    ) -> Result<Vec<Vec<u8>>, &'static str> {
+        if packet.len() < 20 {
+            return Err("IPv4 packet too short");
+        }
+
+        let version = packet[0] >> 4;
+        if version != 4 {
+            return Err("Not an IPv4 packet");
+        }
+
+        let header_len = ((packet[0] & 0x0F) as usize) * 4;
+        if header_len < 20 || packet.len() < header_len {
+            return Err("Invalid IPv4 header length");
+        }
+
+        let flags_fragment = u16::from_be_bytes([packet[6], packet[7]]);
+        let existing_offset = flags_fragment & 0x1FFF;
+        let more_fragments = (flags_fragment & 0x2000) != 0;
+        let dont_fragment = (flags_fragment & 0x4000) != 0;
+        if existing_offset != 0 || more_fragments {
+            return Err("IPv4 packet already fragmented");
+        }
+        if dont_fragment {
+            return Err("IPv4 DF flag set");
+        }
+
+        if max_packet_len <= header_len {
+            return Err("Max packet length too small for IPv4 header");
+        }
+
+        let max_fragment_payload = (max_packet_len - header_len) & !7;
+        if max_fragment_payload == 0 {
+            return Err("Max fragment payload too small");
+        }
+
+        let declared_total = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+        if declared_total < header_len {
+            return Err("Invalid IPv4 total length");
+        }
+        let total_len = declared_total.min(packet.len());
+        let payload = &packet[header_len..total_len];
+        if payload.is_empty() {
+            return Err("IPv4 payload empty");
+        }
+
+        let mut fragments = Vec::new();
+        let mut offset = 0usize;
+
+        while offset < payload.len() {
+            let remaining = payload.len() - offset;
+            let frag_payload_len = remaining.min(max_fragment_payload);
+            let more = offset + frag_payload_len < payload.len();
+
+            let mut fragment = Vec::with_capacity(header_len + frag_payload_len);
+            fragment.extend_from_slice(&packet[..header_len]);
+
+            let total_len = (header_len + frag_payload_len) as u16;
+            fragment[2..4].copy_from_slice(&total_len.to_be_bytes());
+
+            let frag_offset = (offset / 8) as u16;
+            let mut flags = 0u16;
+            if more {
+                flags |= 0x2000; // More Fragments
+            }
+            let frag_field = flags | frag_offset;
+            fragment[6..8].copy_from_slice(&frag_field.to_be_bytes());
+
+            fragment[10] = 0;
+            fragment[11] = 0;
+            let checksum = Self::ipv4_checksum(&fragment[..header_len]);
+            fragment[10..12].copy_from_slice(&checksum.to_be_bytes());
+
+            fragment.extend_from_slice(&payload[offset..offset + frag_payload_len]);
+            fragments.push(fragment);
+
+            offset += frag_payload_len;
+        }
+
+        Ok(fragments)
+    }
+
+    fn ipv4_checksum(header: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+        let mut i = 0;
+
+        while i + 1 < header.len() {
+            let word = u16::from_be_bytes([header[i], header[i + 1]]) as u32;
+            sum += word;
+            i += 2;
+        }
+
+        if i < header.len() {
+            sum += (header[i] as u32) << 8;
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        !(sum as u16)
+    }
+
     /// Send a keepalive packet and record timestamp for RTT measurement
     pub async fn send_keepalive(&self) -> Result<()> {
         if !self.is_connected() {
             return Ok(());
         }
 
-        // Build keepalive control packet with OxTunnel framing
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
         let mut buf = [0u8; 64];
 

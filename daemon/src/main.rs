@@ -19,7 +19,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(unix)]
 const SOCKET_PATH: &str = "/var/run/oxidize/daemon.sock";
-const RELAY_PORT: u16 = 4433;
+const RELAY_PORT: u16 = 51820;
 
 /// Cross-platform IPC path
 #[cfg(windows)]
@@ -458,6 +458,10 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         congestion_adjustments,
         path_switches,
         tunnel_latency_us,
+        oversized_packets,
+        oversized_packets_fragmented,
+        oversized_packets_dropped,
+        oversized_fragments_sent,
     ) = if let Some(ref stats) = state_guard.client_stats {
         (
             stats.bytes_sent.load(Ordering::Relaxed),
@@ -472,9 +476,13 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             stats.congestion_adjustments.load(Ordering::Relaxed),
             stats.path_switches.load(Ordering::Relaxed),
             stats.tunnel_latency_us.load(Ordering::Relaxed),
+            stats.oversized_packets.load(Ordering::Relaxed),
+            stats.oversized_packets_fragmented.load(Ordering::Relaxed),
+            stats.oversized_packets_dropped.load(Ordering::Relaxed),
+            stats.oversized_fragments_sent.load(Ordering::Relaxed),
         )
     } else {
-        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     };
 
     let uptime = state_guard
@@ -507,6 +515,10 @@ async fn handle_status(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
             "congestion_adjustments": congestion_adjustments,
             "path_switches": path_switches,
             "tunnel_latency_us": tunnel_latency_us,
+            "oversized_packets": oversized_packets,
+            "oversized_packets_fragmented": oversized_packets_fragmented,
+            "oversized_packets_dropped": oversized_packets_dropped,
+            "oversized_fragments_sent": oversized_fragments_sent,
         })),
     }
 }
