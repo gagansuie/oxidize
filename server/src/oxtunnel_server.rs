@@ -824,8 +824,16 @@ impl OxTunnelServer {
         };
 
         // Create FLASH AF_XDP sockets
-        let mut flash_socket =
-            FlashSocket::new(xdp_config).context("Failed to create FLASH AF_XDP socket")?;
+        let mut flash_socket = match FlashSocket::new(xdp_config) {
+            Ok(socket) => socket,
+            Err(e) => {
+                warn!(
+                    "Failed to create AF_XDP socket: {} - falling back to standard UDP",
+                    e
+                );
+                return self.run_standard().await;
+            }
+        };
 
         let num_queues = flash_socket.num_queues();
         info!(
