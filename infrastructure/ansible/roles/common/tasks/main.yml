@@ -64,6 +64,18 @@
   become: yes
   ignore_errors: yes
 
+- name: Disable IPv6 in UFW (prevents 'problem running' errors on bare metal)
+  lineinfile:
+    path: /etc/default/ufw
+    regexp: '^IPV6='
+    line: 'IPV6=no'
+  become: yes
+
+- name: Reset UFW to clean state
+  ufw:
+    state: reset
+  become: yes
+
 - name: Configure UFW - Allow SSH
   ufw:
     rule: allow
