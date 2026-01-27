@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use oxidize_common::auth::ClientAuthConfig;
+use oxidize_common::compression::compress_data;
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
     CryptoEngine, HandshakeInit, HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, MAX_PAYLOAD_SIZE,
@@ -322,20 +323,31 @@ impl RelayClient {
 
     async fn send_encoded_packet(&self, data: &[u8]) -> Result<()> {
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let original_size = data.len();
 
         // Encode packet with OxTunnel framing
         let mut packet_flags = 0u8;
         if self.config.enable_encryption {
             packet_flags |= flags::ENCRYPTED;
         }
-        if self.config.enable_compression {
-            packet_flags |= flags::COMPRESSED;
-        }
+
+        // Compress data if enabled and worthwhile (min 64 bytes to avoid overhead)
+        let (payload, compressed) = if self.config.enable_compression && original_size >= 64 {
+            match compress_data(data) {
+                Ok(compressed_data) if compressed_data.len() < original_size => {
+                    packet_flags |= flags::COMPRESSED;
+                    (compressed_data, true)
+                }
+                _ => (data.to_vec(), false),
+            }
+        } else {
+            (data.to_vec(), false)
+        };
 
         let mut buf = [0u8; MAX_PACKET_SIZE];
         let crypto = self.crypto.read().await;
 
-        let len = encode_packet(&mut buf, data, seq, packet_flags, crypto.as_ref())
+        let len = encode_packet(&mut buf, &payload, seq, packet_flags, crypto.as_ref())
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         self.socket.send(&buf[..len]).await?;
@@ -344,6 +356,14 @@ impl RelayClient {
         self.stats
             .bytes_sent
             .fetch_add(len as u64, Ordering::Relaxed);
+
+        // Track compression savings
+        if compressed {
+            let saved = original_size.saturating_sub(payload.len()) as u64;
+            self.stats
+                .compression_saved
+                .fetch_add(saved, Ordering::Relaxed);
+        }
 
         Ok(())
     }
@@ -496,35 +516,32 @@ impl RelayClient {
             return;
         }
 
-        match payload[0] {
-            control::ACK | control::KEEPALIVE => {
-                // Measure RTT from keepalive response
-                let sent_us = self.keepalive_sent_us.load(Ordering::Relaxed);
-                if sent_us > 0 {
-                    let now_us = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_micros() as u64;
+        if payload[0] == control::ACK {
+            // Only use ACK for RTT measurement (not server-initiated KEEPALIVE)
+            let sent_us = self.keepalive_sent_us.load(Ordering::Relaxed);
+            if sent_us > 0 {
+                let now_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64;
 
-                    if now_us > sent_us {
-                        let rtt_us = now_us - sent_us;
-                        // Use exponential moving average for smoother latency
-                        let prev = self.stats.tunnel_latency_us.load(Ordering::Relaxed);
-                        let smoothed = if prev == 0 {
-                            rtt_us
-                        } else {
-                            (prev * 7 + rtt_us) / 8 // EMA with alpha=0.125
-                        };
-                        self.stats
-                            .tunnel_latency_us
-                            .store(smoothed, Ordering::Relaxed);
-                        debug!("Keepalive RTT: {}us (smoothed: {}us)", rtt_us, smoothed);
-                    }
-                    // Reset sent timestamp
-                    self.keepalive_sent_us.store(0, Ordering::Relaxed);
+                if now_us > sent_us {
+                    let rtt_us = now_us - sent_us;
+                    // Use exponential moving average for smoother latency
+                    let prev = self.stats.tunnel_latency_us.load(Ordering::Relaxed);
+                    let smoothed = if prev == 0 {
+                        rtt_us
+                    } else {
+                        (prev * 7 + rtt_us) / 8 // EMA with alpha=0.125
+                    };
+                    self.stats
+                        .tunnel_latency_us
+                        .store(smoothed, Ordering::Relaxed);
+                    debug!("Keepalive RTT: {}us (smoothed: {}us)", rtt_us, smoothed);
                 }
+                // Reset sent timestamp
+                self.keepalive_sent_us.store(0, Ordering::Relaxed);
             }
-            _ => {}
         }
     }
 
@@ -579,10 +596,11 @@ impl RelayClient {
                             let flags_byte = buf[2];
                             if flags_byte & flags::CONTROL != 0 && len > HEADER_SIZE {
                                 let control_type = buf[HEADER_SIZE];
-                                if control_type == control::ACK
-                                    || control_type == control::KEEPALIVE
-                                {
-                                    // Measure RTT from keepalive response
+                                // Only use ACK for RTT measurement, NOT server-initiated KEEPALIVE
+                                // Server sends proactive KEEPALIVE packets which are unrelated to
+                                // client keepalives and would cause incorrect RTT calculations
+                                if control_type == control::ACK {
+                                    // Measure RTT from keepalive ACK response
                                     let sent_us = recv_keepalive_sent_us.load(Ordering::Relaxed);
                                     if sent_us > 0 {
                                         let now_us = std::time::SystemTime::now()
