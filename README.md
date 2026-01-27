@@ -6,7 +6,7 @@
 
 **Neural networks predict packet loss before it happens, optimize routing in real-time, and accelerate your network automatically.**
 
-> 🔥 **<0.2µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
+> 🔥 **~0.1µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/gagansuie/oxidize/total?logo=github&label=downloads)](https://github.com/gagansuie/oxidize/releases)
