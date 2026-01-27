@@ -728,8 +728,31 @@ impl RelayClient {
         Arc::clone(&self.stats)
     }
 
-    /// Disconnect from server
+    /// Disconnect from server - sends DISCONNECT message to server
     pub async fn disconnect(&self) {
+        if !self.connected.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Send DISCONNECT control packet to server so it can clean up session
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let mut buf = [0u8; 64];
+
+        buf[0..2].copy_from_slice(&PROTOCOL_MAGIC);
+        buf[2] = flags::CONTROL;
+        buf[3..7].copy_from_slice(&seq.to_le_bytes());
+        buf[7..9].copy_from_slice(&1u16.to_le_bytes()); // Payload length = 1
+        buf[HEADER_SIZE] = control::DISCONNECT;
+
+        let packet_len = HEADER_SIZE + 1;
+
+        // Best effort - don't fail if send fails
+        if let Err(e) = self.socket.send(&buf[..packet_len]).await {
+            warn!("Failed to send disconnect packet: {}", e);
+        } else {
+            debug!("Sent DISCONNECT to server");
+        }
+
         self.connected.store(false, Ordering::SeqCst);
         info!("Disconnected from OxTunnel server");
     }

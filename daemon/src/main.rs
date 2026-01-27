@@ -54,6 +54,8 @@ struct DaemonState {
     client_task: Option<tokio::task::JoinHandle<()>>,
     client_stats: Option<Arc<ClientStats>>,
     connected_at: Option<std::time::Instant>,
+    /// Reference to client for graceful disconnect
+    client: Option<Arc<RelayClient>>,
 }
 
 #[tokio::main]
@@ -352,6 +354,10 @@ async fn handle_connect(
     // Get platform name for logging
     let platform = PacketCaptureService::platform_name();
 
+    // Wrap client in Arc for sharing between task and state (for graceful disconnect)
+    let client = Arc::new(client);
+    let client_for_task = Arc::clone(&client);
+
     // Get stats handle BEFORE moving client into task
     let client_stats = client.stats_handle();
 
@@ -362,7 +368,7 @@ async fn handle_connect(
         info!("   ├─ OxTunnel protocol: enabled");
         info!("   └─ Capturing TCP+UDP traffic");
 
-        if let Err(e) = client.run_with_capture(oxtunnel_rx).await {
+        if let Err(e) = client_for_task.run_with_capture(oxtunnel_rx).await {
             error!("Client error: {}", e);
         }
 
@@ -378,6 +384,7 @@ async fn handle_connect(
     state_guard.client_task = Some(task);
     state_guard.client_stats = Some(client_stats);
     state_guard.connected_at = Some(std::time::Instant::now());
+    state_guard.client = Some(client);
 
     DaemonResponse {
         success: true,
@@ -405,11 +412,35 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         };
     }
 
+    // Get server address before clearing state (for iptables cleanup)
+    let server_addr_str = state_guard.server_addr.clone();
+
+    // Send DISCONNECT to server BEFORE aborting task (so server can clean up session)
+    if let Some(ref client) = state_guard.client {
+        info!("Sending DISCONNECT to server...");
+        client.disconnect().await;
+    }
+
     // Abort the client task (capture service cleans up iptables rules internally)
     if let Some(task) = state_guard.client_task.take() {
         task.abort();
         info!("Client task aborted");
     }
+
+    // Clean up iptables exclusion rule for relay server
+    if let Some(ref addr) = server_addr_str {
+        if let Some(ip) = addr.split(':').next() {
+            info!("📦 Removing iptables exclusion for relay: {}", ip);
+            let _ = std::process::Command::new("iptables")
+                .args(["-D", "OUTPUT", "-d", ip, "-j", "ACCEPT"])
+                .output();
+        }
+    }
+
+    // Brief delay to allow cleanup to complete before allowing reconnect
+    drop(state_guard);
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let mut state_guard = state.lock().await;
 
     let uptime = state_guard
         .connected_at
@@ -432,6 +463,7 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     state_guard.server_id = None;
     state_guard.client_stats = None;
     state_guard.connected_at = None;
+    state_guard.client = None;
 
     info!(
         "Disconnected. Uptime: {}s, Sent: {}, Received: {}, Packets: {}/{}",
