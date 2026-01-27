@@ -97,8 +97,7 @@ async fn main() -> Result<()> {
 
     info!("🚀 OxTunnel client connected!");
 
-    // For now, just keep the connection alive
-    // TODO: Integrate with daemon packet capture
+    // Keep connection alive - packet capture handled by daemon via NFQUEUE
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         if !client.is_connected() {
