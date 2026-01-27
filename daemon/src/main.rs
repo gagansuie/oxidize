@@ -461,6 +461,7 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
 
     state_guard.connected = false;
     state_guard.server_id = None;
+    state_guard.server_addr = None;
     state_guard.client_stats = None;
     state_guard.connected_at = None;
     state_guard.client = None;
