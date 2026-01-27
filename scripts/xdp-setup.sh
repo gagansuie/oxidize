@@ -2,19 +2,19 @@
 # Oxidize AF_XDP Setup Script
 # Configures system for AF_XDP zero-copy packet I/O
 #
-# Usage: sudo ./xdp-setup.sh <interface> [quic_port]
-# Example: sudo ./xdp-setup.sh eth0 4433
+# Usage: sudo ./xdp-setup.sh <interface> [port]
+# Example: sudo ./xdp-setup.sh eth0 51820
 
 set -e
 
 INTERFACE="${1:-eth0}"
-QUIC_PORT="${2:-4433}"
+PORT="${2:-51820}"
 
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║            Oxidize AF_XDP Setup                                ║"
 echo "╠════════════════════════════════════════════════════════════════╣"
 echo "║ Interface: $INTERFACE"
-echo "║ QUIC Port: $QUIC_PORT"
+echo "║ Port: $PORT"
 echo "╚════════════════════════════════════════════════════════════════╝"
 
 # Check root
@@ -148,7 +148,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/oxidize-xdp-setup.sh $INTERFACE $QUIC_PORT
+ExecStart=/usr/local/bin/oxidize-xdp-setup.sh $INTERFACE $PORT
 RemainAfterExit=yes
 
 [Install]
@@ -173,5 +173,5 @@ echo "║ Huge Pages: $(cat /proc/sys/vm/nr_hugepages)"
 echo "║ RX/TX Queues: $RX_QUEUES / $TX_QUEUES"
 echo "╠════════════════════════════════════════════════════════════════╣"
 echo "║ Start server with:"
-echo "║   oxidize-server --listen 0.0.0.0:$QUIC_PORT --xdp $INTERFACE"
+echo "║   oxidize-server --listen 0.0.0.0:$PORT --xdp $INTERFACE"
 echo "╚════════════════════════════════════════════════════════════════╝"

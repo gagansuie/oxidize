@@ -168,7 +168,7 @@ sudo systemctl kill -s SIGKILL oxidize-daemon
 ### New Server Won't Start
 ```bash
 # Check if port is in use
-sudo ss -tulpn | grep 4433
+sudo ss -tulpn | grep 51820
 
 # Check service logs
 journalctl -u oxidize-daemon -f

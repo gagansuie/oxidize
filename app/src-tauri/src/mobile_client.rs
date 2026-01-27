@@ -26,7 +26,7 @@ pub struct MobileClientConfig {
 impl Default for MobileClientConfig {
     fn default() -> Self {
         Self {
-            server_addr: "0.0.0.0:4433".parse().unwrap(),
+            server_addr: "0.0.0.0:51820".parse().unwrap(),
             enable_encryption: true,
             enable_compression: true,
         }

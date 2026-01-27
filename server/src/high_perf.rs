@@ -499,7 +499,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     fn test_addr() -> SocketAddr {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433)
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51820)
     }
 
     #[tokio::test]

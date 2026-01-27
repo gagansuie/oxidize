@@ -216,10 +216,10 @@ pub struct XdpProgram {
 
 impl XdpProgram {
     /// Create and load XDP program for the given interface and port
-    pub fn new(interface: &str, quic_port: u16, max_sockets: u32) -> io::Result<Self> {
+    pub fn new(interface: &str, port: u16, max_sockets: u32) -> io::Result<Self> {
         info!(
             "Loading XDP program for {} (port {}, max {} sockets)",
-            interface, quic_port, max_sockets
+            interface, port, max_sockets
         );
 
         let ifindex = Self::get_ifindex(interface)?;
@@ -229,7 +229,7 @@ impl XdpProgram {
         info!("Created XSKMAP with fd={}", xskmap_fd);
 
         // Generate and load XDP program
-        let prog_fd = Self::load_xdp_program(xskmap_fd, quic_port)?;
+        let prog_fd = Self::load_xdp_program(xskmap_fd, port)?;
         info!("Loaded XDP program with fd={}", prog_fd);
 
         Ok(XdpProgram {
@@ -576,9 +576,9 @@ impl XdpProgram {
         Ok(ret as RawFd)
     }
 
-    fn load_xdp_program(xskmap_fd: RawFd, quic_port: u16) -> io::Result<RawFd> {
+    fn load_xdp_program(xskmap_fd: RawFd, port: u16) -> io::Result<RawFd> {
         // Generate BPF bytecode for XDP redirect program
-        let insns = Self::generate_xdp_bytecode(xskmap_fd, quic_port);
+        let insns = Self::generate_xdp_bytecode(xskmap_fd, port);
 
         let license = CString::new("GPL").unwrap();
         let mut prog_name = [0u8; 16];
@@ -640,7 +640,7 @@ impl XdpProgram {
         Ok(ret as RawFd)
     }
 
-    /// Generate XDP bytecode that redirects UDP packets on quic_port to XSKMAP
+    /// Generate XDP bytecode that redirects UDP packets on OxTunnel port to XSKMAP
     ///
     /// SAFETY: This program is designed to be fail-safe. ANY error or unexpected
     /// condition results in XDP_PASS, ensuring network connectivity is never broken.
@@ -651,8 +651,8 @@ impl XdpProgram {
     ///
     /// Only packets matching ALL criteria are redirected to AF_XDP.
     /// Everything else goes to XDP_PASS.
-    fn generate_xdp_bytecode(xskmap_fd: RawFd, quic_port: u16) -> Vec<BpfInsn> {
-        let port_be = quic_port.to_be() as i32;
+    fn generate_xdp_bytecode(xskmap_fd: RawFd, port: u16) -> Vec<BpfInsn> {
+        let port_be = port.to_be() as i32;
 
         // Ethertypes in little-endian (as read from memory on x86)
         const ETHERTYPE_IPV4_LE: i32 = 0x0008; // 0x0800 in network order

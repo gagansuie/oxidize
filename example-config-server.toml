@@ -1,7 +1,7 @@
 # Oxidize Server Configuration Example
 # Copy to /etc/oxidize/server.toml or ~/.config/oxidize/server.toml
 
-# Server listens on 0.0.0.0:4433 by default (pass --listen to override)
+# Server listens on 0.0.0.0:51820 by default (pass --listen to override)
 # This config file controls behavior, not the listen address
 
 # Maximum number of concurrent connections

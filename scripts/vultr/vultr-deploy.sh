@@ -15,7 +15,7 @@ OXIDIZE_DIR="/opt/oxidize"
 CONFIG_FILE="/etc/oxidize/server.toml"
 SERVICE_NAME="oxidize-server"
 BINARY_NAME="oxidize-server"
-LISTEN_ADDR="0.0.0.0:4433"
+LISTEN_ADDR="0.0.0.0:51820"
 METRICS_PORT="9090"
 
 # Vultr Chicago specific
@@ -260,22 +260,22 @@ configure_firewall() {
     
     # Check for ufw
     if command -v ufw &> /dev/null; then
-        ufw allow 4433/udp comment "Oxidize QUIC"
-        ufw allow 4433/tcp comment "Oxidize QUIC fallback"
+        ufw allow 51820/udp comment "Oxidize OxTunnel"
+        ufw allow 51820/tcp comment "Oxidize OxTunnel fallback"
         ufw allow $METRICS_PORT/tcp comment "Oxidize metrics"
         ufw allow 22/tcp comment "SSH"
         log_success "UFW rules configured"
     # Check for firewalld
     elif command -v firewall-cmd &> /dev/null; then
-        firewall-cmd --permanent --add-port=4433/udp
-        firewall-cmd --permanent --add-port=4433/tcp
+        firewall-cmd --permanent --add-port=51820/udp
+        firewall-cmd --permanent --add-port=51820/tcp
         firewall-cmd --permanent --add-port=$METRICS_PORT/tcp
         firewall-cmd --reload
         log_success "Firewalld rules configured"
     # Fallback to iptables
     else
-        iptables -A INPUT -p udp --dport 4433 -j ACCEPT
-        iptables -A INPUT -p tcp --dport 4433 -j ACCEPT
+        iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+        iptables -A INPUT -p tcp --dport 51820 -j ACCEPT
         iptables -A INPUT -p tcp --dport $METRICS_PORT -j ACCEPT
         log_success "Iptables rules configured"
     fi

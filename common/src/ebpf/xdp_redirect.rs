@@ -117,8 +117,8 @@ impl UdpHeader {
 /// XDP program configuration
 #[derive(Debug, Clone)]
 pub struct XdpConfig {
-    /// QUIC port to redirect
-    pub quic_port: u16,
+    /// OxTunnel port to redirect
+    pub port: u16,
     /// AF_XDP socket map file descriptor
     pub xsk_map_fd: Option<i32>,
     /// Enable rate limiting
@@ -130,7 +130,7 @@ pub struct XdpConfig {
 impl Default for XdpConfig {
     fn default() -> Self {
         XdpConfig {
-            quic_port: 4433,
+            port: 51820,
             xsk_map_fd: None,
             rate_limit: false,
             pps_limit: 1_000_000, // 1M pps default
@@ -175,14 +175,14 @@ pub fn classify_packet(packet: &[u8], config: &XdpConfig) -> XdpAction {
 
     let udp = unsafe { &*(packet[udp_offset..].as_ptr() as *const UdpHeader) };
 
-    // Check if this is QUIC traffic (destination port matches)
-    if udp.dst_port() == config.quic_port {
+    // Check if this is OxTunnel traffic (destination port matches)
+    if udp.dst_port() == config.port {
         // Redirect to AF_XDP socket for zero-copy processing
         return XdpAction::Redirect;
     }
 
     // Check source port too (for response packets)
-    if udp.src_port() == config.quic_port {
+    if udp.src_port() == config.port {
         return XdpAction::Redirect;
     }
 
@@ -230,7 +230,7 @@ use aya_bpf::{
 #[map]
 static XSKS_MAP: XskMap = XskMap::with_max_entries(64, 0);
 
-const QUIC_PORT: u16 = 4433;
+const OXTUNNEL_PORT: u16 = 51820;
 
 #[xdp]
 pub fn oxidize_xdp(ctx: XdpContext) -> u32 {
@@ -269,7 +269,7 @@ fn try_oxidize_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     let dst_port = u16::from_be(udp.dest);
     let src_port = u16::from_be(udp.source);
 
-    if dst_port == QUIC_PORT || src_port == QUIC_PORT {
+    if dst_port == OXTUNNEL_PORT || src_port == OXTUNNEL_PORT {
         // Redirect to AF_XDP socket
         return XSKS_MAP
             .redirect(ctx.rx_queue_index(), 0)
@@ -291,7 +291,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_classify_quic_packet() {
+    fn test_classify_oxtunnel_packet() {
         let config = XdpConfig::default();
 
         // Create a mock QUIC packet
@@ -306,15 +306,15 @@ mod tests {
         packet[23] = 17; // UDP protocol
 
         // UDP header (offset 34)
-        packet[36] = (4433 >> 8) as u8; // dst port high
-        packet[37] = (4433 & 0xFF) as u8; // dst port low
+        packet[36] = (51820 >> 8) as u8; // dst port high
+        packet[37] = (51820 & 0xFF) as u8; // dst port low
 
         let action = classify_packet(&packet, &config);
         assert_eq!(action, XdpAction::Redirect);
     }
 
     #[test]
-    fn test_classify_non_quic_packet() {
+    fn test_classify_non_oxtunnel_packet() {
         let config = XdpConfig::default();
 
         // Create a mock HTTP packet

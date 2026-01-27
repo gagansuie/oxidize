@@ -27,8 +27,8 @@ pub struct XdpConfig {
     pub busy_poll: bool,
     /// Busy poll budget (packets per poll)
     pub busy_poll_budget: u32,
-    /// QUIC port to filter (0 = all UDP)
-    pub quic_port: u16,
+    /// OxTunnel port to filter (0 = all UDP)
+    pub port: u16,
     /// Batch size for processing
     pub batch_size: usize,
     /// FLASH: Number of queues for multi-queue mode (0 = auto-detect)
@@ -52,7 +52,7 @@ impl Default for XdpConfig {
             zero_copy: true,
             busy_poll: true,
             busy_poll_budget: 64,
-            quic_port: 4433,
+            port: 51820,
             batch_size: 64,
             num_queues: 0,      // 0 = auto-detect from NIC
             enable_flash: true, // Enable FLASH by default

@@ -98,7 +98,7 @@ sudo reboot
 sudo ./scripts/vultr-deploy.sh
 ```
 
-Server will be running on port 4433 (QUIC/UDP).
+Server will be running on port 51820 (OxTunnel/UDP).
 
 ### 3. Kernel Bypass
 
@@ -153,11 +153,11 @@ The deployment script configures firewall automatically. Manual setup:
 
 ```bash
 # UFW
-sudo ufw allow 4433/udp
+sudo ufw allow 51820/udp
 sudo ufw allow 9090/tcp
 
 # Or iptables
-sudo iptables -A INPUT -p udp --dport 4433 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 51820 -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 9090 -j ACCEPT
 ```
 
@@ -167,7 +167,7 @@ After deployment, update your client to connect to the Vultr server:
 
 ```bash
 # In client config or environment
-OXIDIZE_SERVER=YOUR_VULTR_IP:4433
+OXIDIZE_SERVER=YOUR_VULTR_IP:51820
 ```
 
 Or update relay address in the Oxidize app settings.
@@ -194,7 +194,7 @@ journalctl -u oxidize-server -n 50 --no-pager
 
 ### Port already in use
 ```bash
-sudo lsof -i :4433
+sudo lsof -i :51820
 sudo kill -9 <PID>
 ```
 
@@ -275,7 +275,7 @@ Configure in Cloudflare → Traffic → Load Balancing.
 │  ┌────────▼──────────────────────▼────────┐            │
 │  │           Oxidize Server               │            │
 │  │  ┌─────────────────────────────────┐   │            │
-│  │  │ QUIC/UDP :4433                  │   │            │
+│  │  │ OxTunnel/UDP :51820             │   │            │
 │  │  │ ROHC + LZ4 + FEC + ML           │   │            │
 │  │  └─────────────────────────────────┘   │            │
 │  │  ┌─────────────────────────────────┐   │            │

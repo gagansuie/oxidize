@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn test_add_nodes() {
         let mut mesh = RelayMesh::default();
-        mesh.add_node(test_node(1, Region::UsEast, 4433));
+        mesh.add_node(test_node(1, Region::UsEast, 51820));
         mesh.add_node(test_node(2, Region::UsWest, 4434));
 
         assert_eq!(mesh.nodes.len(), 2);
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn test_nearest_relay() {
         let mut mesh = RelayMesh::default();
-        mesh.add_node(test_node(1, Region::UsEast, 4433));
+        mesh.add_node(test_node(1, Region::UsEast, 51820));
         mesh.add_node(test_node(2, Region::EuWest, 4434));
 
         let nearest = mesh.nearest_relay(Region::UsEast).unwrap();
@@ -475,7 +475,7 @@ mod tests {
     fn test_path_computation() {
         let mut mesh = RelayMesh::default();
         mesh.set_local_id(RelayId::new(1));
-        mesh.add_node(test_node(1, Region::UsEast, 4433));
+        mesh.add_node(test_node(1, Region::UsEast, 51820));
         mesh.add_node(test_node(2, Region::UsWest, 4434));
 
         mesh.update_edge(

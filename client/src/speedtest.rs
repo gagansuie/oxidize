@@ -19,7 +19,7 @@ pub struct SpeedTestConfig {
 impl Default for SpeedTestConfig {
     fn default() -> Self {
         Self {
-            server_addr: "127.0.0.1:4433".parse().unwrap(),
+            server_addr: "127.0.0.1:51820".parse().unwrap(),
             packet_size: 1400,
             packet_count: 1000,
             warmup_packets: 10,

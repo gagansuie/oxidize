@@ -642,7 +642,7 @@ impl OxTunnelServer {
         let xdp_config = XdpConfig {
             interface: interface.clone(),
             queue_id: self.config.xdp_queue_id,
-            quic_port: port,
+            port,
             enable_flash: true,
             num_queues: 0, // Auto-detect
             ..XdpConfig::high_throughput(&interface)

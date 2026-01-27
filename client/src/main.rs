@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
 }
 
 /// Resolve a server address that can be either:
-/// - A direct SocketAddr like "1.2.3.4:4433"
-/// - A hostname:port like "relay-chi-1.example.com:4433"
+/// - A direct SocketAddr like "1.2.3.4:51820"
+/// - A hostname:port like "relay-chi-1.example.com:51820"
 async fn resolve_server_address(server: &str) -> Result<SocketAddr> {
     // First try parsing as a direct SocketAddr
     if let Ok(addr) = server.parse::<SocketAddr>() {

@@ -152,7 +152,7 @@ pub async fn connect(
         )
     })?;
 
-    tracing::info!("Connecting via daemon to {}:{}", server_address, 4433);
+    tracing::info!("Connecting via daemon to {}:{}", server_address, 51820);
     daemon_connect(server_id.clone(), server_address.clone()).await?;
 
     crate::set_connected(true);
@@ -453,7 +453,7 @@ async fn ping_server(ipv4: Option<&str>, ipv6: Option<&str>) -> Option<u32> {
     // Try UDP ping first (more accurate for tunnel latency)
     // Prefer IPv6 over IPv4
     if let Some(ip6) = ipv6 {
-        let addr = format!("[{}]:4433", ip6);
+        let addr = format!("[{}]:51820", ip6);
         if let Some(latency) = ping_udp(&addr).await {
             tracing::debug!("UDP ping to {} succeeded: {}ms", addr, latency);
             return Some(latency);
@@ -462,7 +462,7 @@ async fn ping_server(ipv4: Option<&str>, ipv6: Option<&str>) -> Option<u32> {
     }
 
     if let Some(ip4) = ipv4 {
-        let addr = format!("{}:4433", ip4);
+        let addr = format!("{}:51820", ip4);
         if let Some(latency) = ping_udp(&addr).await {
             tracing::debug!("UDP ping to {} succeeded: {}ms", addr, latency);
             return Some(latency);
@@ -1514,7 +1514,7 @@ pub async fn mobile_connect(
 
     tracing::info!("Mobile connecting to {} ({})", server_id, server_address);
 
-    let addr: SocketAddr = format!("{}:4433", server_address)
+    let addr: SocketAddr = format!("{}:51820", server_address)
         .parse()
         .map_err(|e| format!("Invalid server address: {}", e))?;
 

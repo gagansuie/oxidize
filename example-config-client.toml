@@ -2,7 +2,7 @@
 # Copy to ~/.config/oxidize/client.toml
 #
 # Usage:
-#   oxidize-client --server 1.2.3.4:4433 --config client.toml
+#   oxidize-client --server 1.2.3.4:51820 --config client.toml
 #
 # The server address is passed via CLI (not in this config file)
 

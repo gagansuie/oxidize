@@ -17,8 +17,8 @@ pub mod loader;
 /// eBPF program types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EbpfProgram {
-    /// XDP redirect program for QUIC packets
-    XdpQuicRedirect,
+    /// XDP redirect program for OxTunnel packets
+    XdpRedirect,
     /// XDP rate limiter
     XdpRateLimiter,
     /// Traffic classifier
@@ -29,7 +29,7 @@ impl EbpfProgram {
     /// Get the program name
     pub fn name(&self) -> &'static str {
         match self {
-            EbpfProgram::XdpQuicRedirect => "xdp_quic_redirect",
+            EbpfProgram::XdpRedirect => "xdp_redirect",
             EbpfProgram::XdpRateLimiter => "xdp_rate_limiter",
             EbpfProgram::TrafficClassifier => "traffic_classifier",
         }

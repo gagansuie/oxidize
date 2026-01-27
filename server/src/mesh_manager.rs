@@ -248,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mesh_manager_creation() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51820);
         let config = MeshManagerConfig::default();
         let manager = MeshManager::new(addr, config);
 
@@ -258,8 +258,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_peer() {
-        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433);
-        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4434);
+        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51820);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51821);
 
         let config = MeshManagerConfig::default();
         let manager = MeshManager::new(local, config);

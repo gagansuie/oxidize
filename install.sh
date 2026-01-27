@@ -8,7 +8,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/oxidize"
 SERVICE_DIR="/etc/systemd/system"
 BINARY_NAME="oxidize-client"
-SERVER_ADDR=""  # Must be provided as argument (e.g., 91.242.214.137:4433)
+SERVER_ADDR=""  # Must be provided as argument (e.g., 91.242.214.137:51820)
 
 # Colors
 RED='\033[0;31m'
@@ -34,7 +34,7 @@ set_server_address() {
     if [ -z "$SERVER_ADDR" ]; then
         echo -e "${RED}Error: Server address required.${NC}"
         echo "Usage: $0 <server_ip:port>"
-        echo "Example: $0 91.242.214.137:4433"
+        echo "Example: $0 91.242.214.137:51820"
         exit 1
     fi
     echo -e "${GREEN}Server: $SERVER_ADDR${NC}"
@@ -164,7 +164,7 @@ create_config() {
 # Oxidize Client Configuration
 
 # Relay server address (REQUIRED - set this!)
-# server = "your-server.com:4433"
+# server = "your-server.com:51820"
 
 # Enable compression
 enable_compression = true

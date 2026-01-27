@@ -32,8 +32,8 @@ pub struct PipelineConfig {
     pub enable_ktls: bool,
     /// Enable ROHC compression
     pub enable_rohc: bool,
-    /// QUIC port
-    pub quic_port: u16,
+    /// OxTunnel port
+    pub port: u16,
 }
 
 /// Wrapper for kernel bypass config (allows non-Linux builds)
@@ -56,7 +56,7 @@ impl Default for PipelineConfig {
             batch_size: 64,
             enable_ktls: true,
             enable_rohc: true,
-            quic_port: 4433,
+            port: 51820,
         }
     }
 }
@@ -77,7 +77,7 @@ impl PipelineConfig {
             batch_size: 128,
             enable_ktls: true,
             enable_rohc: true,
-            quic_port: 4433,
+            port: 51820,
         }
     }
 
@@ -94,7 +94,7 @@ impl PipelineConfig {
             batch_size: 32,
             enable_ktls: true,
             enable_rohc: true,
-            quic_port: 4433,
+            port: 51820,
         }
     }
 }
@@ -177,7 +177,7 @@ impl HighPerfPipeline {
                 rx_queues: config.bypass.rx_queues,
                 tx_queues: config.bypass.tx_queues,
                 enable_rss: config.bypass.enable_rss,
-                quic_port: config.quic_port,
+                port: config.port,
                 ..BypassConfig::default()
             };
             Some(BypassProcessor::new(bypass_config)?)
@@ -280,7 +280,7 @@ impl HighPerfPipeline {
         let mut output = Vec::with_capacity(packets.len());
         let _worker_id = worker_id;
         let stats = Arc::clone(&self.stats);
-        let quic_port = self.config.quic_port;
+        let port = self.config.port;
         let enable_rohc = self.config.enable_rohc;
 
         for mut packet in packets.drain(..) {
@@ -294,9 +294,9 @@ impl HighPerfPipeline {
                 continue;
             }
 
-            // Check if it's a QUIC packet for our port
+            // Check if it's an OxTunnel packet for our port
             if let Some(dst) = packet.dst_addr {
-                if dst.port() != quic_port {
+                if dst.port() != port {
                     output.push(packet);
                     continue;
                 }
@@ -331,9 +331,9 @@ impl HighPerfPipeline {
             return None;
         }
 
-        // Check if it's a QUIC packet for our port
+        // Check if it's an OxTunnel packet for our port
         if let Some(dst) = packet.dst_addr {
-            if dst.port() != self.config.quic_port {
+            if dst.port() != self.config.port {
                 // Not for us - bypass
                 return Some(packet);
             }
@@ -396,7 +396,7 @@ impl PipelineIntegration {
         enable_bypass: bool,
         pci_address: Option<&str>,
         gaming_mode: bool,
-        quic_port: u16,
+        port: u16,
     ) -> PipelineConfig {
         let mut config = if gaming_mode {
             PipelineConfig::gaming()
@@ -410,7 +410,7 @@ impl PipelineIntegration {
             }
         }
 
-        config.quic_port = quic_port;
+        config.port = port;
         config
     }
 
@@ -421,7 +421,7 @@ impl PipelineIntegration {
             bypass_available: BypassProcessor::is_available(),
             #[cfg(not(target_os = "linux"))]
             bypass_available: false,
-            ktls_available: false, // Removed - using userspace QUIC
+            ktls_available: false, // Removed - using OxTunnel protocol
             cpu_cores: std::thread::available_parallelism()
                 .map(|p| p.get())
                 .unwrap_or(1),

@@ -68,29 +68,29 @@ impl XdpAttachMode {
 pub struct EbpfLoader {
     interface: String,
     mode: XdpAttachMode,
-    quic_port: u16,
+    port: u16,
 }
 
 #[cfg(target_os = "linux")]
 impl EbpfLoader {
     /// Create a new loader for the specified interface
-    pub fn new(interface: &str, quic_port: u16) -> Self {
+    pub fn new(interface: &str, port: u16) -> Self {
         let mode = XdpAttachMode::auto_select(interface);
         info!("eBPF loader created for {} with {:?} mode", interface, mode);
 
         EbpfLoader {
             interface: interface.to_string(),
             mode,
-            quic_port,
+            port,
         }
     }
 
     /// Create with specific attach mode
-    pub fn with_mode(interface: &str, quic_port: u16, mode: XdpAttachMode) -> Self {
+    pub fn with_mode(interface: &str, port: u16, mode: XdpAttachMode) -> Self {
         EbpfLoader {
             interface: interface.to_string(),
             mode,
-            quic_port,
+            port,
         }
     }
 
@@ -114,7 +114,7 @@ impl EbpfLoader {
     pub fn load_xdp_program(&self) -> io::Result<i32> {
         info!(
             "Loading XDP program on {} (port {}, mode {:?})",
-            self.interface, self.quic_port, self.mode
+            self.interface, self.port, self.mode
         );
 
         // XDP program loading is not yet implemented
@@ -191,7 +191,7 @@ pub struct EbpfLoader;
 
 #[cfg(not(target_os = "linux"))]
 impl EbpfLoader {
-    pub fn new(_interface: &str, _quic_port: u16) -> Self {
+    pub fn new(_interface: &str, _port: u16) -> Self {
         EbpfLoader
     }
 
@@ -228,7 +228,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_loader_creation() {
-        let loader = EbpfLoader::new("lo", 4433);
+        let loader = EbpfLoader::new("lo", 51820);
         assert_eq!(loader.interface(), "lo");
     }
 }

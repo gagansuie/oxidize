@@ -360,7 +360,7 @@ use relay_client::client::{RelayClient, ClientConfig};
 
 // Desktop uses AF_XDP (Linux) or optimized UDP with NFQUEUE packet capture
 let config = ClientConfig {
-    server_addr: "<server_ip>:4433".parse()?,
+    server_addr: "<server_ip>:51820".parse()?,
     enable_encryption: true,
     enable_compression: true,
     #[cfg(target_os = "linux")]
@@ -377,7 +377,7 @@ use relay_client::client::{RelayClient, ClientConfig};
 
 // Mobile uses optimized UDP with VpnService/NEPacketTunnel capture
 let config = ClientConfig {
-    server_addr: "<server_ip>:4433".parse()?,
+    server_addr: "<server_ip>:51820".parse()?,
     enable_encryption: true,
     enable_compression: true,
     ..Default::default()

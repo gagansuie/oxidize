@@ -29,7 +29,7 @@ CONFIG_DIR="/etc/oxidize"
 LOG_DIR="/var/log/oxidize"
 BINARY_NAME="oxidize-server"
 SERVICE_NAME="oxidize"
-LISTEN_PORT=4433
+LISTEN_PORT=51820
 
 # Parse arguments
 ACTION=""
@@ -232,8 +232,8 @@ tx_ring_size = 4096
 # Batch processing
 batch_size = 64
 
-[quic]
-# QUIC configuration
+[transport]
+# OxTunnel transport configuration
 max_idle_timeout_ms = 30000
 initial_rtt_ms = 100
 max_udp_payload_size = 1350

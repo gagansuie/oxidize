@@ -4,7 +4,7 @@
 
 set -e
 
-TUNNEL_PORT="${1:-4433}"
+TUNNEL_PORT="${1:-51820}"
 METRICS_PORT="${2:-9090}"
 
 echo "Applying iptables DDoS protection rules..."

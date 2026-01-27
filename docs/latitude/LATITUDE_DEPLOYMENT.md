@@ -173,7 +173,7 @@ ssh ubuntu@SERVER_IP
 systemctl status oxidize        # Service status
 journalctl -u oxidize -f        # Logs
 ip link show                      # NIC status
-ss -ulnp | grep 4433            # Port check
+ss -ulnp | grep 51820           # Port check
 ```
 
 ## Architecture
@@ -216,7 +216,7 @@ Configuration file: `/etc/oxidize/server.toml`
 
 ```toml
 [server]
-listen_addr = "0.0.0.0:4433"
+listen_addr = "0.0.0.0:51820"
 public_ip = "YOUR_PUBLIC_IP"
 cert_path = "/etc/oxidize/certs/server.crt"
 key_path = "/etc/oxidize/certs/server.key"
@@ -233,7 +233,7 @@ rx_ring_size = 4096
 tx_ring_size = 4096
 batch_size = 64
 
-[quic]
+[transport]
 max_idle_timeout_ms = 30000
 max_connections = 10000
 ```
@@ -258,7 +258,7 @@ The deploy script configures:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 22 | TCP | SSH |
-| 4433 | UDP | QUIC relay |
+| 51820 | UDP | OxTunnel relay |
 
 ## TLS Certificates
 
@@ -348,7 +348,7 @@ ethtool -i eth1
 systemctl status oxidize
 
 # Check port binding
-ss -ulnp | grep 4433
+ss -ulnp | grep 51820
 
 # Check firewall
 ufw status

@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn test_gso_batch() {
         let mut batch = GsoBatch::new(1400);
-        batch.dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4433);
+        batch.dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 51820);
 
         batch.add_packet(Bytes::from_static(b"hello"));
         batch.add_packet(Bytes::from_static(b"world"));

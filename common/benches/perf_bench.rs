@@ -279,7 +279,7 @@ fn bench_udp_batching() {
     let bench = Benchmarker::new(100, 1000);
     let mut comparison = BenchmarkComparison::new();
 
-    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433);
+    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51820);
     let packet = bytes::Bytes::from(vec![0u8; 1400]);
 
     // Single packet sends (baseline)
@@ -359,8 +359,8 @@ fn bench_multipath() {
     let mut comparison = BenchmarkComparison::new();
 
     let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
-    let remote1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 4433);
-    let remote2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4433);
+    let remote1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 51820);
+    let remote2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 51820);
     let path1 = PathId::new(local, remote1);
     let path2 = PathId::new(local, remote2);
 
@@ -407,7 +407,7 @@ fn bench_end_to_end() {
     let mut comparison = BenchmarkComparison::new();
 
     let packet = vec![0u8; 1400];
-    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433);
+    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51820);
 
     // Raw passthrough (baseline)
     comparison.add(bench.run("Raw passthrough", 1400, || {
@@ -705,7 +705,7 @@ fn bench_memory_pressure() {
     let mut pool = BufferPool::new(65536, 128, 512);
     let mut fec_encoder = AdaptiveFec::new();
     let mut batcher = UdpBatcher::new();
-    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4433);
+    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 51820);
 
     let start = std::time::Instant::now();
     let mut total_bytes = 0u64;

@@ -596,7 +596,7 @@ impl SimdPacketParser {
                 protocol,
                 payload_offset: 14 + ihl,
                 is_udp: false,
-                is_quic: false,
+                is_tunnel: false,
             });
         }
 
@@ -610,8 +610,8 @@ impl SimdPacketParser {
         let src_port = u16::from_be_bytes([udp_header[0], udp_header[1]]);
         let dst_port = u16::from_be_bytes([udp_header[2], udp_header[3]]);
 
-        // Check for QUIC (common ports)
-        let is_quic = dst_port == 443 || dst_port == 4433 || dst_port == 8443;
+        // Check for tunnel traffic (QUIC/OxTunnel ports)
+        let is_tunnel = dst_port == 443 || dst_port == 51820 || dst_port == 8443;
 
         Some(ParsedPacket {
             src_addr: Some(SocketAddr::V4(SocketAddrV4::new(src_ip, src_port))),
@@ -619,7 +619,7 @@ impl SimdPacketParser {
             protocol,
             payload_offset: udp_offset + 8,
             is_udp: true,
-            is_quic,
+            is_tunnel,
         })
     }
 
@@ -716,7 +716,7 @@ pub struct ParsedPacket {
     pub protocol: u8,
     pub payload_offset: usize,
     pub is_udp: bool,
-    pub is_quic: bool,
+    pub is_tunnel: bool,
 }
 
 // =============================================================================
@@ -1039,8 +1039,8 @@ pub struct UltraConfig {
     pub numa_aware: bool,
     /// Enable 1GB huge pages (vs 2MB)
     pub huge_1gb: bool,
-    /// QUIC port to filter
-    pub quic_port: u16,
+    /// OxTunnel port to filter
+    pub port: u16,
     /// Rate limit (packets per second, 0 = unlimited)
     pub rate_limit: u64,
     /// Enable security validation
@@ -1054,7 +1054,7 @@ impl Default for UltraConfig {
             pool_size: DEFAULT_MEMPOOL_SIZE,
             numa_aware: true,
             huge_1gb: false,
-            quic_port: 4433,
+            port: 51820,
             rate_limit: 0, // Unlimited
             security_validation: true,
         }
@@ -1069,7 +1069,7 @@ impl UltraConfig {
             pool_size: 1048576, // 1M packets
             numa_aware: true,
             huge_1gb: true,
-            quic_port: 4433,
+            port: 51820,
             rate_limit: 0,
             security_validation: false, // Skip for max speed
         }
@@ -1082,7 +1082,7 @@ impl UltraConfig {
             pool_size: DEFAULT_MEMPOOL_SIZE,
             numa_aware: true,
             huge_1gb: false,
-            quic_port: 4433,
+            port: 51820,
             rate_limit: 10_000_000, // 10M pps
             security_validation: true,
         }
@@ -1286,7 +1286,7 @@ pub struct BypassConfig {
     pub mempool_cache_size: u32,
     pub mtu: u16,
     pub enable_rss: bool,
-    pub quic_port: u16,
+    pub port: u16,
     pub hugepages: u32,
 }
 
@@ -1302,7 +1302,7 @@ impl Default for BypassConfig {
             mempool_cache_size: 512,
             mtu: 9000,
             enable_rss: true,
-            quic_port: 4433,
+            port: 51820,
             hugepages: 1024,
         }
     }
@@ -1353,7 +1353,7 @@ impl BypassProcessor {
         let ultra_config = UltraConfig {
             workers: config.rx_queues as usize,
             pool_size: config.mempool_size as usize,
-            quic_port: config.quic_port,
+            port: config.port,
             ..UltraConfig::default()
         };
         Ok(Self {
@@ -1510,14 +1510,14 @@ mod tests {
         packet[26..30].copy_from_slice(&[192, 168, 1, 1]); // Src IP
         packet[30..34].copy_from_slice(&[192, 168, 1, 2]); // Dst IP
                                                            // UDP header
-        packet[34..36].copy_from_slice(&4433u16.to_be_bytes()); // Src port
-        packet[36..38].copy_from_slice(&4433u16.to_be_bytes()); // Dst port
+        packet[34..36].copy_from_slice(&51820u16.to_be_bytes()); // Src port
+        packet[36..38].copy_from_slice(&51820u16.to_be_bytes()); // Dst port
 
         let result = SimdPacketParser::parse_fast(&packet);
         assert!(result.is_some());
         let parsed = result.unwrap();
         assert!(parsed.is_udp);
-        assert!(parsed.is_quic);
+        assert!(parsed.is_tunnel);
     }
 
     #[test]

@@ -250,22 +250,22 @@ fn make_path_id(local_port: u16, remote_port: u16) -> PathId {
 
 #[test]
 fn test_path_id_new() {
-    let path_id = make_path_id(5000, 4433);
+    let path_id = make_path_id(5000, 51820);
     assert_eq!(
         path_id.local,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 5000)
     );
     assert_eq!(
         path_id.remote,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4433)
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 51820)
     );
 }
 
 #[test]
 fn test_path_id_eq() {
-    let path1 = make_path_id(5000, 4433);
-    let path2 = make_path_id(5000, 4433);
-    let path3 = make_path_id(5001, 4433);
+    let path1 = make_path_id(5000, 51820);
+    let path2 = make_path_id(5000, 51820);
+    let path3 = make_path_id(5001, 51820);
 
     assert_eq!(path1, path2);
     assert_ne!(path1, path3);
@@ -276,9 +276,9 @@ fn test_path_id_hash() {
     use std::collections::HashSet;
 
     let mut set = HashSet::new();
-    set.insert(make_path_id(5000, 4433));
-    set.insert(make_path_id(5000, 4433)); // Duplicate
-    set.insert(make_path_id(5001, 4433));
+    set.insert(make_path_id(5000, 51820));
+    set.insert(make_path_id(5000, 51820)); // Duplicate
+    set.insert(make_path_id(5001, 51820));
 
     assert_eq!(set.len(), 2);
 }
@@ -328,10 +328,10 @@ fn test_scheduler_default() {
 fn test_scheduler_add_path() {
     let mut scheduler = MultipathScheduler::default();
 
-    scheduler.add_path(make_path_id(5000, 4433), PathMetrics::default());
+    scheduler.add_path(make_path_id(5000, 51820), PathMetrics::default());
     assert_eq!(scheduler.path_count(), 1);
 
-    scheduler.add_path(make_path_id(5001, 4433), PathMetrics::default());
+    scheduler.add_path(make_path_id(5001, 51820), PathMetrics::default());
     assert_eq!(scheduler.path_count(), 2);
 }
 
@@ -339,8 +339,8 @@ fn test_scheduler_add_path() {
 fn test_scheduler_remove_path() {
     let mut scheduler = MultipathScheduler::default();
 
-    let path1 = make_path_id(5000, 4433);
-    let path2 = make_path_id(5001, 4433);
+    let path1 = make_path_id(5000, 51820);
+    let path2 = make_path_id(5001, 51820);
 
     scheduler.add_path(path1, PathMetrics::default());
     scheduler.add_path(path2, PathMetrics::default());
@@ -353,7 +353,7 @@ fn test_scheduler_remove_path() {
 #[test]
 fn test_scheduler_update_metrics() {
     let mut scheduler = MultipathScheduler::default();
-    let path_id = make_path_id(5000, 4433);
+    let path_id = make_path_id(5000, 51820);
 
     scheduler.add_path(path_id, PathMetrics::default());
     scheduler.update_metrics(&path_id, PathMetrics::new(20.0, 10_000_000, 0.01, 5.0));
@@ -369,7 +369,7 @@ fn test_scheduler_next_path_empty() {
 #[test]
 fn test_scheduler_next_path_single() {
     let mut scheduler = MultipathScheduler::default();
-    let path_id = make_path_id(5000, 4433);
+    let path_id = make_path_id(5000, 51820);
 
     scheduler.add_path(path_id, PathMetrics::default());
 
@@ -381,8 +381,8 @@ fn test_scheduler_next_path_single() {
 fn test_scheduler_round_robin() {
     let mut scheduler = MultipathScheduler::new(SchedulingStrategy::RoundRobin);
 
-    let path1 = make_path_id(5000, 4433);
-    let path2 = make_path_id(5001, 4433);
+    let path1 = make_path_id(5000, 51820);
+    let path2 = make_path_id(5001, 51820);
 
     scheduler.add_path(path1, PathMetrics::default());
     scheduler.add_path(path2, PathMetrics::default());
@@ -399,8 +399,8 @@ fn test_scheduler_round_robin() {
 fn test_scheduler_weighted_prefers_better() {
     let mut scheduler = MultipathScheduler::new(SchedulingStrategy::Weighted);
 
-    let good_path = make_path_id(5000, 4433);
-    let bad_path = make_path_id(5001, 4433);
+    let good_path = make_path_id(5000, 51820);
+    let bad_path = make_path_id(5001, 51820);
 
     scheduler.add_path(good_path, PathMetrics::new(20.0, 10_000_000, 0.01, 5.0));
     scheduler.add_path(bad_path, PathMetrics::new(500.0, 100_000, 0.30, 100.0));
@@ -413,8 +413,8 @@ fn test_scheduler_weighted_prefers_better() {
 fn test_scheduler_min_latency() {
     let mut scheduler = MultipathScheduler::new(SchedulingStrategy::MinLatency);
 
-    let low_latency = make_path_id(5000, 4433);
-    let high_latency = make_path_id(5001, 4433);
+    let low_latency = make_path_id(5000, 51820);
+    let high_latency = make_path_id(5001, 51820);
 
     scheduler.add_path(low_latency, PathMetrics::new(10.0, 1_000_000, 0.05, 5.0));
     scheduler.add_path(high_latency, PathMetrics::new(200.0, 10_000_000, 0.01, 5.0));
@@ -427,8 +427,8 @@ fn test_scheduler_min_latency() {
 fn test_scheduler_all_paths() {
     let mut scheduler = MultipathScheduler::new(SchedulingStrategy::Redundant);
 
-    let path1 = make_path_id(5000, 4433);
-    let path2 = make_path_id(5001, 4433);
+    let path1 = make_path_id(5000, 51820);
+    let path2 = make_path_id(5001, 51820);
 
     scheduler.add_path(path1, PathMetrics::default());
     scheduler.add_path(path2, PathMetrics::default());
@@ -443,8 +443,8 @@ fn test_scheduler_all_paths() {
 fn test_scheduler_healthy_path_count() {
     let mut scheduler = MultipathScheduler::default();
 
-    let healthy_path = make_path_id(5000, 4433);
-    let unhealthy_path = make_path_id(5001, 4433);
+    let healthy_path = make_path_id(5000, 51820);
+    let unhealthy_path = make_path_id(5001, 51820);
 
     scheduler.add_path(healthy_path, PathMetrics::new(20.0, 1_000_000, 0.1, 10.0));
     scheduler.add_path(unhealthy_path, PathMetrics::new(50.0, 1_000_000, 0.7, 10.0)); // High loss
@@ -458,11 +458,11 @@ fn test_scheduler_total_bandwidth() {
     let mut scheduler = MultipathScheduler::default();
 
     scheduler.add_path(
-        make_path_id(5000, 4433),
+        make_path_id(5000, 51820),
         PathMetrics::new(20.0, 5_000_000, 0.01, 5.0),
     );
     scheduler.add_path(
-        make_path_id(5001, 4433),
+        make_path_id(5001, 51820),
         PathMetrics::new(30.0, 3_000_000, 0.01, 5.0),
     );
 
@@ -473,7 +473,7 @@ fn test_scheduler_total_bandwidth() {
 fn test_scheduler_stats() {
     let mut scheduler = MultipathScheduler::default();
 
-    let path = make_path_id(5000, 4433);
+    let path = make_path_id(5000, 51820);
     scheduler.add_path(path, PathMetrics::default());
 
     scheduler.next_path();
@@ -484,6 +484,9 @@ fn test_scheduler_stats() {
 
 #[test]
 fn test_scheduling_strategy_eq() {
-    assert_eq!(SchedulingStrategy::RoundRobin, SchedulingStrategy::RoundRobin);
+    assert_eq!(
+        SchedulingStrategy::RoundRobin,
+        SchedulingStrategy::RoundRobin
+    );
     assert_ne!(SchedulingStrategy::RoundRobin, SchedulingStrategy::Weighted);
 }
