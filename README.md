@@ -173,8 +173,8 @@ See [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) and [ADVANCED_ML.md](docs/ADVANCED
 ## Speed Test
 
 ```bash
-oxidize-client --server SERVER_IP:4433 --speedtest
-oxidize-client --server SERVER_IP:4433 --speedtest --json  # For scripting
+oxidize-client --server SERVER_IP:51820 --speedtest
+oxidize-client --server SERVER_IP:51820 --speedtest --json  # For scripting
 ```
 
 ## Quick Start
@@ -183,7 +183,7 @@ oxidize-client --server SERVER_IP:4433 --speedtest --json  # For scripting
 
 ```bash
 # Install with server address (required)
-curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- <server_ip>:4433
+curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/install.sh | sudo bash -s -- <server_ip>:51820
 ```
 
 The installer handles everything: downloads binary, configures service, and starts automatically.

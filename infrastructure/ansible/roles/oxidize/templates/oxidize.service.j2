@@ -8,7 +8,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/opt/oxidize
-ExecStart=/opt/oxidize/oxidize-server --enable-auth --listen [::]:4433
+ExecStart=/opt/oxidize/oxidize-server --listen [::]:51820{% if oxidize_app_public_key is defined and oxidize_api_secret is defined %} --enable-auth{% endif %}
 Restart=always
 RestartSec=5
 LimitNOFILE=2097152
@@ -16,7 +16,7 @@ LimitMEMLOCK=infinity
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_IPC_LOCK
 Environment=RUST_LOG=info
 Environment=RUST_BACKTRACE=1
-EnvironmentFile=/etc/oxidize/auth.env
+EnvironmentFile=-/etc/oxidize/auth.env
 CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=99
 Nice=-20

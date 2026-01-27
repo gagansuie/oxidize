@@ -1,5 +1,5 @@
 [server]
-listen_addr = "0.0.0.0:4433"
+listen_addr = "0.0.0.0:51820"
 public_ip = "{{ public_ip.content | default('0.0.0.0') }}"
 cert_path = "/etc/oxidize/certs/server.crt"
 key_path = "/etc/oxidize/certs/server.key"
@@ -45,9 +45,9 @@ node_id = "{{ inventory_hostname | default('relay-1') }}"
 # [[mesh.peers]]
 # name = "relay-frankfurt"
 # region = "eu-central"
-# address = "frankfurt.oxd.sh:4433"
+# address = "frankfurt.oxd.sh:51820"
 # 
 # [[mesh.peers]]
 # name = "relay-tokyo"
 # region = "asia-pacific"
-# address = "tokyo.oxd.sh:4433"
+# address = "tokyo.oxd.sh:51820"

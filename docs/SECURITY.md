@@ -164,7 +164,7 @@ if action != SecurityAction::Allow {
 # config.toml - Production hardened
 
 [server]
-listen = "0.0.0.0:4433"
+listen = "0.0.0.0:51820"
 max_connections = 10000
 idle_timeout_secs = 30
 
@@ -236,14 +236,14 @@ sudo sysctl -p /etc/sysctl.d/99-oxidize.conf
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Rate limit new UDP connections per IP
-iptables -A INPUT -p udp --dport 4433 -m state --state NEW \
+iptables -A INPUT -p udp --dport 51820 -m state --state NEW \
     -m recent --set --name OXIDIZE
-iptables -A INPUT -p udp --dport 4433 -m state --state NEW \
+iptables -A INPUT -p udp --dport 51820 -m state --state NEW \
     -m recent --update --seconds 1 --hitcount 20 --name OXIDIZE \
     -j DROP
 
 # Allow Oxidize traffic
-iptables -A INPUT -p udp --dport 4433 -j ACCEPT
+iptables -A INPUT -p udp --dport 51820 -j ACCEPT
 
 # Drop invalid packets
 iptables -A INPUT -m state --state INVALID -j DROP
@@ -274,11 +274,11 @@ table inet oxidize {
         ct state established,related accept
         
         # Rate limit new connections
-        udp dport 4433 ct state new \
+        udp dport 51820 ct state new \
             limit rate over 50/second burst 100 packets drop
         
         # Allow Oxidize
-        udp dport 4433 accept
+        udp dport 51820 accept
     }
 }
 ```
