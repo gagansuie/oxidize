@@ -23,9 +23,13 @@ ExecReload=/bin/kill -HUP $MAINPID
 LimitNOFILE=65535
 LimitNPROC=4096
 
-# Security hardening
+# Network capabilities for NFQUEUE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Security hardening (relaxed for packet capture)
 NoNewPrivileges=false
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=true
 ReadWritePaths=/var/run/oxidize

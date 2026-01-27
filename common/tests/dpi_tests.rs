@@ -10,13 +10,19 @@ use std::sync::atomic::Ordering;
 
 #[test]
 fn test_identified_app_traffic_class_gaming() {
-    assert_eq!(IdentifiedApp::Valorant.traffic_class(), TrafficClass::Gaming);
+    assert_eq!(
+        IdentifiedApp::Valorant.traffic_class(),
+        TrafficClass::Gaming
+    );
     assert_eq!(IdentifiedApp::CSGO.traffic_class(), TrafficClass::Gaming);
     assert_eq!(
         IdentifiedApp::ApexLegends.traffic_class(),
         TrafficClass::Gaming
     );
-    assert_eq!(IdentifiedApp::Fortnite.traffic_class(), TrafficClass::Gaming);
+    assert_eq!(
+        IdentifiedApp::Fortnite.traffic_class(),
+        TrafficClass::Gaming
+    );
     assert_eq!(
         IdentifiedApp::LeagueOfLegends.traffic_class(),
         TrafficClass::Gaming
@@ -80,10 +86,7 @@ fn test_identified_app_traffic_class_other() {
         IdentifiedApp::FileTransfer.traffic_class(),
         TrafficClass::Bulk
     );
-    assert_eq!(
-        IdentifiedApp::Unknown.traffic_class(),
-        TrafficClass::Normal
-    );
+    assert_eq!(IdentifiedApp::Unknown.traffic_class(), TrafficClass::Normal);
 }
 
 // ============================================================================
@@ -281,14 +284,7 @@ fn test_dpi_stats() {
 
     for i in 0..10 {
         let port = if i < 5 { 27015 } else { 54321 }; // 5 CS:GO, 5 unknown
-        dpi.inspect(
-            test_ip(),
-            12345 + i,
-            dest_ip(),
-            port,
-            &payload,
-            100,
-        );
+        dpi.inspect(test_ip(), 12345 + i, dest_ip(), port, &payload, 100);
     }
 
     assert_eq!(dpi.stats.packets_inspected.load(Ordering::Relaxed), 10);

@@ -75,7 +75,18 @@ fn test_decode_varint32_incomplete() {
 
 #[test]
 fn test_varint_roundtrip() {
-    let values = [0u32, 1, 127, 128, 255, 16383, 16384, 2097151, 2097152, u32::MAX];
+    let values = [
+        0u32,
+        1,
+        127,
+        128,
+        255,
+        16383,
+        16384,
+        2097151,
+        2097152,
+        u32::MAX,
+    ];
 
     for &val in &values {
         let mut buf = [0u8; 5];

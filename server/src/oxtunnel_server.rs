@@ -24,6 +24,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
+use crate::forwarder::SharedForwarder;
+
 // ============================================================================
 // Rate Limiter
 // ============================================================================
@@ -255,6 +257,7 @@ struct PacketForwarder {
     _phantom: std::marker::PhantomData<()>,
 }
 
+#[allow(dead_code)]
 impl PacketForwarder {
     #[cfg(unix)]
     fn new() -> Self {
@@ -545,6 +548,8 @@ pub struct OxTunnelServer {
     sessions: Arc<RwLock<HashMap<[u8; 32], TunnelSession>>>,
     ip_pool: Arc<IpPool>,
     forwarder: Arc<PacketForwarder>,
+    /// SharedForwarder for proper response routing
+    shared_forwarder: Arc<SharedForwarder>,
     buffer_pool: Arc<TunnelBufferPool>,
     stats: Arc<TunnelStats>,
     rate_limiter: Arc<RateLimiter>,
@@ -584,11 +589,17 @@ impl OxTunnelServer {
             );
         }
 
+        // Create shared forwarder for bidirectional packet routing
+        let shared_forwarder = SharedForwarder::new()
+            .await
+            .context("Failed to create shared forwarder")?;
+
         Ok(Self {
             server_id: generate_id(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             ip_pool: Arc::new(IpPool::new(config.ip_pool_base)),
             forwarder: Arc::new(PacketForwarder::new()),
+            shared_forwarder,
             buffer_pool: Arc::new(TunnelBufferPool::new()),
             stats: Arc::new(TunnelStats::new()),
             rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
@@ -1007,6 +1018,7 @@ impl OxTunnelServer {
             sessions: Arc::clone(&self.sessions),
             ip_pool: Arc::clone(&self.ip_pool),
             forwarder: Arc::clone(&self.forwarder),
+            shared_forwarder: Arc::clone(&self.shared_forwarder),
             buffer_pool: Arc::clone(&self.buffer_pool),
             stats: Arc::clone(&self.stats),
             rate_limiter: Arc::clone(&self.rate_limiter),
@@ -1094,7 +1106,10 @@ struct MobileServerHandler {
     server_id: [u8; 32],
     sessions: Arc<RwLock<HashMap<[u8; 32], TunnelSession>>>,
     ip_pool: Arc<IpPool>,
+    #[allow(dead_code)]
     forwarder: Arc<PacketForwarder>,
+    /// SharedForwarder for proper response routing
+    shared_forwarder: Arc<SharedForwarder>,
     #[allow(dead_code)]
     buffer_pool: Arc<TunnelBufferPool>, // Reserved for zero-copy path
     stats: Arc<TunnelStats>,
@@ -1238,6 +1253,9 @@ impl MobileServerHandler {
             .handshakes_completed
             .fetch_add(1, Ordering::Relaxed);
 
+        // Register connection for response routing and start response listener
+        self.start_response_listener(peer_addr).await;
+
         // Send response
         let response = HandshakeResponse {
             server_id: self.server_id,
@@ -1333,6 +1351,9 @@ impl MobileServerHandler {
             .handshakes_completed
             .fetch_add(1, Ordering::Relaxed);
 
+        // Register connection for response routing and start response listener
+        self.start_response_listener(peer_addr).await;
+
         // Send response
         let response = HandshakeResponse {
             server_id: self.server_id,
@@ -1393,65 +1414,89 @@ impl MobileServerHandler {
         // Update session activity
         self.update_session_activity(peer_addr).await;
 
+        // Generate conn_id from peer address for response routing
+        let conn_id = Self::peer_addr_to_conn_id(peer_addr);
+
         // Handle batch packets
         if header.flags & flags::BATCH != 0 {
             let packets = PacketBatch::decode(payload)
                 .map_err(|e| anyhow::anyhow!("Batch decode error: {}", e))?;
 
             for packet_data in packets {
-                self.forward_ip_packet(&packet_data).await?;
+                self.forward_ip_packet(&packet_data, conn_id, peer_addr)
+                    .await?;
             }
             return Ok(());
         }
 
         // Single packet
-        self.forward_ip_packet(payload).await
+        self.forward_ip_packet(payload, conn_id, peer_addr).await
     }
 
-    async fn forward_ip_packet(&self, packet: &[u8]) -> Result<()> {
+    /// Convert peer address to a unique connection ID for response routing
+    fn peer_addr_to_conn_id(peer_addr: SocketAddr) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        peer_addr.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    async fn forward_ip_packet(
+        &self,
+        packet: &[u8],
+        conn_id: u64,
+        _peer_addr: SocketAddr,
+    ) -> Result<()> {
         if packet.is_empty() {
             return Ok(());
         }
 
-        let version = packet[0] >> 4;
+        // Use SharedForwarder for forwarding with response routing
+        // The connection should already be registered during handshake
+        let shared_forwarder = Arc::clone(&self.shared_forwarder);
+        let packet_owned = packet.to_vec();
 
-        match version {
-            4 => {
-                if packet.len() < 20 {
-                    return Err(anyhow::anyhow!("IPv4 packet too short"));
-                }
-                let dest = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-
-                let forwarder = Arc::clone(&self.forwarder);
-                let packet_owned = packet.to_vec();
-                tokio::spawn(async move {
-                    if let Err(e) = forwarder.forward_ipv4(&packet_owned, dest).await {
-                        debug!("Failed to forward IPv4 packet: {}", e);
-                    }
-                });
+        tokio::spawn(async move {
+            if let Err(e) = shared_forwarder.forward(conn_id, packet_owned).await {
+                debug!("Failed to forward packet: {}", e);
             }
-            6 => {
-                if packet.len() < 40 {
-                    return Err(anyhow::anyhow!("IPv6 packet too short"));
-                }
-                let mut addr_bytes = [0u8; 16];
-                addr_bytes.copy_from_slice(&packet[24..40]);
-                let dest = Ipv6Addr::from(addr_bytes);
-
-                let forwarder = Arc::clone(&self.forwarder);
-                let packet_owned = packet.to_vec();
-                tokio::spawn(async move {
-                    if let Err(e) = forwarder.forward_ipv6(&packet_owned, dest).await {
-                        debug!("Failed to forward IPv6 packet: {}", e);
-                    }
-                });
-            }
-            _ => {
-                debug!("Unknown IP version: {}", version);
-            }
-        }
+        });
 
         Ok(())
+    }
+
+    /// Register connection with SharedForwarder and start background task to forward responses
+    async fn start_response_listener(&self, peer_addr: SocketAddr) {
+        let conn_id = Self::peer_addr_to_conn_id(peer_addr);
+        let mut response_rx = self.shared_forwarder.register_connection(conn_id).await;
+
+        let response_tx = self.response_tx.clone();
+        let stats = Arc::clone(&self.stats);
+
+        tokio::spawn(async move {
+            while let Some(response_packet) = response_rx.recv().await {
+                // Encode response in OxTunnel format and send back to client
+                let mut buf = vec![0u8; response_packet.len() + HEADER_SIZE];
+                if let Ok(len) = encode_packet(
+                    &mut buf,
+                    &response_packet,
+                    0,
+                    0, // Data packet
+                    None,
+                ) {
+                    if response_tx
+                        .send((buf[..len].to_vec(), peer_addr))
+                        .await
+                        .is_ok()
+                    {
+                        stats
+                            .total_tx_bytes
+                            .fetch_add(len as u64, Ordering::Relaxed);
+                        stats.total_tx_packets.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
     }
 
     async fn update_session_activity(&self, peer_addr: SocketAddr) {

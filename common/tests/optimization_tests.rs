@@ -1,7 +1,9 @@
 //! Tests for optimization modules: optimization_stats, mptcp_redundancy, handoff_prediction
 
 use oxidize_common::handoff_prediction::{HandoffPredictor, NetworkType};
-use oxidize_common::mptcp_redundancy::{MptcpRedundancyScheduler, PacketImportance, RedundancyConfig};
+use oxidize_common::mptcp_redundancy::{
+    MptcpRedundancyScheduler, PacketImportance, RedundancyConfig,
+};
 use oxidize_common::optimization_stats::{AtomicOptStats, OptimizationStats};
 use std::sync::atomic::Ordering;
 
@@ -235,7 +237,13 @@ fn test_mptcp_scheduler_stats() {
     scheduler.schedule_packet(PacketImportance::Critical);
     scheduler.schedule_packet(PacketImportance::Normal);
 
-    assert!(scheduler.stats.redundant_packets_sent.load(Ordering::Relaxed) >= 1);
+    assert!(
+        scheduler
+            .stats
+            .redundant_packets_sent
+            .load(Ordering::Relaxed)
+            >= 1
+    );
     assert!(scheduler.stats.packets_sent_primary.load(Ordering::Relaxed) >= 1);
 }
 

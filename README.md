@@ -6,7 +6,7 @@
 
 **Neural networks predict packet loss before it happens, optimize routing in real-time, and accelerate your network automatically.**
 
-> 🔥 **0.2-1.0µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
+> 🔥 **<0.2µs** per-packet processing • **44%** header compression • **Zero-copy** packet pipeline • **Pure Rust**
 
 [![CI](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/gagansuie/oxidize/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/gagansuie/oxidize/total?logo=github&label=downloads)](https://github.com/gagansuie/oxidize/releases)
@@ -218,7 +218,7 @@ sudo ./scripts/xdp-setup.sh eth0 51820
 sudo ./target/release/oxidize-server --listen 0.0.0.0:51820
 ```
 
-AF_XDP provides 10-25 Gbps throughput with <1µs latency. Requires:
+AF_XDP provides 10-25 Gbps throughput with <0.2µs latency. Requires:
 - Linux 5.4+ kernel
 - Root privileges
 - XDP-capable NIC (Intel i40e/ixgbe, Mellanox mlx5, etc.)

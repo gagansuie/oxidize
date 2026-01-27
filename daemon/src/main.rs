@@ -233,6 +233,12 @@ async fn handle_connect(
         };
     }
 
+    // Debug: log received server_address
+    info!(
+        "Received connect request: server_id={}, server_address='{}'",
+        server_id, server_address
+    );
+
     // Resolve server address from provided IP
     let server_addr: SocketAddr = match format!("{}:{}", server_address, RELAY_PORT)
         .parse::<SocketAddr>()

@@ -733,73 +733,80 @@ fn run_platform_capture(
     info!("📦 Setting up iptables NFQUEUE rules...");
     let queue_num = config.queue_num.to_string();
 
-    // Remove any existing rules first (ignore errors)
-    if config.capture_tcp {
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-            ])
-            .output();
-    }
-    if config.capture_udp {
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-            ])
-            .output();
+    // Remove any existing rules first (ignore errors) - both OUTPUT and INPUT chains
+    for chain in &["OUTPUT", "INPUT"] {
+        if config.capture_tcp {
+            let _ = Command::new("iptables")
+                .args([
+                    "-D",
+                    chain,
+                    "-p",
+                    "tcp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output();
+        }
+        if config.capture_udp {
+            let _ = Command::new("iptables")
+                .args([
+                    "-D",
+                    chain,
+                    "-p",
+                    "udp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output();
+        }
     }
 
     // Add NFQUEUE rules with bypass (so traffic continues if queue isn't bound)
+    // Add rules for both OUTPUT (outbound) and INPUT (inbound) chains
     let mut rules_added = true;
-    if config.capture_tcp
-        && Command::new("iptables")
-            .args([
-                "-I",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output()
-            .is_err()
-    {
-        rules_added = false;
-    }
-    if config.capture_udp
-        && Command::new("iptables")
-            .args([
-                "-I",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output()
-            .is_err()
-    {
-        rules_added = false;
+    for chain in &["OUTPUT", "INPUT"] {
+        if config.capture_tcp
+            && Command::new("iptables")
+                .args([
+                    "-I",
+                    chain,
+                    "-p",
+                    "tcp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output()
+                .is_err()
+        {
+            rules_added = false;
+        }
+        if config.capture_udp
+            && Command::new("iptables")
+                .args([
+                    "-I",
+                    chain,
+                    "-p",
+                    "udp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output()
+                .is_err()
+        {
+            rules_added = false;
+        }
     }
 
     if rules_added {
@@ -808,9 +815,13 @@ fn run_platform_capture(
         warn!("⚠️ Failed to add some iptables rules - packet capture may not work");
     }
 
+    // Exclude relay server IPs from capture (both directions)
     for ip in &config.exclude_ips {
         let _ = Command::new("iptables")
             .args(["-I", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
+            .output();
+        let _ = Command::new("iptables")
+            .args(["-I", "INPUT", "-s", &ip.to_string(), "-j", "ACCEPT"])
             .output();
     }
 
@@ -879,41 +890,48 @@ fn cleanup_iptables_rules(config: &CaptureConfig) {
     info!("📦 Cleaning up iptables NFQUEUE rules...");
     let queue_num = config.queue_num.to_string();
 
+    // Clean up exclusion rules (both directions)
     for ip in &config.exclude_ips {
         let _ = Command::new("iptables")
             .args(["-D", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
             .output();
+        let _ = Command::new("iptables")
+            .args(["-D", "INPUT", "-s", &ip.to_string(), "-j", "ACCEPT"])
+            .output();
     }
 
-    if config.capture_tcp {
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output();
-    }
-    if config.capture_udp {
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output();
+    // Clean up NFQUEUE rules from both OUTPUT and INPUT chains
+    for chain in &["OUTPUT", "INPUT"] {
+        if config.capture_tcp {
+            let _ = Command::new("iptables")
+                .args([
+                    "-D",
+                    chain,
+                    "-p",
+                    "tcp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output();
+        }
+        if config.capture_udp {
+            let _ = Command::new("iptables")
+                .args([
+                    "-D",
+                    chain,
+                    "-p",
+                    "udp",
+                    "-j",
+                    "NFQUEUE",
+                    "--queue-num",
+                    &queue_num,
+                    "--queue-bypass",
+                ])
+                .output();
+        }
     }
 }
 

@@ -80,7 +80,7 @@ FLASH automatically detects NIC queues via:
 │  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘  │
 │         │                  │                  │                  │          │
 │         │           Zero-Copy           Ring Buffers        Processing      │
-│         │          (no memcpy)         (Fill/Comp/         (<1µs per       │
+│         │          (no memcpy)         (Fill/Comp/         (<0.19µs per     │
 │         │                               RX/TX)             packet)          │
 │         │                                                                   │
 │  ───────┴───────────────────────────────────────────────────────────────── │
@@ -93,7 +93,7 @@ FLASH automatically detects NIC queues via:
 | Metric | Standard UDP | AF_XDP | Improvement |
 |--------|-------------|--------|-------------|
 | Throughput | 1-3 Gbps | 10-25 Gbps | **8-10x** |
-| Latency | 10-50µs | <1µs | **10-50x** |
+| Latency | 10-50µs | <0.2µs | **50-250x** |
 | CPU per Gbps | High | Low | **3-5x less** |
 | Memory copies | Multiple | Zero | **Eliminated** |
 
@@ -304,7 +304,7 @@ Tested on Latitude.sh bare metal (AMD EPYC, dual 10 Gbps NICs):
 | Single-flow throughput | 9.8 Gbps |
 | Multi-flow throughput | 18+ Gbps |
 | Packets per second | 14.8 Mpps |
-| Per-packet latency | 0.5-1.0 µs |
+| Per-packet latency | <0.2µs |
 | CPU utilization @ 10 Gbps | ~40% single core |
 
 ## See Also
