@@ -52,7 +52,6 @@
       - linux-tools-common
       - curl
       - jq
-      - ufw
       - iptables-persistent
     state: present
   become: yes
@@ -67,54 +66,51 @@
   become: yes
   ignore_errors: yes
 
-- name: Ensure IPv6 is enabled in UFW for dual-stack support
-  lineinfile:
-    path: /etc/default/ufw
-    regexp: '^IPV6='
-    line: 'IPV6=yes'
-  become: yes
+# ============================================================================
+# Base Firewall Rules (iptables - ufw conflicts with iptables-persistent)
+# ============================================================================
 
-- name: Reload UFW after config change
-  shell: ufw --force disable && ufw --force enable
-  become: yes
-  ignore_errors: yes
-
-- name: Configure UFW - Allow SSH (IPv4 + IPv6)
+- name: Configure base firewall rules (IPv4 + IPv6)
   shell: |
-    ufw allow 22/tcp
+    set -e
+    echo "Configuring base firewall rules..."
+    
+    # Allow loopback
+    iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -A INPUT -i lo -j ACCEPT
+    ip6tables -C INPUT -i lo -j ACCEPT 2>/dev/null || ip6tables -A INPUT -i lo -j ACCEPT
+    
+    # Allow established/related connections
+    iptables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+      iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    ip6tables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+      ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # Allow SSH (port 22)
+    iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+    ip6tables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || ip6tables -A INPUT -p tcp --dport 22 -j ACCEPT
+    
+    # Allow OxTunnel UDP (port 51820)
+    iptables -C INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+    ip6tables -C INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null || ip6tables -A INPUT -p udp --dport 51820 -j ACCEPT
+    
+    # Allow OxTunnel TCP fallback (port 51821)
+    iptables -C INPUT -p tcp --dport 51821 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 51821 -j ACCEPT
+    ip6tables -C INPUT -p tcp --dport 51821 -j ACCEPT 2>/dev/null || ip6tables -A INPUT -p tcp --dport 51821 -j ACCEPT
+    
+    # Allow ICMPv6 (required for IPv6 to work properly)
+    ip6tables -C INPUT -p icmpv6 -j ACCEPT 2>/dev/null || ip6tables -A INPUT -p icmpv6 -j ACCEPT
+    
+    echo "Base firewall rules configured"
   args:
     executable: /bin/bash
   become: yes
-  register: ufw_ssh
-  changed_when: "'Rule added' in ufw_ssh.stdout or 'Skipping' in ufw_ssh.stdout"
-  failed_when: false
+  register: base_fw_result
+  changed_when: true
 
-- name: Configure UFW - Allow OxTunnel UDP (IPv4 + IPv6)
-  shell: |
-    ufw allow 51820/udp
-  args:
-    executable: /bin/bash
-  become: yes
-  register: ufw_oxtunnel_udp
-  changed_when: "'Rule added' in ufw_oxtunnel_udp.stdout or 'Skipping' in ufw_oxtunnel_udp.stdout"
-  failed_when: false
-
-- name: Configure UFW - Allow OxTunnel TCP fallback (IPv4 + IPv6)
-  shell: |
-    ufw allow 51821/tcp
-  args:
-    executable: /bin/bash
-  become: yes
-  register: ufw_oxtunnel_tcp
-  changed_when: "'Rule added' in ufw_oxtunnel_tcp.stdout or 'Skipping' in ufw_oxtunnel_tcp.stdout"
-  failed_when: false
-
-- name: Enable UFW with default deny
-  ufw:
-    state: enabled
-    policy: deny
-    direction: incoming
-  become: yes
+- name: Display base firewall configuration
+  debug:
+    var: base_fw_result.stdout_lines
+  when: base_fw_result is defined
 
 - name: Apply system tuning
   sysctl:
@@ -230,14 +226,6 @@
   debug:
     var: iptables_result.stdout_lines
   when: iptables_result is defined
-
-- name: Install iptables-persistent for rule persistence
-  apt:
-    name: iptables-persistent
-    state: present
-  become: yes
-  environment:
-    DEBIAN_FRONTEND: noninteractive
 
 - name: Save iptables rules
   command: netfilter-persistent save
