@@ -1,7 +1,7 @@
 ---
-- name: Stop oxidize service
+- name: Stop oxidize-server service
   systemd:
-    name: oxidize
+    name: oxidize-server
     state: stopped
   become: yes
   ignore_errors: yes
@@ -21,9 +21,9 @@
     mode: '0755'
   become: yes
 
-- name: Start oxidize service
+- name: Start oxidize-server service
   systemd:
-    name: oxidize
+    name: oxidize-server
     state: started
   become: yes
 

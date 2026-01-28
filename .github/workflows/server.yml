@@ -214,9 +214,9 @@ jobs:
       - name: Check If First Deploy
         id: first_deploy
         run: |
-          # Check if oxidize service exists on first server
+          # Check if oxidize-server service exists on first server
           FIRST_IP=$(echo '${{ needs.terraform.outputs.server_ips }}' | jq -r 'to_entries[0].value')
-          if ssh -o StrictHostKeyChecking=no -i ~/.ssh/latitude_oxidize ubuntu@$FIRST_IP "systemctl is-active oxidize" 2>/dev/null; then
+          if ssh -o StrictHostKeyChecking=no -i ~/.ssh/latitude_oxidize ubuntu@$FIRST_IP "systemctl is-active oxidize-server" 2>/dev/null; then
             echo "first_deploy=false" >> $GITHUB_OUTPUT
           else
             echo "first_deploy=true" >> $GITHUB_OUTPUT

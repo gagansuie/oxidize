@@ -27,6 +27,9 @@ const XDP_COPY: u16 = 1 << 1;
 const XDP_ZEROCOPY: u16 = 1 << 2;
 const XDP_USE_NEED_WAKEUP: u16 = 1 << 3;
 
+// Ring flags
+const XDP_RING_NEED_WAKEUP: u32 = 1 << 0;
+
 const XDP_PGOFF_RX_RING: u64 = 0;
 const XDP_PGOFF_TX_RING: u64 = 0x80000000;
 const XDP_UMEM_PGOFF_FILL_RING: u64 = 0x100000000;
@@ -146,6 +149,7 @@ impl Drop for Umem {
 struct XdpRing {
     producer: *mut AtomicU32,
     consumer: *mut AtomicU32,
+    flags: *mut AtomicU32,
     ring: *mut u8,
     mask: u32,
 }
@@ -155,9 +159,14 @@ impl XdpRing {
         XdpRing {
             producer: map_addr.add(offsets.producer as usize) as *mut AtomicU32,
             consumer: map_addr.add(offsets.consumer as usize) as *mut AtomicU32,
+            flags: map_addr.add(offsets.flags as usize) as *mut AtomicU32,
             ring: map_addr.add(offsets.desc as usize),
             mask: size - 1,
         }
+    }
+
+    fn needs_wakeup(&self) -> bool {
+        unsafe { (*self.flags).load(Ordering::Acquire) & XDP_RING_NEED_WAKEUP != 0 }
     }
 
     fn prod_peek(&self) -> u32 {
@@ -595,14 +604,43 @@ impl XdpSocket {
         }
     }
 
-    /// Poll for events
+    /// Poll for events with proper wakeup handling
     pub fn poll(&self, timeout_ms: i32) -> bool {
+        // Check if kernel needs wakeup (XDP_USE_NEED_WAKEUP mode)
+        if self.fill_ring.needs_wakeup() {
+            // Trigger kernel to process fill ring
+            unsafe {
+                libc::recvfrom(
+                    self.fd,
+                    ptr::null_mut(),
+                    0,
+                    libc::MSG_DONTWAIT,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+
         let mut pfd = libc::pollfd {
             fd: self.fd,
             events: libc::POLLIN | libc::POLLOUT,
             revents: 0,
         };
         unsafe { libc::poll(&mut pfd, 1, timeout_ms) > 0 }
+    }
+
+    /// Check if fill ring needs more frames
+    pub fn fill_ring_low(&self) -> bool {
+        let prod = self.fill_ring.prod_peek();
+        let cons = self.fill_ring.cons_peek();
+        let used = prod.wrapping_sub(cons);
+        // Refill when less than 25% full
+        used < self.config.fill_ring_size / 4
+    }
+
+    /// Get number of free frames available
+    pub fn free_frame_count(&self) -> usize {
+        self.umem.free_frames.len()
     }
 
     pub fn as_raw_fd(&self) -> RawFd {

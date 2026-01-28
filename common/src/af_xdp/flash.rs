@@ -7,8 +7,9 @@
 use super::linux_impl::{XdpPacket, XdpSocket};
 use super::{XdpConfig, XdpStats};
 use std::io;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{info, warn};
 
 /// FLASH: Fast Linked AF_XDP Sockets
@@ -22,6 +23,12 @@ pub struct FlashSocket {
     config: XdpConfig,
     stats: Arc<XdpStats>,
     num_queues: u32,
+    /// Last time packets were successfully received
+    last_rx_time: Instant,
+    /// Total packets received (for stall detection)
+    last_rx_count: AtomicU64,
+    /// Consecutive polls with no packets
+    idle_polls: AtomicU64,
 }
 
 #[cfg(target_os = "linux")]
@@ -48,6 +55,9 @@ impl FlashSocket {
                 config,
                 stats: Arc::new(XdpStats::new()),
                 num_queues: 1,
+                last_rx_time: Instant::now(),
+                last_rx_count: AtomicU64::new(0),
+                idle_polls: AtomicU64::new(0),
             });
         }
 
@@ -90,6 +100,9 @@ impl FlashSocket {
             config,
             stats: Arc::new(XdpStats::new()),
             num_queues: actual_queues,
+            last_rx_time: Instant::now(),
+            last_rx_count: AtomicU64::new(0),
+            idle_polls: AtomicU64::new(0),
         })
     }
 
@@ -170,6 +183,15 @@ impl FlashSocket {
             .rx_bytes
             .fetch_add(total_bytes, Ordering::Relaxed);
         self.stats.rx_batches.fetch_add(1, Ordering::Relaxed);
+
+        // Update health tracking
+        if !packets.is_empty() {
+            self.last_rx_time = Instant::now();
+            self.last_rx_count.fetch_add(total_rx, Ordering::Relaxed);
+            self.idle_polls.store(0, Ordering::Relaxed);
+        } else {
+            self.idle_polls.fetch_add(1, Ordering::Relaxed);
+        }
 
         packets
     }
@@ -274,6 +296,55 @@ impl FlashSocket {
             .map(|(i, s)| (i as u32, s.as_raw_fd()))
             .collect()
     }
+
+    /// Check if AF_XDP appears to be stalled (no packets for extended period)
+    /// Returns true if stalled and should fall back to standard UDP
+    pub fn is_stalled(&self, stall_threshold_secs: u64) -> bool {
+        let idle_polls = self.idle_polls.load(Ordering::Relaxed);
+        let elapsed = self.last_rx_time.elapsed().as_secs();
+
+        // Consider stalled if:
+        // 1. No packets received for stall_threshold_secs, AND
+        // 2. We've been polling actively (>1000 idle polls)
+        if elapsed > stall_threshold_secs && idle_polls > 1000 {
+            warn!(
+                "AF_XDP appears stalled: no packets for {}s, {} idle polls",
+                elapsed, idle_polls
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Get health status for monitoring
+    pub fn health_status(&self) -> FlashHealthStatus {
+        let total_free_frames: usize = self.sockets.iter().map(|s| s.free_frame_count()).sum();
+        let fill_ring_low = self.sockets.iter().any(|s| s.fill_ring_low());
+
+        FlashHealthStatus {
+            idle_secs: self.last_rx_time.elapsed().as_secs(),
+            idle_polls: self.idle_polls.load(Ordering::Relaxed),
+            total_rx: self.last_rx_count.load(Ordering::Relaxed),
+            free_frames: total_free_frames,
+            fill_ring_low,
+        }
+    }
+
+    /// Force replenish all fill rings (call periodically to prevent starvation)
+    pub fn maintain(&mut self) {
+        // Always try to replenish fill rings
+        self.populate_fill_rings();
+    }
+}
+
+/// Health status for FLASH socket monitoring
+#[derive(Debug, Clone)]
+pub struct FlashHealthStatus {
+    pub idle_secs: u64,
+    pub idle_polls: u64,
+    pub total_rx: u64,
+    pub free_frames: usize,
+    pub fill_ring_low: bool,
 }
 
 #[cfg(not(target_os = "linux"))]

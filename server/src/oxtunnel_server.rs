@@ -894,68 +894,109 @@ impl OxTunnelServer {
             &self.server_id[..8]
         );
 
-        // FLASH packet processing loop
-        let mut poll_count = 0u64;
+        // FLASH packet processing loop with stall detection
+        let mut last_maintain = Instant::now();
+        let mut last_health_check = Instant::now();
+        const MAINTAIN_INTERVAL: Duration = Duration::from_millis(100);
+        const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+        const STALL_THRESHOLD_SECS: u64 = 60; // Fall back after 60s of no packets
+
         loop {
-            poll_count += 1;
-            #[allow(clippy::manual_is_multiple_of)]
-            if poll_count % 10000 == 0 {
-                debug!("AF_XDP poll iteration {}", poll_count);
+            // Periodic maintenance: replenish fill rings even when idle
+            if last_maintain.elapsed() >= MAINTAIN_INTERVAL {
+                flash_socket.maintain();
+                last_maintain = Instant::now();
             }
 
-            if flash_socket.poll(100) {
-                let packets = flash_socket.recv(128);
-                if !packets.is_empty() {
-                    info!("📦 AF_XDP received {} packets", packets.len());
+            // Periodic health check with stall detection
+            if last_health_check.elapsed() >= HEALTH_CHECK_INTERVAL {
+                let health = flash_socket.health_status();
+                if health.fill_ring_low {
+                    warn!(
+                        "⚠️ AF_XDP fill ring low: {} free frames, replenishing...",
+                        health.free_frames
+                    );
+                    flash_socket.populate_fill_rings();
                 }
-                let addrs: Vec<u64> = packets.iter().map(|p| p.frame_addr).collect();
 
-                for pkt in packets {
-                    self.stats
-                        .total_rx_bytes
-                        .fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
-                    self.stats.total_rx_packets.fetch_add(1, Ordering::Relaxed);
+                // Check for stall and fall back to standard UDP
+                if flash_socket.is_stalled(STALL_THRESHOLD_SECS) {
+                    error!(
+                        "🚨 AF_XDP stalled! No packets for {}s. Falling back to standard UDP...",
+                        health.idle_secs
+                    );
+                    // Drop XDP resources and switch to standard UDP
+                    drop(flash_socket);
+                    drop(xdp_prog);
+                    info!("🔄 Switched to standard UDP mode");
+                    return self.run_standard().await;
+                }
 
-                    // Parse source address from raw packet (Eth + IP + UDP)
-                    // Returns (peer_addr, payload_offset) for both IPv4 and IPv6
-                    if let Some((peer_addr, payload_offset)) = Self::parse_packet_addr(&pkt.data) {
-                        let payload = &pkt.data[payload_offset..];
+                last_health_check = Instant::now();
+            }
 
-                        // Fast path: Handle UDP ping for latency measurement (no rate limit)
-                        if payload.len() >= 4
-                            && payload[..4] == oxidize_common::oxtunnel_protocol::PING_MAGIC
-                        {
-                            // Respond via standard socket (XDP is RX only)
-                            let mut pong = vec![0u8; payload.len()];
-                            pong[..4]
-                                .copy_from_slice(&oxidize_common::oxtunnel_protocol::PONG_MAGIC);
-                            if payload.len() > 4 {
-                                pong[4..].copy_from_slice(&payload[4..]);
+            // Poll with short timeout to stay responsive
+            let has_data = flash_socket.poll(10);
+
+            // Always try to receive (poll might miss edge cases)
+            let packets = flash_socket.recv(128);
+
+            if !packets.is_empty() {
+                debug!("📦 AF_XDP received {} packets", packets.len());
+            }
+
+            let addrs: Vec<u64> = packets.iter().map(|p| p.frame_addr).collect();
+
+            for pkt in packets {
+                self.stats
+                    .total_rx_bytes
+                    .fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
+                self.stats.total_rx_packets.fetch_add(1, Ordering::Relaxed);
+
+                // Parse source address from raw packet (Eth + IP + UDP)
+                if let Some((peer_addr, payload_offset)) = Self::parse_packet_addr(&pkt.data) {
+                    let payload = &pkt.data[payload_offset..];
+
+                    // Fast path: Handle UDP ping for latency measurement
+                    if payload.len() >= 4
+                        && payload[..4] == oxidize_common::oxtunnel_protocol::PING_MAGIC
+                    {
+                        let mut pong = vec![0u8; payload.len()];
+                        pong[..4].copy_from_slice(&oxidize_common::oxtunnel_protocol::PONG_MAGIC);
+                        if payload.len() > 4 {
+                            pong[4..].copy_from_slice(&payload[4..]);
+                        }
+                        let _ = self.socket.send_to(&pong, peer_addr).await;
+                        continue;
+                    }
+
+                    if !self.rate_limiter.check_packet(peer_addr.ip()).await {
+                        continue;
+                    }
+
+                    let handler = self.clone_handler();
+                    if pkt.data.len() > payload_offset {
+                        let packet = pkt.data[payload_offset..].to_vec();
+                        tokio::spawn(async move {
+                            if let Err(e) = handler.handle_packet(&packet, peer_addr).await {
+                                debug!("Error handling packet from {}: {}", peer_addr, e);
                             }
-                            let _ = self.socket.send_to(&pong, peer_addr).await;
-                            continue;
-                        }
-
-                        if !self.rate_limiter.check_packet(peer_addr.ip()).await {
-                            continue;
-                        }
-
-                        let handler = self.clone_handler();
-                        if pkt.data.len() > payload_offset {
-                            let packet = pkt.data[payload_offset..].to_vec();
-                            tokio::spawn(async move {
-                                if let Err(e) = handler.handle_packet(&packet, peer_addr).await {
-                                    debug!("Error handling packet from {}: {}", peer_addr, e);
-                                }
-                            });
-                        }
+                        });
                     }
                 }
+            }
 
+            // Return frames to UMEM (critical for fill ring replenishment)
+            if !addrs.is_empty() {
                 flash_socket.return_frames(&addrs);
             }
 
-            tokio::task::yield_now().await;
+            // Yield to other tasks, but not too aggressively if we had data
+            if !has_data {
+                tokio::time::sleep(Duration::from_micros(100)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
         }
     }
 
