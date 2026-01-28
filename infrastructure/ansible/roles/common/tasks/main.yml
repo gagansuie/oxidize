@@ -53,8 +53,11 @@
       - curl
       - jq
       - ufw
+      - iptables-persistent
     state: present
   become: yes
+  environment:
+    DEBIAN_FRONTEND: noninteractive
   # Ubuntu 24.04: python3-pip not needed (use pipx), cpufrequtils replaced by cpupower
 
 - name: Install kernel-specific linux tools
@@ -129,6 +132,12 @@
     - { name: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
     - { name: 'vm.swappiness', value: '10' }
     - { name: 'fs.file-max', value: '4194304' }
+    # IP forwarding for tunnel traffic
+    - { name: 'net.ipv4.ip_forward', value: '1' }
+    - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
+    - { name: 'net.ipv6.conf.default.forwarding', value: '1' }
+    # ICMP ping support for tunnel clients
+    - { name: 'net.ipv4.ping_group_range', value: '0 2147483647' }
 
 - name: Set file limits
   pam_limits:
@@ -231,6 +240,59 @@
     DEBIAN_FRONTEND: noninteractive
 
 - name: Save iptables rules
+  command: netfilter-persistent save
+  become: yes
+  changed_when: true
+
+# ============================================================================
+# NAT/MASQUERADE for Tunnel Traffic
+# ============================================================================
+
+- name: Configure NAT MASQUERADE for tunnel traffic
+  shell: |
+    set -e
+    echo "Configuring NAT for tunnel traffic..."
+    
+    # Detect default interface
+    DEFAULT_IF=$(ip route | grep '^default' | awk '{print $5}' | head -1)
+    if [ -z "$DEFAULT_IF" ]; then
+      DEFAULT_IF="eth0"
+    fi
+    echo "Default interface: $DEFAULT_IF"
+    
+    # IPv4 NAT for tunnel clients (10.0.0.0/8 is the tunnel IP pool)
+    iptables -t nat -C POSTROUTING -s 10.0.0.0/8 -o $DEFAULT_IF -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o $DEFAULT_IF -j MASQUERADE
+    
+    # Also allow forwarding for tunnel traffic
+    iptables -C FORWARD -s 10.0.0.0/8 -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -s 10.0.0.0/8 -j ACCEPT
+    iptables -C FORWARD -d 10.0.0.0/8 -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -d 10.0.0.0/8 -j ACCEPT
+    
+    # IPv6 NAT for tunnel clients (fd00::/8 ULA range)
+    ip6tables -t nat -C POSTROUTING -s fd00::/8 -o $DEFAULT_IF -j MASQUERADE 2>/dev/null || \
+    ip6tables -t nat -A POSTROUTING -s fd00::/8 -o $DEFAULT_IF -j MASQUERADE
+    
+    # IPv6 forwarding rules
+    ip6tables -C FORWARD -s fd00::/8 -j ACCEPT 2>/dev/null || \
+    ip6tables -A FORWARD -s fd00::/8 -j ACCEPT
+    ip6tables -C FORWARD -d fd00::/8 -j ACCEPT 2>/dev/null || \
+    ip6tables -A FORWARD -d fd00::/8 -j ACCEPT
+    
+    echo "NAT MASQUERADE configured for tunnel traffic"
+  args:
+    executable: /bin/bash
+  become: yes
+  register: nat_result
+  changed_when: true
+
+- name: Display NAT configuration
+  debug:
+    var: nat_result.stdout_lines
+  when: nat_result is defined
+
+- name: Save iptables rules after NAT
   command: netfilter-persistent save
   become: yes
   changed_when: true

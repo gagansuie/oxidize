@@ -1063,10 +1063,17 @@ impl OxTunnelServer {
         let sessions_cleanup = Arc::clone(&self.sessions);
         let ip_pool_cleanup = Arc::clone(&self.ip_pool);
         let stats_cleanup = Arc::clone(&self.stats);
+        let forwarder_cleanup = Arc::clone(&self.shared_forwarder);
         let timeout = self.config.session_timeout;
         tokio::spawn(async move {
-            Self::cleanup_stale_sessions(sessions_cleanup, ip_pool_cleanup, stats_cleanup, timeout)
-                .await;
+            Self::cleanup_stale_sessions(
+                sessions_cleanup,
+                ip_pool_cleanup,
+                stats_cleanup,
+                forwarder_cleanup,
+                timeout,
+            )
+            .await;
         });
 
         // Keepalive task
@@ -1096,10 +1103,17 @@ impl OxTunnelServer {
         let sessions_cleanup = Arc::clone(&self.sessions);
         let ip_pool_cleanup = Arc::clone(&self.ip_pool);
         let stats_cleanup = Arc::clone(&self.stats);
+        let forwarder_cleanup = Arc::clone(&self.shared_forwarder);
         let timeout = self.config.session_timeout;
         tokio::spawn(async move {
-            Self::cleanup_stale_sessions(sessions_cleanup, ip_pool_cleanup, stats_cleanup, timeout)
-                .await;
+            Self::cleanup_stale_sessions(
+                sessions_cleanup,
+                ip_pool_cleanup,
+                stats_cleanup,
+                forwarder_cleanup,
+                timeout,
+            )
+            .await;
         });
 
         // Spawn response sender task
@@ -1204,29 +1218,34 @@ impl OxTunnelServer {
         sessions: Arc<RwLock<HashMap<[u8; 32], TunnelSession>>>,
         ip_pool: Arc<IpPool>,
         stats: Arc<TunnelStats>,
+        shared_forwarder: Arc<SharedForwarder>,
         timeout: Duration,
     ) {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
 
             let mut sessions_lock = sessions.write().await;
-            let stale_keys: Vec<_> = sessions_lock
+            let stale_sessions: Vec<_> = sessions_lock
                 .iter()
                 .filter(|(_, session)| session.last_activity.elapsed() >= timeout)
                 .map(|(k, session)| {
                     info!("Removing stale session from {:?}", session.peer_addr);
-                    *k
+                    (*k, session.peer_addr)
                 })
                 .collect();
 
-            for key in &stale_keys {
+            for (key, peer_addr) in &stale_sessions {
                 sessions_lock.remove(key);
                 ip_pool.release(key).await;
                 stats.active_sessions.fetch_sub(1, Ordering::Relaxed);
+
+                // Unregister from forwarder to prevent resource leak
+                let conn_id = MobileServerHandler::peer_addr_to_conn_id(*peer_addr);
+                shared_forwarder.unregister_connection(conn_id).await;
             }
 
-            if !stale_keys.is_empty() {
-                info!("Cleaned up {} stale sessions", stale_keys.len());
+            if !stale_sessions.is_empty() {
+                info!("Cleaned up {} stale sessions", stale_sessions.len());
             }
         }
     }
@@ -1426,8 +1445,9 @@ impl MobileServerHandler {
             .handshakes_completed
             .fetch_add(1, Ordering::Relaxed);
 
-        // Register connection for response routing and start response listener
-        self.start_response_listener(peer_addr).await;
+        // Register connection for response routing and start response listener with encryption
+        self.start_response_listener(peer_addr, encryption_key)
+            .await;
 
         // Send response
         let response = HandshakeResponse {
@@ -1524,8 +1544,9 @@ impl MobileServerHandler {
             .handshakes_completed
             .fetch_add(1, Ordering::Relaxed);
 
-        // Register connection for response routing and start response listener
-        self.start_response_listener(peer_addr).await;
+        // Register connection for response routing and start response listener with encryption
+        self.start_response_listener(peer_addr, encryption_key)
+            .await;
 
         // Send response
         let response = HandshakeResponse {
@@ -1639,24 +1660,33 @@ impl MobileServerHandler {
     }
 
     /// Register connection with SharedForwarder and start background task to forward responses
-    async fn start_response_listener(&self, peer_addr: SocketAddr) {
+    async fn start_response_listener(
+        &self,
+        peer_addr: SocketAddr,
+        encryption_key: Option<[u8; 32]>,
+    ) {
         let conn_id = Self::peer_addr_to_conn_id(peer_addr);
         let mut response_rx = self.shared_forwarder.register_connection(conn_id).await;
 
         let response_tx = self.response_tx.clone();
         let stats = Arc::clone(&self.stats);
 
+        // Create crypto engine for this connection's responses
+        let crypto = encryption_key.as_ref().map(|k| CryptoEngine::new(Some(k)));
+
         tokio::spawn(async move {
+            let mut seq: u32 = 0;
             while let Some(response_packet) = response_rx.recv().await {
-                // Encode response in OxTunnel format and send back to client
-                let mut buf = vec![0u8; response_packet.len() + HEADER_SIZE];
+                // Encode response in OxTunnel format with encryption if key was provided
+                let mut buf = vec![0u8; response_packet.len() + HEADER_SIZE + 32]; // Extra space for auth tag
                 if let Ok(len) = encode_packet(
                     &mut buf,
                     &response_packet,
-                    0,
+                    seq,
                     0, // Data packet
-                    None,
+                    crypto.as_ref(),
                 ) {
+                    seq = seq.wrapping_add(1);
                     if response_tx
                         .send((buf[..len].to_vec(), peer_addr))
                         .await
@@ -1693,6 +1723,11 @@ impl MobileServerHandler {
             sessions.remove(&key);
             self.ip_pool.release(&key).await;
             self.stats.active_sessions.fetch_sub(1, Ordering::Relaxed);
+
+            // Unregister from forwarder to prevent resource leak
+            let conn_id = Self::peer_addr_to_conn_id(peer_addr);
+            self.shared_forwarder.unregister_connection(conn_id).await;
+
             info!("Session removed for {}", peer_addr);
         }
     }

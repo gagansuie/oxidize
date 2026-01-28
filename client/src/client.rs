@@ -11,6 +11,7 @@
 use anyhow::{Context, Result};
 use oxidize_common::auth::ClientAuthConfig;
 use oxidize_common::compression::compress_data;
+use oxidize_common::oxtunnel_client::ResponseInjector;
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
     CryptoEngine, HandshakeInit, HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, MAX_PAYLOAD_SIZE,
@@ -712,6 +713,219 @@ impl RelayClient {
                             // Capture channel closed - but keep running for keepalives
                             info!("Capture channel closed, continuing with keepalive only mode");
                             // Wait until disconnected
+                            while self.connected.load(Ordering::SeqCst) {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ = async {
+                    while self.connected.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                } => {
+                    info!("Disconnect requested");
+                    break;
+                }
+            }
+        }
+
+        self.connected.store(false, Ordering::SeqCst);
+        info!("Client loop ended");
+
+        Ok(())
+    }
+
+    /// Run the client with packet capture AND response injection
+    /// This is the full tunnel mode - captures outbound packets, sends through tunnel,
+    /// receives responses from tunnel, and injects them into the local network stack
+    pub async fn run_with_injection(
+        &self,
+        mut capture_rx: mpsc::Receiver<Vec<u8>>,
+        response_injector: Arc<ResponseInjector>,
+    ) -> Result<()> {
+        info!("Starting OxTunnel client loop with response injection...");
+
+        let socket = self.socket.clone();
+        let stats = self.stats.clone();
+        let connected = self.connected.clone();
+        let keepalive_sent_us = self.keepalive_sent_us.clone();
+        let crypto = self.crypto.clone();
+
+        // Spawn receive task with response injection
+        let recv_socket = socket.clone();
+        let recv_connected = connected.clone();
+        let recv_stats = stats.clone();
+        let recv_keepalive_sent_us = keepalive_sent_us.clone();
+        let recv_crypto = crypto.clone();
+        let recv_injector = response_injector.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; MAX_PACKET_SIZE];
+            let mut injected_count: u64 = 0;
+            let mut last_log = std::time::Instant::now();
+
+            while recv_connected.load(Ordering::SeqCst) {
+                match recv_socket.recv(&mut buf).await {
+                    Ok(len) => {
+                        recv_stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                        recv_stats
+                            .bytes_received
+                            .fetch_add(len as u64, Ordering::Relaxed);
+
+                        // Validate and decode packet
+                        if len >= HEADER_SIZE && buf[0..2] == PROTOCOL_MAGIC {
+                            let flags_byte = buf[2];
+
+                            // Handle control packets (keepalive ACK, etc.)
+                            if flags_byte & flags::CONTROL != 0 && len > HEADER_SIZE {
+                                let control_type = buf[HEADER_SIZE];
+                                if control_type == control::ACK {
+                                    // Measure RTT from keepalive ACK response
+                                    let sent_us = recv_keepalive_sent_us.load(Ordering::Relaxed);
+                                    if sent_us > 0 {
+                                        let now_us = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_micros()
+                                            as u64;
+
+                                        if now_us > sent_us {
+                                            let rtt_us = now_us - sent_us;
+                                            let prev = recv_stats
+                                                .tunnel_latency_us
+                                                .load(Ordering::Relaxed);
+                                            let smoothed = if prev == 0 {
+                                                rtt_us
+                                            } else {
+                                                (prev * 7 + rtt_us) / 8
+                                            };
+                                            recv_stats
+                                                .tunnel_latency_us
+                                                .store(smoothed, Ordering::Relaxed);
+                                            debug!(
+                                                "Keepalive RTT: {}us (smoothed: {}us)",
+                                                rtt_us, smoothed
+                                            );
+                                        }
+                                        recv_keepalive_sent_us.store(0, Ordering::Relaxed);
+                                    }
+                                }
+                                continue; // Control packet handled, skip injection
+                            }
+
+                            // Data packet - decode and inject into local network stack
+                            // Use try_read to avoid blocking the async runtime
+                            let crypto_opt = recv_crypto.try_read().ok();
+                            let crypto_ref = crypto_opt.as_ref().and_then(|g| g.as_ref());
+                            match decode_packet(&mut buf[..len], crypto_ref) {
+                                Ok((_header, payload)) => {
+                                    if !payload.is_empty() {
+                                        // Inject the IP packet into local network stack
+                                        match recv_injector.inject(payload) {
+                                            Ok(()) => {
+                                                injected_count += 1;
+
+                                                // Log periodically
+                                                if last_log.elapsed().as_secs() >= 10 {
+                                                    let injector_stats = recv_injector.stats();
+                                                    info!(
+                                                        "📥 Injected {} packets ({} total, {} errors)",
+                                                        injected_count,
+                                                        injector_stats.packets_injected.load(Ordering::Relaxed),
+                                                        injector_stats.injection_errors.load(Ordering::Relaxed)
+                                                    );
+                                                    last_log = std::time::Instant::now();
+                                                }
+                                            }
+                                            Err(e) => {
+                                                debug!("Failed to inject packet: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!("Failed to decode packet: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Receive error: {}", e);
+                    }
+                }
+            }
+
+            let injector_stats = recv_injector.stats();
+            info!(
+                "📥 Response injection stopped: {} packets injected, {} errors",
+                injector_stats.packets_injected.load(Ordering::Relaxed),
+                injector_stats.injection_errors.load(Ordering::Relaxed)
+            );
+        });
+
+        // Spawn keepalive task
+        let ka_socket = socket.clone();
+        let ka_connected = connected.clone();
+        let ka_stats = stats.clone();
+        let ka_keepalive_sent_us = keepalive_sent_us.clone();
+        let ka_sequence = Arc::new(AtomicU32::new(1000000));
+        let keepalive_interval = self.config.keepalive_interval;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(keepalive_interval);
+            interval.tick().await;
+
+            while ka_connected.load(Ordering::SeqCst) {
+                interval.tick().await;
+
+                if !ka_connected.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let seq = ka_sequence.fetch_add(1, Ordering::Relaxed);
+                let mut buf = [0u8; 64];
+
+                buf[0..2].copy_from_slice(&PROTOCOL_MAGIC);
+                buf[2] = flags::CONTROL;
+                buf[3..7].copy_from_slice(&seq.to_le_bytes());
+                buf[7..9].copy_from_slice(&1u16.to_le_bytes());
+                buf[HEADER_SIZE] = control::KEEPALIVE;
+
+                let packet_len = HEADER_SIZE + 1;
+
+                let now_us = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64;
+                ka_keepalive_sent_us.store(now_us, Ordering::Relaxed);
+
+                match ka_socket.send(&buf[..packet_len]).await {
+                    Ok(_) => {
+                        ka_stats.packets_sent.fetch_add(1, Ordering::Relaxed);
+                        ka_stats
+                            .bytes_sent
+                            .fetch_add(packet_len as u64, Ordering::Relaxed);
+                        debug!("Sent keepalive (seq={})", seq);
+                    }
+                    Err(e) => {
+                        warn!("Failed to send keepalive: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Main send loop
+        loop {
+            tokio::select! {
+                packet = capture_rx.recv() => {
+                    match packet {
+                        Some(data) => {
+                            if let Err(e) = self.send_packet(&data).await {
+                                warn!("Failed to send packet: {}", e);
+                            }
+                        }
+                        None => {
+                            info!("Capture channel closed, continuing with keepalive only mode");
                             while self.connected.load(Ordering::SeqCst) {
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                             }

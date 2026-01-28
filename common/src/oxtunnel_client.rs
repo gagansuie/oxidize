@@ -733,80 +733,78 @@ fn run_platform_capture(
     info!("📦 Setting up iptables NFQUEUE rules...");
     let queue_num = config.queue_num.to_string();
 
-    // Remove any existing rules first (ignore errors) - both OUTPUT and INPUT chains
-    for chain in &["OUTPUT", "INPUT"] {
-        if config.capture_tcp {
-            let _ = Command::new("iptables")
-                .args([
-                    "-D",
-                    chain,
-                    "-p",
-                    "tcp",
-                    "-j",
-                    "NFQUEUE",
-                    "--queue-num",
-                    &queue_num,
-                    "--queue-bypass",
-                ])
-                .output();
-        }
-        if config.capture_udp {
-            let _ = Command::new("iptables")
-                .args([
-                    "-D",
-                    chain,
-                    "-p",
-                    "udp",
-                    "-j",
-                    "NFQUEUE",
-                    "--queue-num",
-                    &queue_num,
-                    "--queue-bypass",
-                ])
-                .output();
-        }
+    // Remove any existing rules first (ignore errors) - OUTPUT chain only
+    // INPUT chain should NOT be captured - responses come via tunnel injection
+    if config.capture_tcp {
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output();
+    }
+    if config.capture_udp {
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output();
     }
 
     // Add NFQUEUE rules with bypass (so traffic continues if queue isn't bound)
-    // Add rules for both OUTPUT (outbound) and INPUT (inbound) chains
+    // Only capture OUTPUT chain - outbound traffic from local apps
+    // INPUT is NOT captured - responses come through tunnel and ResponseInjector
     let mut rules_added = true;
-    for chain in &["OUTPUT", "INPUT"] {
-        if config.capture_tcp
-            && Command::new("iptables")
-                .args([
-                    "-I",
-                    chain,
-                    "-p",
-                    "tcp",
-                    "-j",
-                    "NFQUEUE",
-                    "--queue-num",
-                    &queue_num,
-                    "--queue-bypass",
-                ])
-                .output()
-                .is_err()
-        {
-            rules_added = false;
-        }
-        if config.capture_udp
-            && Command::new("iptables")
-                .args([
-                    "-I",
-                    chain,
-                    "-p",
-                    "udp",
-                    "-j",
-                    "NFQUEUE",
-                    "--queue-num",
-                    &queue_num,
-                    "--queue-bypass",
-                ])
-                .output()
-                .is_err()
-        {
-            rules_added = false;
-        }
+    if config.capture_tcp
+        && Command::new("iptables")
+            .args([
+                "-I",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output()
+            .is_err()
+    {
+        rules_added = false;
+    }
+    if config.capture_udp
+        && Command::new("iptables")
+            .args([
+                "-I",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                &queue_num,
+                "--queue-bypass",
+            ])
+            .output()
+            .is_err()
+    {
+        rules_added = false;
     }
 
     if rules_added {
@@ -853,13 +851,17 @@ fn run_platform_capture(
             Ok(mut msg) => {
                 let payload = msg.get_payload().to_vec();
 
-                // Send packet through channel (non-blocking)
+                // Send packet through tunnel channel (non-blocking)
+                // If send succeeds, DROP the original packet (tunnel will forward it)
+                // If send fails, ACCEPT the original packet (fallback to direct)
                 if tx.blocking_send(payload).is_ok() {
                     packet_count += 1;
+                    // DROP the original packet - it will be forwarded through the tunnel
+                    msg.set_verdict(Verdict::Drop);
+                } else {
+                    // Tunnel channel full/closed - let packet through directly
+                    msg.set_verdict(Verdict::Accept);
                 }
-
-                // Accept the packet (let it through)
-                msg.set_verdict(Verdict::Accept);
                 let _ = queue.verdict(msg);
 
                 // Log progress every 10 seconds
@@ -900,7 +902,7 @@ fn cleanup_iptables_rules(config: &CaptureConfig) {
             .output();
     }
 
-    // Clean up NFQUEUE rules from both OUTPUT and INPUT chains
+    // Clean up NFQUEUE rules from OUTPUT chain (and INPUT for backwards compat)
     for chain in &["OUTPUT", "INPUT"] {
         if config.capture_tcp {
             let _ = Command::new("iptables")
@@ -1135,6 +1137,255 @@ impl OxTunnelPipeline {
 
     pub fn encapsulator(&self) -> &Arc<OxTunnelEncapsulator> {
         &self.encapsulator
+    }
+}
+
+// ============================================================================
+// Response Injection Service - Injects tunnel responses into local network stack
+// ============================================================================
+
+/// Response injector for injecting tunnel responses into the local network stack
+/// Uses raw sockets on Linux, WinDivert on Windows, BPF on macOS
+pub struct ResponseInjector {
+    #[cfg(target_os = "linux")]
+    raw_socket_v4: Option<std::os::unix::io::RawFd>,
+    #[cfg(target_os = "linux")]
+    raw_socket_v6: Option<std::os::unix::io::RawFd>,
+    stats: Arc<ResponseInjectorStats>,
+}
+
+#[derive(Default)]
+pub struct ResponseInjectorStats {
+    pub packets_injected: AtomicU64,
+    pub bytes_injected: AtomicU64,
+    pub injection_errors: AtomicU64,
+}
+
+impl ResponseInjector {
+    /// Create a new response injector
+    pub fn new() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            let raw_socket_v4 = Self::create_raw_socket_v4();
+            let raw_socket_v6 = Self::create_raw_socket_v6();
+
+            if raw_socket_v4.is_some() {
+                info!("✅ Response injector: IPv4 raw socket created");
+            } else {
+                warn!(
+                    "⚠️ Response injector: Failed to create IPv4 raw socket (requires CAP_NET_RAW)"
+                );
+            }
+            if raw_socket_v6.is_some() {
+                info!("✅ Response injector: IPv6 raw socket created");
+            } else {
+                warn!(
+                    "⚠️ Response injector: Failed to create IPv6 raw socket (requires CAP_NET_RAW)"
+                );
+            }
+
+            Self {
+                raw_socket_v4,
+                raw_socket_v6,
+                stats: Arc::new(ResponseInjectorStats::default()),
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            warn!("⚠️ Response injector: Platform not fully supported yet");
+            Self {
+                stats: Arc::new(ResponseInjectorStats::default()),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_raw_socket_v4() -> Option<std::os::unix::io::RawFd> {
+        use std::os::unix::io::IntoRawFd;
+
+        match socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::RAW,
+            Some(socket2::Protocol::from(libc::IPPROTO_RAW)),
+        ) {
+            Ok(sock) => {
+                // Set IP_HDRINCL so we can provide the full IP header
+                if sock.set_header_included_v4(true).is_err() {
+                    warn!("Failed to set IP_HDRINCL on raw socket");
+                }
+                Some(sock.into_raw_fd())
+            }
+            Err(e) => {
+                debug!(
+                    "Failed to create raw IPv4 socket: {} (requires CAP_NET_RAW)",
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_raw_socket_v6() -> Option<std::os::unix::io::RawFd> {
+        use std::os::unix::io::IntoRawFd;
+
+        match socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::RAW,
+            Some(socket2::Protocol::from(libc::IPPROTO_RAW)),
+        ) {
+            Ok(sock) => Some(sock.into_raw_fd()),
+            Err(e) => {
+                debug!(
+                    "Failed to create raw IPv6 socket: {} (requires CAP_NET_RAW)",
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Inject a response packet into the local network stack
+    /// The packet should be a complete IP packet (with IP header)
+    pub fn inject(&self, packet: &[u8]) -> Result<(), String> {
+        if packet.is_empty() {
+            return Err("Empty packet".to_string());
+        }
+
+        let version = (packet[0] >> 4) & 0x0F;
+
+        match version {
+            4 => self.inject_ipv4(packet),
+            6 => self.inject_ipv6(packet),
+            _ => Err(format!("Unknown IP version: {}", version)),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
+        if packet.len() < 20 {
+            return Err("IPv4 packet too short".to_string());
+        }
+
+        let fd = self.raw_socket_v4.ok_or("No IPv4 raw socket available")?;
+
+        // Extract destination IP from packet header (bytes 16-19)
+        let dst_ip = std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+
+        // Create destination sockaddr
+        let dest_addr =
+            socket2::SockAddr::from(std::net::SocketAddr::new(std::net::IpAddr::V4(dst_ip), 0));
+
+        let result = unsafe {
+            libc::sendto(
+                fd,
+                packet.as_ptr() as *const libc::c_void,
+                packet.len(),
+                0,
+                dest_addr.as_ptr(),
+                dest_addr.len() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            let errno = std::io::Error::last_os_error();
+            self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
+            Err(format!("IPv4 injection failed: {}", errno))
+        } else {
+            self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .bytes_injected
+                .fetch_add(packet.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inject_ipv6(&self, packet: &[u8]) -> Result<(), String> {
+        if packet.len() < 40 {
+            return Err("IPv6 packet too short".to_string());
+        }
+
+        let fd = self.raw_socket_v6.ok_or("No IPv6 raw socket available")?;
+
+        // Extract destination IP from packet header (bytes 24-39)
+        let mut dst_bytes = [0u8; 16];
+        dst_bytes.copy_from_slice(&packet[24..40]);
+        let dst_ip = std::net::Ipv6Addr::from(dst_bytes);
+
+        let dest_addr =
+            socket2::SockAddr::from(std::net::SocketAddr::new(std::net::IpAddr::V6(dst_ip), 0));
+
+        let result = unsafe {
+            libc::sendto(
+                fd,
+                packet.as_ptr() as *const libc::c_void,
+                packet.len(),
+                0,
+                dest_addr.as_ptr(),
+                dest_addr.len() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            let errno = std::io::Error::last_os_error();
+            self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
+            Err(format!("IPv6 injection failed: {}", errno))
+        } else {
+            self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .bytes_injected
+                .fetch_add(packet.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn inject_ipv4(&self, _packet: &[u8]) -> Result<(), String> {
+        self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
+        Err("IPv4 injection not implemented on this platform".to_string())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn inject_ipv6(&self, _packet: &[u8]) -> Result<(), String> {
+        self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
+        Err("IPv6 injection not implemented on this platform".to_string())
+    }
+
+    /// Get injection statistics
+    pub fn stats(&self) -> &Arc<ResponseInjectorStats> {
+        &self.stats
+    }
+
+    /// Check if the injector is functional
+    pub fn is_available(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.raw_socket_v4.is_some() || self.raw_socket_v6.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
+impl Default for ResponseInjector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ResponseInjector {
+    fn drop(&mut self) {
+        if let Some(fd) = self.raw_socket_v4 {
+            unsafe { libc::close(fd) };
+        }
+        if let Some(fd) = self.raw_socket_v6 {
+            unsafe { libc::close(fd) };
+        }
     }
 }
 

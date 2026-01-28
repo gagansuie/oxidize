@@ -289,6 +289,84 @@ sudo setcap cap_net_raw+ep /path/to/oxidize-server
 
 The server creates raw ICMP sockets and tracks Echo Request/Reply pairs using (id, seq, dst_ip) as keys for proper response routing back to clients.
 
+## Bidirectional Tunnel Architecture
+
+OxTunnel implements full bidirectional tunneling with response injection:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Complete Tunnel Data Flow                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  CLIENT OUTBOUND:                                                       │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         │
+│  │   App    │───►│ NFQUEUE  │───►│ OxTunnel │───►│   UDP    │         │
+│  │ (TCP/UDP)│    │  (DROP)  │    │ Encrypt  │    │ to Server│         │
+│  └──────────┘    └──────────┘    └──────────┘    └────┬─────┘         │
+│                                                       │                │
+│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─ ─ ─  │
+│                                                       ▼                │
+│  SERVER:                                         ┌──────────┐         │
+│                                                  │  Server  │         │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐   │ Decrypt  │         │
+│  │ Internet │◄──►│ Forwarder│◄──►│   NAT    │◄──►│ + Route  │         │
+│  │          │    │ (TCP/UDP)│    │MASQUERADE│   │          │         │
+│  └──────────┘    └──────────┘    └──────────┘   └────┬─────┘         │
+│                                                       │                │
+│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─ ─ ─  │
+│                                                       ▼                │
+│  CLIENT INBOUND:                                 ┌──────────┐         │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐   │   UDP    │         │
+│  │   App    │◄───│ Response │◄───│ OxTunnel │◄──│from Server│         │
+│  │ (TCP/UDP)│    │ Injector │    │ Decrypt  │   │          │         │
+│  └──────────┘    └──────────┘    └──────────┘   └──────────┘         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Components
+
+| Component | Platform | Description |
+|-----------|----------|-------------|
+| **NFQUEUE Capture** | Linux | Intercepts OUTPUT chain, DROPs original packets |
+| **Response Injector** | Linux | Raw socket with `IP_HDRINCL` injects responses |
+| **NAT/MASQUERADE** | Server | Source NAT for tunnel IP pool (10.0.0.0/8) |
+| **SharedForwarder** | Server | Routes responses back to correct client |
+
+### Response Injection (Linux)
+
+The `ResponseInjector` uses raw sockets to inject decrypted response packets directly into the local network stack:
+
+```rust
+// Creates raw socket with IP_HDRINCL (we provide full IP header)
+let sock = socket2::Socket::new(Domain::IPV4, Type::RAW, Protocol::from(IPPROTO_RAW))?;
+sock.set_header_included_v4(true)?;
+
+// Inject complete IP packet (header + payload)
+libc::sendto(fd, packet.as_ptr(), packet.len(), 0, &dest_addr, addr_len);
+```
+
+**Requirements:**
+- `CAP_NET_RAW` capability (daemon runs as root)
+- IPv4 and IPv6 raw sockets created at startup
+- Destination extracted from IP header for routing
+
+### Server-Side NAT
+
+The server uses MASQUERADE for tunnel traffic:
+
+```bash
+# IPv4 NAT for tunnel IP pool
+iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o $DEFAULT_IF -j MASQUERADE
+
+# IPv6 NAT for tunnel IP pool  
+ip6tables -t nat -A POSTROUTING -s fd00::/8 -o $DEFAULT_IF -j MASQUERADE
+
+# Enable IP forwarding
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv6.conf.all.forwarding=1
+```
+
 ## TCP Tunneling Architecture
 
 OxTunnel tunnels TCP traffic through UDP datagrams with connection pooling on the server:

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService};
+use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService, ResponseInjector};
 use relay_client::client::ClientStats;
 use relay_client::RelayClient;
 use serde::{Deserialize, Serialize};
@@ -351,6 +351,14 @@ async fn handle_connect(
     let capture_service = PacketCaptureService::new(capture_config);
     let (oxtunnel_rx, capture_handle) = capture_service.start();
 
+    // Create response injector for injecting tunnel responses into local network
+    let response_injector = Arc::new(ResponseInjector::new());
+    if response_injector.is_available() {
+        info!("✅ Response injector ready for bidirectional tunnel");
+    } else {
+        warn!("⚠️ Response injector not available - tunnel may be unidirectional");
+    }
+
     // Get platform name for logging
     let platform = PacketCaptureService::platform_name();
 
@@ -361,14 +369,18 @@ async fn handle_connect(
     // Get stats handle BEFORE moving client into task
     let client_stats = client.stats_handle();
 
-    // Spawn client task with packet capture
+    // Spawn client task with packet capture AND response injection
     let task = tokio::spawn(async move {
         info!("🚀 Starting relay client ({} mode)...", platform);
         info!("   ├─ Mode: {} packet capture", platform);
         info!("   ├─ OxTunnel protocol: enabled");
+        info!("   ├─ Response injection: enabled");
         info!("   └─ Capturing TCP+UDP traffic");
 
-        if let Err(e) = client_for_task.run_with_capture(oxtunnel_rx).await {
+        if let Err(e) = client_for_task
+            .run_with_injection(oxtunnel_rx, response_injector)
+            .await
+        {
             error!("Client error: {}", e);
         }
 

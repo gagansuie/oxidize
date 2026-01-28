@@ -37,18 +37,30 @@ Your ISP's routing is suboptimal:
 ## Architecture
 
 ```
-┌─────────────────┐         ┌─────────────────┐
-│   Your Device   │ OxTunnel│  Relay Server   │
-│  oxidize-client │ ──────► │  oxidize-server │ ──────► Internet
-└─────────────────┘  (UDP)  └─────────────────┘
-        ↑                           ↑
-   TCP + UDP                   TCP + UDP
-   captured                    forwarded
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Bidirectional OxTunnel Flow                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  OUTBOUND:                                                              │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         │
+│  │   App    │───►│ NFQUEUE  │───►│ OxTunnel │───►│  Server  │──► Internet
+│  │          │    │  (DROP)  │    │ Encrypt  │    │ Forward  │         │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘         │
+│                                                                         │
+│  INBOUND:                                                               │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         │
+│  │   App    │◄───│ Response │◄───│ OxTunnel │◄───│  Server  │◄── Internet
+│  │          │    │ Injector │    │ Decrypt  │    │ Receive  │         │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────┘         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Full traffic tunneling** — ALL TCP and UDP traffic flows through the relay
+- **Full bidirectional tunneling** — ALL TCP/UDP traffic flows through the relay and back
+- **Raw socket injection** — Responses injected directly into local network stack (no TUN device)
 - **Dedicated infrastructure** — no peer-to-peer, no bandwidth sharing with strangers
 - **Smart routing** — gaming tunneled, streaming bypassed for zero latency
+- **End-to-end encryption** — ChaCha20-Poly1305 on both directions
 
 ## Perfect For
 
@@ -85,13 +97,13 @@ Custom high-performance tunnel protocol replacing WireGuard with **unified archi
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    OxTunnel Protocol (TCP + UDP)                    │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Linux:   App → NFQUEUE → OxTunnel → AF_XDP/UDP → Server           │
-│  macOS:   App → PF/Utun → OxTunnel → UDP Datagrams → Server        │
-│  Windows: App → WinDivert → OxTunnel → UDP Datagrams → Server      │
-│  Android: App → VpnService → OxTunnel → UDP Datagrams → Server     │
-│  iOS:     App → NEPacketTunnel → OxTunnel → UDP Datagrams → Server │
+│  Linux:   App → NFQUEUE(DROP) → OxTunnel → Server → ResponseInjector│
+│  macOS:   App → PF/Utun → OxTunnel → Server → Raw Socket Inject    │
+│  Windows: App → WinDivert → OxTunnel → Server → WinDivert Inject   │
+│  Android: App → VpnService → OxTunnel → Server → VpnService        │
+│  iOS:     App → NEPacketTunnel → OxTunnel → Server → NEPacketTunnel│
 └─────────────────────────────────────────────────────────────────────┘
-    Server: AF_XDP/FLASH zero-copy (18-25 Gbps) on Linux bare metal
+    Server: AF_XDP/FLASH zero-copy (18-25 Gbps) + NAT/MASQUERADE
 ```
 
 - **Same protocol everywhere** - All platforms use identical OxTunnel encapsulation over UDP

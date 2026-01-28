@@ -4,9 +4,10 @@
 
 set -e
 
-SERVER="${1:?Error: Server IP required. Usage: $0 <server_ip>}"
+SERVER="${1:?Error: Server IP required. Usage: $0 <server_ip> [metrics_port] [interval] [oxtunnel_port]}"
 METRICS_PORT="${2:-9090}"
 INTERVAL="${3:-2}"
+OX_PORT="${4:-51820}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -15,6 +16,17 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
+
+HAS_PREV=0
+PREV_BYTES_SENT=0
+PREV_BYTES_RECV=0
+PREV_PKTS_SENT=0
+PREV_PKTS_RECV=0
+PREV_HANDSHAKES=0
+
+SERVER_IPV4=""
+SERVER_IPV6=""
+METRICS_URL=""
 
 format_bytes() {
     local bytes=$1
@@ -26,6 +38,91 @@ format_bytes() {
         echo "$(echo "scale=2; $bytes / 1024" | bc) KB"
     else
         echo "$bytes B"
+    fi
+}
+
+check_udp_ipv6_status() {
+    echo ""
+    echo -e "${BOLD}${BLUE}🌐 TRANSPORT CHECK${NC}"
+
+    local udp_v4="Inactive"
+    local udp_v6="Inactive"
+
+    if command -v ss >/dev/null 2>&1; then
+        if [ -n "$SERVER_IPV4" ]; then
+            local peers_v4
+            peers_v4=$(ss -u -n 2>/dev/null | awk 'NR>1 {print $5}' || true)
+            if echo "$peers_v4" | grep -q "${SERVER_IPV4}:${OX_PORT}$"; then
+                udp_v4="Active"
+            fi
+        fi
+
+        if [ -n "$SERVER_IPV6" ]; then
+            local peers_v6
+            peers_v6=$(ss -u -n -6 2>/dev/null | awk 'NR>1 {print $5}' | sed 's/\[//g; s/\]//g' || true)
+            if echo "$peers_v6" | grep -qi "${SERVER_IPV6}:${OX_PORT}$"; then
+                udp_v6="Active"
+            fi
+        fi
+    fi
+
+    echo -e "├─ UDP IPv4: ${GREEN}${udp_v4}${NC}"
+    echo -e "└─ UDP IPv6: ${GREEN}${udp_v6}${NC}"
+}
+
+is_ipv6() {
+    [[ "$1" == *:* ]]
+}
+
+format_metrics_url() {
+    local host="$1"
+    if is_ipv6 "$host"; then
+        echo "http://[${host}]:${METRICS_PORT}/metrics"
+    else
+        echo "http://${host}:${METRICS_PORT}/metrics"
+    fi
+}
+
+resolve_server_ips() {
+    if is_ipv6 "$SERVER"; then
+        SERVER_IPV6="$SERVER"
+        return
+    fi
+
+    if [[ "$SERVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        SERVER_IPV4="$SERVER"
+        return
+    fi
+
+    if command -v getent >/dev/null 2>&1; then
+        local addrs
+        addrs=$(getent ahosts "$SERVER" 2>/dev/null | awk '{print $1}' | sort -u || true)
+        SERVER_IPV4=$(echo "$addrs" | grep -m1 -E '^[0-9.]+$' || true)
+        SERVER_IPV6=$(echo "$addrs" | grep -m1 -E ':' || true)
+    fi
+}
+
+to_int() {
+    echo "${1:-0}" | awk '{printf "%.0f", $1}'
+}
+
+calc_delta() {
+    local current="$1"
+    local prev="$2"
+    if [ "$current" -lt "$prev" ]; then
+        echo 0
+    else
+        echo $((current - prev))
+    fi
+}
+
+calc_rate() {
+    local delta="$1"
+    local interval="$2"
+    if [ "$interval" -le 0 ]; then
+        echo 0
+    else
+        awk -v d="$delta" -v i="$interval" 'BEGIN { printf "%.0f", d / i }'
     fi
 }
 
@@ -62,53 +159,90 @@ print_header() {
     echo -e "${BOLD}${CYAN}║              ${GREEN}⚡ OXIDIZE REAL-TIME STATS ⚡${CYAN}                    ║${NC}"
     echo -e "${BOLD}${CYAN}╠════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} Server: ${YELLOW}${SERVER}:${METRICS_PORT}${NC}                                       "
+    if [ -n "$SERVER_IPV4" ] || [ -n "$SERVER_IPV6" ]; then
+        echo -e "${CYAN}║${NC} Resolved: ${BLUE}${SERVER_IPV4:-none}${NC} ${BLUE}${SERVER_IPV6:-}${NC}"
+    fi
     echo -e "${CYAN}║${NC} Updated: ${BLUE}$(date '+%Y-%m-%d %H:%M:%S')${NC}                            "
     echo -e "${BOLD}${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
 }
 
-print_stats() {
+update_metrics_cache() {
     local metrics="$1"
-    
-    # Parse all metrics (using actual Prometheus metric names)
-    local bytes_sent=$(parse_metric "$metrics" "oxidize_oxidize_relay_bytes_sent_total")
-    local bytes_recv=$(parse_metric "$metrics" "oxidize_oxidize_relay_bytes_received_total")
-    local pkts_sent=$(parse_metric "$metrics" "oxidize_oxidize_relay_packets_sent_total")
-    local pkts_recv=$(parse_metric "$metrics" "oxidize_relay_packets_received_total")
-    local active_sessions=$(parse_metric "$metrics" "oxidize_relay_connections_active")
-    local total_sessions=$(parse_metric "$metrics" "oxidize_relay_connections_total")
-    local compression_saved=$(parse_metric "$metrics" "oxidize_relay_compression_saved_bytes")
-    local handshakes=$(parse_metric "$metrics" "oxidize_tunnel_handshakes_completed")
-    local invalid_pkts=$(parse_metric "$metrics" "oxidize_tunnel_invalid_packets")
-    local uptime=$(parse_metric "$metrics" "oxidize_relay_uptime_seconds")
-    
-    # Default to 0 if empty
-    bytes_sent=${bytes_sent:-0}
-    bytes_recv=${bytes_recv:-0}
-    pkts_sent=${pkts_sent:-0}
-    pkts_recv=${pkts_recv:-0}
-    active_sessions=${active_sessions:-0}
-    total_sessions=${total_sessions:-0}
-    handshakes=${handshakes:-0}
-    invalid_pkts=${invalid_pkts:-0}
-    uptime=${uptime:-0}
-    
+
+    local bytes_sent_raw=$(parse_metric "$metrics" "oxidize_oxidize_relay_bytes_sent_total")
+    local bytes_recv_raw=$(parse_metric "$metrics" "oxidize_oxidize_relay_bytes_received_total")
+    local pkts_sent_raw=$(parse_metric "$metrics" "oxidize_oxidize_relay_packets_sent_total")
+    local pkts_recv_raw=$(parse_metric "$metrics" "oxidize_relay_packets_received_total")
+    local active_sessions_raw=$(parse_metric "$metrics" "oxidize_relay_connections_active")
+    local total_sessions_raw=$(parse_metric "$metrics" "oxidize_relay_connections_total")
+    local compression_saved_raw=$(parse_metric "$metrics" "oxidize_relay_compression_saved_bytes")
+    local handshakes_raw=$(parse_metric "$metrics" "oxidize_tunnel_handshakes_completed")
+    local invalid_pkts_raw=$(parse_metric "$metrics" "oxidize_tunnel_invalid_packets")
+    local uptime_raw=$(parse_metric "$metrics" "oxidize_relay_uptime_seconds")
+
+    BYTES_SENT=$(to_int "${bytes_sent_raw:-0}")
+    BYTES_RECV=$(to_int "${bytes_recv_raw:-0}")
+    PKTS_SENT=$(to_int "${pkts_sent_raw:-0}")
+    PKTS_RECV=$(to_int "${pkts_recv_raw:-0}")
+    ACTIVE_SESSIONS=$(to_int "${active_sessions_raw:-0}")
+    TOTAL_SESSIONS=$(to_int "${total_sessions_raw:-0}")
+    COMPRESSION_SAVED=$(to_int "${compression_saved_raw:-0}")
+    HANDSHAKES=$(to_int "${handshakes_raw:-0}")
+    INVALID_PKTS=$(to_int "${invalid_pkts_raw:-0}")
+    UPTIME=$(to_int "${uptime_raw:-0}")
+
+    if [ "$HAS_PREV" -eq 1 ]; then
+        DELTA_BYTES_SENT=$(calc_delta "$BYTES_SENT" "$PREV_BYTES_SENT")
+        DELTA_BYTES_RECV=$(calc_delta "$BYTES_RECV" "$PREV_BYTES_RECV")
+        DELTA_PKTS_SENT=$(calc_delta "$PKTS_SENT" "$PREV_PKTS_SENT")
+        DELTA_PKTS_RECV=$(calc_delta "$PKTS_RECV" "$PREV_PKTS_RECV")
+        DELTA_HANDSHAKES=$(calc_delta "$HANDSHAKES" "$PREV_HANDSHAKES")
+    else
+        DELTA_BYTES_SENT=0
+        DELTA_BYTES_RECV=0
+        DELTA_PKTS_SENT=0
+        DELTA_PKTS_RECV=0
+        DELTA_HANDSHAKES=0
+    fi
+
+    RATE_BYTES_SENT=$(calc_rate "$DELTA_BYTES_SENT" "$INTERVAL")
+    RATE_BYTES_RECV=$(calc_rate "$DELTA_BYTES_RECV" "$INTERVAL")
+    RATE_PKTS_SENT=$(calc_rate "$DELTA_PKTS_SENT" "$INTERVAL")
+    RATE_PKTS_RECV=$(calc_rate "$DELTA_PKTS_RECV" "$INTERVAL")
+
+    PREV_BYTES_SENT="$BYTES_SENT"
+    PREV_BYTES_RECV="$BYTES_RECV"
+    PREV_PKTS_SENT="$PKTS_SENT"
+    PREV_PKTS_RECV="$PKTS_RECV"
+    PREV_HANDSHAKES="$HANDSHAKES"
+    HAS_PREV=1
+}
+
+print_stats() {
     echo ""
     echo -e "${BOLD}${BLUE}📊 TRAFFIC STATS${NC}"
-    echo -e "├─ Bytes Sent:     ${GREEN}$(format_bytes ${bytes_sent%.*})${NC}"
-    echo -e "├─ Bytes Received: ${GREEN}$(format_bytes ${bytes_recv%.*})${NC}"
-    echo -e "├─ Packets Sent:   ${YELLOW}${pkts_sent%.*}${NC}"
-    echo -e "└─ Packets Recv:   ${YELLOW}${pkts_recv%.*}${NC}"
-    
+    echo -e "├─ Bytes Sent:     ${GREEN}$(format_bytes ${BYTES_SENT})${NC}"
+    echo -e "├─ Bytes Received: ${GREEN}$(format_bytes ${BYTES_RECV})${NC}"
+    echo -e "├─ Packets Sent:   ${YELLOW}${PKTS_SENT}${NC}"
+    echo -e "└─ Packets Recv:   ${YELLOW}${PKTS_RECV}${NC}"
+
+    echo ""
+    echo -e "${BOLD}${BLUE}📈 REAL-TIME RATES${NC}"
+    echo -e "├─ TX Rate: ${GREEN}$(format_bytes ${RATE_BYTES_SENT})/s${NC}"
+    echo -e "├─ RX Rate: ${GREEN}$(format_bytes ${RATE_BYTES_RECV})/s${NC}"
+    echo -e "├─ TX PPS:  ${YELLOW}${RATE_PKTS_SENT}${NC}"
+    echo -e "└─ RX PPS:  ${YELLOW}${RATE_PKTS_RECV}${NC}"
+
     echo ""
     echo -e "${BOLD}${BLUE}🔌 CONNECTION STATS${NC}"
-    echo -e "├─ Active Sessions: ${GREEN}${active_sessions%.*}${NC}"
-    echo -e "├─ Total Sessions:  ${YELLOW}${total_sessions%.*}${NC}"
-    echo -e "├─ Handshakes:      ${CYAN}${handshakes%.*}${NC}"
-    echo -e "└─ Invalid Packets: ${RED}${invalid_pkts%.*}${NC}"
-    
+    echo -e "├─ Active Sessions: ${GREEN}${ACTIVE_SESSIONS}${NC}"
+    echo -e "├─ Total Sessions:  ${YELLOW}${TOTAL_SESSIONS}${NC}"
+    echo -e "├─ Handshakes:      ${CYAN}${HANDSHAKES}${NC} (+${DELTA_HANDSHAKES})"
+    echo -e "└─ Invalid Packets: ${RED}${INVALID_PKTS}${NC}"
+
     echo ""
     echo -e "${BOLD}${BLUE}⏱️  SERVER INFO${NC}"
-    echo -e "└─ Uptime: ${GREEN}$(format_uptime ${uptime%.*})${NC}"
+    echo -e "└─ Uptime: ${GREEN}$(format_uptime ${UPTIME})${NC}"
 }
 
 check_daemon_status() {
@@ -121,8 +255,14 @@ check_daemon_status() {
         if echo "$response" | grep -q '"success":true'; then
             echo -e "├─ Socket: ${GREEN}Connected${NC}"
             local connected=$(echo "$response" | grep -o '"connected":[^,}]*' | cut -d: -f2)
+            local server_addr=$(echo "$response" | grep -o '"server_addr":"[^"]*"' | cut -d: -f2- | tr -d '"')
             if [ "$connected" = "true" ]; then
-                echo -e "└─ Tunnel: ${GREEN}Active${NC}"
+                echo -e "├─ Tunnel: ${GREEN}Active${NC}"
+                if [ -n "$server_addr" ]; then
+                    echo -e "└─ Server: ${YELLOW}${server_addr}${NC}"
+                else
+                    echo -e "└─ Server: ${YELLOW}Unknown${NC}"
+                fi
             else
                 echo -e "└─ Tunnel: ${YELLOW}Disconnected${NC}"
             fi
@@ -136,11 +276,14 @@ check_daemon_status() {
 }
 
 main() {
-    echo -e "${CYAN}Connecting to ${SERVER}:${METRICS_PORT}...${NC}"
+    resolve_server_ips
+    METRICS_URL=$(format_metrics_url "$SERVER")
+
+    echo -e "${CYAN}Connecting to ${METRICS_URL}...${NC}"
     
     # Test connection first
-    if ! curl -sf --connect-timeout 3 "http://${SERVER}:${METRICS_PORT}/metrics" > /dev/null 2>&1; then
-        echo -e "${RED}Error: Cannot connect to metrics endpoint at ${SERVER}:${METRICS_PORT}${NC}"
+    if ! curl -sf --connect-timeout 3 "$METRICS_URL" > /dev/null 2>&1; then
+        echo -e "${RED}Error: Cannot connect to metrics endpoint at ${METRICS_URL}${NC}"
         echo "Make sure the Oxidize server is running and the metrics port is accessible."
         exit 1
     fi
@@ -153,14 +296,16 @@ main() {
         print_header
         
         # Fetch metrics
-        local metrics=$(curl -sf --connect-timeout 3 "http://${SERVER}:${METRICS_PORT}/metrics" 2>/dev/null)
+        local metrics=$(curl -sf --connect-timeout 3 "$METRICS_URL" 2>/dev/null || true)
         
         if [ -n "$metrics" ]; then
-            print_stats "$metrics"
+            update_metrics_cache "$metrics"
+            print_stats
         else
             echo -e "${RED}Failed to fetch metrics${NC}"
         fi
         
+        check_udp_ipv6_status
         check_daemon_status
         
         echo ""
