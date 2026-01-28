@@ -301,15 +301,24 @@ impl FlashSocket {
     /// Returns true if stalled and should fall back to standard UDP
     pub fn is_stalled(&self, stall_threshold_secs: u64) -> bool {
         let idle_polls = self.idle_polls.load(Ordering::Relaxed);
+        let total_rx = self.last_rx_count.load(Ordering::Relaxed);
         let elapsed = self.last_rx_time.elapsed().as_secs();
 
+        // Only consider stalled if we've had SIGNIFICANT traffic before
+        // (a few random packets shouldn't trigger stall detection)
+        // Require at least 100 packets to consider the connection "established"
+        if total_rx < 100 {
+            return false;
+        }
+
         // Consider stalled if:
-        // 1. No packets received for stall_threshold_secs, AND
-        // 2. We've been polling actively (>1000 idle polls)
+        // 1. We previously had significant traffic (total_rx >= 100), AND
+        // 2. No packets received for stall_threshold_secs, AND
+        // 3. We've been polling actively (>1000 idle polls)
         if elapsed > stall_threshold_secs && idle_polls > 1000 {
             warn!(
-                "AF_XDP appears stalled: no packets for {}s, {} idle polls",
-                elapsed, idle_polls
+                "AF_XDP appears stalled: no packets for {}s, {} idle polls, had {} total rx",
+                elapsed, idle_polls, total_rx
             );
             return true;
         }
