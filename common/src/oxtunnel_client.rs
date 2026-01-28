@@ -823,6 +823,45 @@ fn run_platform_capture(
             .output();
     }
 
+    // CRITICAL: Exclude essential system traffic from capture
+    // These must work directly for the system to function
+
+    // DNS (port 53) - required for name resolution
+    let _ = Command::new("iptables")
+        .args(["-I", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])
+        .output();
+    let _ = Command::new("iptables")
+        .args(["-I", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"])
+        .output();
+
+    // DHCP (port 67-68) - required for IP address renewal
+    let _ = Command::new("iptables")
+        .args([
+            "-I", "OUTPUT", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
+        ])
+        .output();
+
+    // NTP (port 123) - required for time sync
+    let _ = Command::new("iptables")
+        .args([
+            "-I", "OUTPUT", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
+        ])
+        .output();
+
+    // mDNS (port 5353) - local network discovery
+    let _ = Command::new("iptables")
+        .args([
+            "-I", "OUTPUT", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
+        ])
+        .output();
+
+    // Localhost traffic - never tunnel local traffic
+    let _ = Command::new("iptables")
+        .args(["-I", "OUTPUT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
+        .output();
+
+    info!("✅ System traffic excluded from tunnel (DNS, DHCP, NTP, mDNS, localhost)");
+
     let mut queue = match Queue::open() {
         Ok(q) => q,
         Err(e) => {
@@ -891,6 +930,32 @@ fn cleanup_iptables_rules(config: &CaptureConfig) {
 
     info!("📦 Cleaning up iptables NFQUEUE rules...");
     let queue_num = config.queue_num.to_string();
+
+    // Clean up system traffic exclusion rules
+    let _ = Command::new("iptables")
+        .args(["-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])
+        .output();
+    let _ = Command::new("iptables")
+        .args(["-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"])
+        .output();
+    let _ = Command::new("iptables")
+        .args([
+            "-D", "OUTPUT", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
+        ])
+        .output();
+    let _ = Command::new("iptables")
+        .args([
+            "-D", "OUTPUT", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
+        ])
+        .output();
+    let _ = Command::new("iptables")
+        .args([
+            "-D", "OUTPUT", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
+        ])
+        .output();
+    let _ = Command::new("iptables")
+        .args(["-D", "OUTPUT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
+        .output();
 
     // Clean up exclusion rules (both directions)
     for ip in &config.exclude_ips {
