@@ -58,6 +58,7 @@ Your ISP's routing is suboptimal:
 
 - **Full bidirectional tunneling** — ALL TCP/UDP traffic flows through the relay and back
 - **Raw socket injection** — Responses injected directly into local network stack (no TUN device)
+- **System traffic preserved** — DNS, DHCP, NTP, mDNS, localhost excluded automatically
 - **Dedicated infrastructure** — no peer-to-peer, no bandwidth sharing with strangers
 - **Smart routing** — gaming tunneled, streaming bypassed for zero latency
 - **End-to-end encryption** — ChaCha20-Poly1305 on both directions
@@ -294,19 +295,14 @@ sudo journalctl -u oxidize-daemon -f   # View logs
 - [SECURITY.md](docs/SECURITY.md) - Security & DDoS protection
 - [Deployment guides](docs/) - Vultr, Latitude.sh setup
 
-## Development
-
-```bash
-cargo test --all           # Run tests
-cargo bench --package oxidize-common  # Benchmarks
-```
-
 ## Uninstall
 
 ```bash
 # Linux/macOS
 curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash
+```
 
+```bash
 # Windows (PowerShell as Admin)
 irm https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall-windows.ps1 | iex
 ```

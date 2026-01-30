@@ -328,10 +328,23 @@ OxTunnel implements full bidirectional tunneling with response injection:
 
 | Component | Platform | Description |
 |-----------|----------|-------------|
-| **NFQUEUE Capture** | Linux | Intercepts OUTPUT chain, DROPs original packets |
+| **NFQUEUE Capture** | Linux | Intercepts OUTPUT chain only, DROPs original packets |
 | **Response Injector** | Linux | Raw socket with `IP_HDRINCL` injects responses |
 | **NAT/MASQUERADE** | Server | Source NAT for tunnel IP pool (10.0.0.0/8) |
 | **SharedForwarder** | Server | Routes responses back to correct client |
+
+### System Traffic Exclusions
+
+The following traffic is **never tunneled** to ensure system functionality:
+
+| Traffic | Port | Reason |
+|---------|------|--------|
+| DNS | 53/udp, 53/tcp | Name resolution must work directly |
+| DHCP | 67-68/udp | IP address renewal |
+| NTP | 123/udp | Time synchronization |
+| mDNS | 5353/udp | Local network discovery |
+| Localhost | 127.0.0.0/8 | Local traffic never tunneled |
+| Relay Server | (dynamic) | Tunnel traffic itself excluded |
 
 ### Response Injection (Linux)
 
@@ -342,14 +355,77 @@ The `ResponseInjector` uses raw sockets to inject decrypted response packets dir
 let sock = socket2::Socket::new(Domain::IPV4, Type::RAW, Protocol::from(IPPROTO_RAW))?;
 sock.set_header_included_v4(true)?;
 
+// Extract destination IP from packet header (bytes 16-19 for IPv4)
+let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+let dest_addr = SockAddr::from(SocketAddr::new(IpAddr::V4(dst_ip), 0));
+
 // Inject complete IP packet (header + payload)
-libc::sendto(fd, packet.as_ptr(), packet.len(), 0, &dest_addr, addr_len);
+libc::sendto(fd, packet.as_ptr(), packet.len(), 0, dest_addr.as_ptr(), dest_addr.len());
 ```
 
 **Requirements:**
 - `CAP_NET_RAW` capability (daemon runs as root)
 - IPv4 and IPv6 raw sockets created at startup
 - Destination extracted from IP header for routing
+
+### NFQUEUE Capture Flow
+
+NFQUEUE only captures the **OUTPUT chain** (outbound traffic). Responses come through the tunnel and are injected via raw sockets:
+
+```bash
+# Capture outbound TCP/UDP (OUTPUT chain only)
+iptables -I OUTPUT -p tcp -j NFQUEUE --queue-num 0 --queue-bypass
+iptables -I OUTPUT -p udp -j NFQUEUE --queue-num 0 --queue-bypass
+
+# Exclude system traffic
+iptables -I OUTPUT -p udp --dport 53 -j ACCEPT      # DNS
+iptables -I OUTPUT -p udp --dport 67:68 -j ACCEPT   # DHCP
+iptables -I OUTPUT -p udp --dport 123 -j ACCEPT     # NTP
+iptables -I OUTPUT -p udp --dport 5353 -j ACCEPT    # mDNS
+iptables -I OUTPUT -d 127.0.0.0/8 -j ACCEPT         # Localhost
+
+# Exclude relay server (both directions)
+iptables -I OUTPUT -d $RELAY_IP -j ACCEPT
+iptables -I INPUT -s $RELAY_IP -j ACCEPT
+```
+
+**Verdict handling:**
+- Packet sent to tunnel → `Verdict::Drop` (original packet dropped)
+- Tunnel channel full → `Verdict::Accept` (fallback to direct)
+
+### Server-Side Forwarder (SharedForwarder)
+
+The server uses `SharedForwarder` to route packets to destinations and route responses back to clients:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Server SharedForwarder Architecture                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Client Packet                                                          │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────┐                  │
+│  │ OxTunnel │───►│ SharedFwd    │───►│  Internet    │                  │
+│  │ Decrypt  │    │ forward_pkt  │    │ (UDP/TCP)    │                  │
+│  └──────────┘    └──────┬───────┘    └──────┬───────┘                  │
+│                         │                   │                           │
+│                   Store mapping       Response arrives                  │
+│                   (dst → conn_id)           │                           │
+│                         │                   │                           │
+│                         ▼                   ▼                           │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────┐                  │
+│  │ OxTunnel │◄───│ SharedFwd    │◄───│ Response     │                  │
+│  │ Encrypt  │    │ route_resp   │    │ Listener     │                  │
+│  └──────────┘    └──────────────┘    └──────────────┘                  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Protocol Support:**
+| Protocol | Forward | Response Routing |
+|----------|---------|------------------|
+| UDP | `socket_v4/v6.send_to()` | `packet_mappings` lookup |
+| TCP | Connection pool | Per-connection read task |
+| ICMP | Raw ICMP socket | `icmp_mappings` (id+seq+dst) |
 
 ### Server-Side NAT
 
@@ -447,21 +523,41 @@ let server = OxTunnelServer::new(config).await?;
 server.run().await?;
 ```
 
-### Client (Desktop - AF_XDP/UDP + NFQUEUE)
+### Client (Full Tunnel Mode with Response Injection)
 
 ```rust
 use relay_client::client::{RelayClient, ClientConfig};
+use oxidize_common::oxtunnel_client::{PacketCaptureService, CaptureConfig, ResponseInjector};
 
-// Desktop uses AF_XDP (Linux) or optimized UDP with NFQUEUE packet capture
+// 1. Configure client
 let config = ClientConfig {
     server_addr: "<server_ip>:51820".parse()?,
     enable_encryption: true,
     enable_compression: true,
-    #[cfg(target_os = "linux")]
-    xdp_interface: Some("eth0".to_string()), // AF_XDP on Linux
     ..Default::default()
 };
+
+// 2. Create and connect client
 let client = RelayClient::new(config).await?;
+client.connect().await?;
+
+// 3. Start packet capture (NFQUEUE on Linux, WinDivert on Windows, BPF on macOS)
+let capture_config = CaptureConfig {
+    capture_tcp: true,
+    capture_udp: true,
+    exclude_ips: vec![server_addr.ip()],  // Don't capture tunnel traffic
+    queue_num: 0,
+};
+let capture_service = PacketCaptureService::new(capture_config);
+let (packet_rx, capture_handle) = capture_service.start();
+
+// 4. Create response injector (raw sockets for injecting responses)
+let response_injector = Arc::new(ResponseInjector::new());
+
+// 5. Run bidirectional tunnel
+// - Outbound: capture_rx → encrypt → send to server
+// - Inbound: recv from server → decrypt → inject via raw socket
+client.run_with_injection(packet_rx, response_injector).await?;
 ```
 
 ### Client (Mobile - UDP + VpnService)

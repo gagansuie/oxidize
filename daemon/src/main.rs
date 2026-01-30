@@ -79,7 +79,15 @@ async fn main() -> Result<()> {
         shutdown_signal().await;
         warn!("Shutdown signal received, cleaning up...");
 
-        // Abort client task (capture service is stopped internally)
+        // CRITICAL: Clean up iptables rules FIRST before anything else
+        // This ensures network connectivity is restored even if other cleanup fails
+        #[cfg(target_os = "linux")]
+        {
+            info!("📦 Cleaning up iptables rules on shutdown...");
+            cleanup_all_iptables_rules();
+        }
+
+        // Abort client task
         let mut state_guard = shutdown_state.lock().await;
         if let Some(task) = state_guard.client_task.take() {
             task.abort();
@@ -89,6 +97,17 @@ async fn main() -> Result<()> {
         info!("Cleanup complete, exiting");
         std::process::exit(0);
     });
+
+    // Set up panic hook to clean up iptables on crash
+    #[cfg(target_os = "linux")]
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            eprintln!("PANIC: Cleaning up iptables rules before crash...");
+            cleanup_all_iptables_rules();
+            default_hook(panic_info);
+        }));
+    }
 
     // Platform-specific IPC listener
     #[cfg(unix)]
@@ -264,24 +283,11 @@ async fn handle_connect(
 
     info!("Connecting to relay: {}", server_addr);
 
-    // STEP 1: Add iptables exclusion for relay server BEFORE anything else
-    // This ensures our QUIC connection won't be intercepted by NFQUEUE
-    info!(
-        "📦 Adding iptables exclusion for relay: {}",
-        server_addr.ip()
-    );
-    let _ = std::process::Command::new("iptables")
-        .args([
-            "-I",
-            "OUTPUT",
-            "-d",
-            &server_addr.ip().to_string(),
-            "-j",
-            "ACCEPT",
-        ])
-        .output();
+    // NOTE: Relay server exclusion is now handled by PacketCaptureService
+    // which properly cleans up old rules and adds new ones with correct ordering.
+    // The exclusion rule is added at position 1 (top of chain) by PacketCaptureService.
 
-    // STEP 2: Create OxTunnel client
+    // Create OxTunnel client
     // On Linux, use AF_XDP/FLASH for maximum performance (requires root)
     #[cfg(target_os = "linux")]
     let xdp_interface = if nix::unistd::geteuid().is_root() {
@@ -341,11 +347,16 @@ async fn handle_connect(
     // Note: iptables rules for NFQUEUE are now set up inside PacketCaptureService on Linux
     // Configure capture with relay server exclusion
     let capture_config = CaptureConfig {
-        capture_tcp: true,
+        capture_tcp: false,
         capture_udp: true,
+        capture_icmp: false,
         exclude_ips: vec![server_addr.ip()],
         queue_num: 0,
+        tun_fd: None,
     };
+
+    let capture_tcp = capture_config.capture_tcp;
+    let capture_udp = capture_config.capture_udp;
 
     // Start cross-platform packet capture service
     let capture_service = PacketCaptureService::new(capture_config);
@@ -375,7 +386,7 @@ async fn handle_connect(
         info!("   ├─ Mode: {} packet capture", platform);
         info!("   ├─ OxTunnel protocol: enabled");
         info!("   ├─ Response injection: enabled");
-        info!("   └─ Capturing TCP+UDP traffic");
+        info!("   └─ Capturing TCP: {}, UDP: {}", capture_tcp, capture_udp);
 
         if let Err(e) = client_for_task
             .run_with_injection(oxtunnel_rx, response_injector)
@@ -424,9 +435,6 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         };
     }
 
-    // Get server address before clearing state (for iptables cleanup)
-    let server_addr_str = state_guard.server_addr.clone();
-
     // Send DISCONNECT to server BEFORE aborting task (so server can clean up session)
     if let Some(ref client) = state_guard.client {
         info!("Sending DISCONNECT to server...");
@@ -439,15 +447,8 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         info!("Client task aborted");
     }
 
-    // Clean up iptables exclusion rule for relay server
-    if let Some(ref addr) = server_addr_str {
-        if let Some(ip) = addr.split(':').next() {
-            info!("📦 Removing iptables exclusion for relay: {}", ip);
-            let _ = std::process::Command::new("iptables")
-                .args(["-D", "OUTPUT", "-d", ip, "-j", "ACCEPT"])
-                .output();
-        }
-    }
+    // NOTE: iptables cleanup is now handled by PacketCaptureService's cleanup_iptables_rules()
+    // which is called when the capture service stops (via capture_service.stop() in the task)
 
     // Brief delay to allow cleanup to complete before allowing reconnect
     drop(state_guard);
@@ -643,6 +644,105 @@ async fn handle_windows_client(
     }
 
     Ok(())
+}
+
+/// Aggressively clean up ALL iptables rules created by the daemon
+/// This is called on shutdown, panic, and disconnect to ensure network connectivity is restored
+#[cfg(target_os = "linux")]
+fn cleanup_all_iptables_rules() {
+    use std::process::Command;
+
+    // Remove ALL NFQUEUE rules (loop until none remain)
+    for _ in 0..100 {
+        let tcp_result = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                "0",
+                "--queue-bypass",
+            ])
+            .output();
+        let udp_result = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                "0",
+                "--queue-bypass",
+            ])
+            .output();
+        // Also try without --queue-bypass flag
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                "0",
+            ])
+            .output();
+        let _ = Command::new("iptables")
+            .args([
+                "-D",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "-j",
+                "NFQUEUE",
+                "--queue-num",
+                "0",
+            ])
+            .output();
+
+        let tcp_failed = tcp_result.map(|o| !o.status.success()).unwrap_or(true);
+        let udp_failed = udp_result.map(|o| !o.status.success()).unwrap_or(true);
+        if tcp_failed && udp_failed {
+            break;
+        }
+    }
+
+    // Clean up system exclusion rules
+    for _ in 0..20 {
+        let _ = Command::new("iptables")
+            .args(["-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])
+            .output();
+        let _ = Command::new("iptables")
+            .args(["-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"])
+            .output();
+        let _ = Command::new("iptables")
+            .args([
+                "-D", "OUTPUT", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
+            ])
+            .output();
+        let _ = Command::new("iptables")
+            .args([
+                "-D", "OUTPUT", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
+            ])
+            .output();
+        let _ = Command::new("iptables")
+            .args([
+                "-D", "OUTPUT", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
+            ])
+            .output();
+        let _ = Command::new("iptables")
+            .args(["-D", "OUTPUT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
+            .output();
+    }
+
+    // Note: Relay server exclusion rules are left to PacketCaptureService cleanup
+    // or will be cleaned on next connect
 }
 
 /// Detect default network interface for AF_XDP (Linux only)

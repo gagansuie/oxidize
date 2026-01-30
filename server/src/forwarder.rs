@@ -43,6 +43,54 @@ struct TcpConnKey {
     dst_addr: SocketAddr,
 }
 
+/// TCP connection state for proper sequence/ack tracking
+#[derive(Debug)]
+#[allow(dead_code)]
+struct TcpState {
+    /// Our sequence number (server -> client direction)
+    our_seq: AtomicU64,
+    /// Expected ack from client (tracks what client has received)
+    their_ack: AtomicU64,
+    /// Client's sequence number we've seen
+    their_seq: AtomicU64,
+    /// Our ack to client (what we've received from client)
+    our_ack: AtomicU64,
+    /// Source IP for response building
+    src_ip: IpAddr,
+}
+
+impl TcpState {
+    fn new(src_ip: IpAddr, initial_client_seq: u32) -> Self {
+        // Generate random initial sequence number for security
+        let our_initial_seq = rand::random::<u32>() as u64;
+        Self {
+            our_seq: AtomicU64::new(our_initial_seq),
+            their_ack: AtomicU64::new(our_initial_seq),
+            their_seq: AtomicU64::new(initial_client_seq as u64),
+            our_ack: AtomicU64::new(initial_client_seq.wrapping_add(1) as u64),
+            src_ip,
+        }
+    }
+
+    /// Get current seq and advance by payload length
+    fn advance_seq(&self, payload_len: usize) -> u32 {
+        let seq = self.our_seq.fetch_add(payload_len as u64, Ordering::SeqCst);
+        seq as u32
+    }
+
+    /// Get current ack number
+    fn get_ack(&self) -> u32 {
+        self.our_ack.load(Ordering::SeqCst) as u32
+    }
+
+    /// Update ack based on received client data
+    #[allow(dead_code)]
+    fn update_ack(&self, client_seq: u32, payload_len: usize) {
+        let new_ack = client_seq.wrapping_add(payload_len as u32) as u64;
+        self.our_ack.fetch_max(new_ack, Ordering::SeqCst);
+    }
+}
+
 /// Shared packet forwarder for all connections
 pub struct SharedForwarder {
     /// Outbound UDP socket for forwarding (IPv4)
@@ -61,6 +109,8 @@ pub struct SharedForwarder {
     packet_mappings: Arc<RwLock<HashMap<SocketAddr, PacketMapping>>>,
     /// Active TCP connections (conn_id + src_port + dst -> TcpStream write half)
     tcp_connections: Arc<RwLock<HashMap<TcpConnKey, mpsc::Sender<Vec<u8>>>>>,
+    /// TCP state tracking for proper seq/ack numbers
+    tcp_states: Arc<RwLock<HashMap<TcpConnKey, Arc<TcpState>>>>,
     /// ICMP echo mappings for response routing
     icmp_mappings: Arc<RwLock<HashMap<IcmpKey, PacketMapping>>>,
     /// Statistics
@@ -110,6 +160,7 @@ impl SharedForwarder {
             response_channels: Arc::new(RwLock::new(HashMap::new())),
             packet_mappings: Arc::new(RwLock::new(HashMap::new())),
             tcp_connections: Arc::new(RwLock::new(HashMap::new())),
+            tcp_states: Arc::new(RwLock::new(HashMap::new())),
             icmp_mappings: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(ForwarderStats::default()),
         });
@@ -485,10 +536,15 @@ impl SharedForwarder {
         packet[20..22].copy_from_slice(&src_port.to_be_bytes());
         packet[22..24].copy_from_slice(&dst_port.to_be_bytes());
         packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
-        packet[26..28].copy_from_slice(&[0x00, 0x00]); // Checksum disabled
+        // Checksum placeholder (0) - will be calculated below
+        packet[26..28].copy_from_slice(&[0x00, 0x00]);
 
         // Payload
         packet[28..].copy_from_slice(payload);
+
+        // Calculate UDP checksum over UDP header + payload
+        let udp_checksum = Self::udp_checksum_v4(src_ip, dst_ip, &packet[20..]);
+        packet[26..28].copy_from_slice(&udp_checksum.to_be_bytes());
 
         packet
     }
@@ -519,22 +575,32 @@ impl SharedForwarder {
         packet[40..42].copy_from_slice(&src_port.to_be_bytes());
         packet[42..44].copy_from_slice(&dst_port.to_be_bytes());
         packet[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
-        packet[46..48].copy_from_slice(&[0x00, 0x00]); // Checksum (should calculate for IPv6)
+        // Checksum placeholder (0) - will be calculated below
+        packet[46..48].copy_from_slice(&[0x00, 0x00]);
 
         // Payload
         packet[48..].copy_from_slice(payload);
+
+        // Calculate UDP checksum over UDP header + payload (mandatory for IPv6)
+        let udp_checksum = Self::udp_checksum_v6(src_ip, dst_ip, &packet[40..]);
+        packet[46..48].copy_from_slice(&udp_checksum.to_be_bytes());
 
         packet
     }
 
     /// Calculate IP header checksum
     fn ip_checksum(&self, header: &[u8]) -> u16 {
+        Self::checksum_oneshot(header)
+    }
+
+    /// One-shot checksum calculation
+    fn checksum_oneshot(data: &[u8]) -> u16 {
         let mut sum: u32 = 0;
-        for i in (0..header.len()).step_by(2) {
-            let word = if i + 1 < header.len() {
-                ((header[i] as u32) << 8) | (header[i + 1] as u32)
+        for i in (0..data.len()).step_by(2) {
+            let word = if i + 1 < data.len() {
+                ((data[i] as u32) << 8) | (data[i + 1] as u32)
             } else {
-                (header[i] as u32) << 8
+                (data[i] as u32) << 8
             };
             sum = sum.wrapping_add(word);
         }
@@ -542,6 +608,140 @@ impl SharedForwarder {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
         !(sum as u16)
+    }
+
+    /// Calculate TCP checksum for IPv4
+    fn tcp_checksum_v4(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header
+        let src = src_ip.octets();
+        let dst = dst_ip.octets();
+        sum = sum.wrapping_add(((src[0] as u32) << 8) | (src[1] as u32));
+        sum = sum.wrapping_add(((src[2] as u32) << 8) | (src[3] as u32));
+        sum = sum.wrapping_add(((dst[0] as u32) << 8) | (dst[1] as u32));
+        sum = sum.wrapping_add(((dst[2] as u32) << 8) | (dst[3] as u32));
+        sum = sum.wrapping_add(6); // Protocol: TCP
+        sum = sum.wrapping_add(tcp_segment.len() as u32);
+
+        // TCP segment
+        for i in (0..tcp_segment.len()).step_by(2) {
+            let word = if i + 1 < tcp_segment.len() {
+                ((tcp_segment[i] as u32) << 8) | (tcp_segment[i + 1] as u32)
+            } else {
+                (tcp_segment[i] as u32) << 8
+            };
+            sum = sum.wrapping_add(word);
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// Calculate TCP checksum for IPv6
+    fn tcp_checksum_v6(src_ip: Ipv6Addr, dst_ip: Ipv6Addr, tcp_segment: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header for IPv6
+        let src = src_ip.octets();
+        let dst = dst_ip.octets();
+        for i in (0..16).step_by(2) {
+            sum = sum.wrapping_add(((src[i] as u32) << 8) | (src[i + 1] as u32));
+            sum = sum.wrapping_add(((dst[i] as u32) << 8) | (dst[i + 1] as u32));
+        }
+        let len = tcp_segment.len() as u32;
+        sum = sum.wrapping_add(len >> 16);
+        sum = sum.wrapping_add(len & 0xFFFF);
+        sum = sum.wrapping_add(6); // Next header: TCP
+
+        // TCP segment
+        for i in (0..tcp_segment.len()).step_by(2) {
+            let word = if i + 1 < tcp_segment.len() {
+                ((tcp_segment[i] as u32) << 8) | (tcp_segment[i + 1] as u32)
+            } else {
+                (tcp_segment[i] as u32) << 8
+            };
+            sum = sum.wrapping_add(word);
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// Calculate UDP checksum for IPv4
+    fn udp_checksum_v4(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, udp_segment: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header
+        let src = src_ip.octets();
+        let dst = dst_ip.octets();
+        sum = sum.wrapping_add(((src[0] as u32) << 8) | (src[1] as u32));
+        sum = sum.wrapping_add(((src[2] as u32) << 8) | (src[3] as u32));
+        sum = sum.wrapping_add(((dst[0] as u32) << 8) | (dst[1] as u32));
+        sum = sum.wrapping_add(((dst[2] as u32) << 8) | (dst[3] as u32));
+        sum = sum.wrapping_add(17); // Protocol: UDP
+        sum = sum.wrapping_add(udp_segment.len() as u32);
+
+        // UDP segment
+        for i in (0..udp_segment.len()).step_by(2) {
+            let word = if i + 1 < udp_segment.len() {
+                ((udp_segment[i] as u32) << 8) | (udp_segment[i + 1] as u32)
+            } else {
+                (udp_segment[i] as u32) << 8
+            };
+            sum = sum.wrapping_add(word);
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        let result = !(sum as u16);
+        if result == 0 {
+            0xFFFF
+        } else {
+            result
+        }
+    }
+
+    /// Calculate UDP checksum for IPv6 (mandatory)
+    fn udp_checksum_v6(src_ip: Ipv6Addr, dst_ip: Ipv6Addr, udp_segment: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+
+        // Pseudo-header for IPv6
+        let src = src_ip.octets();
+        let dst = dst_ip.octets();
+        for i in (0..16).step_by(2) {
+            sum = sum.wrapping_add(((src[i] as u32) << 8) | (src[i + 1] as u32));
+            sum = sum.wrapping_add(((dst[i] as u32) << 8) | (dst[i + 1] as u32));
+        }
+        let len = udp_segment.len() as u32;
+        sum = sum.wrapping_add(len >> 16);
+        sum = sum.wrapping_add(len & 0xFFFF);
+        sum = sum.wrapping_add(17); // Next header: UDP
+
+        // UDP segment
+        for i in (0..udp_segment.len()).step_by(2) {
+            let word = if i + 1 < udp_segment.len() {
+                ((udp_segment[i] as u32) << 8) | (udp_segment[i + 1] as u32)
+            } else {
+                (udp_segment[i] as u32) << 8
+            };
+            sum = sum.wrapping_add(word);
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        let result = !(sum as u16);
+        if result == 0 {
+            0xFFFF
+        } else {
+            result
+        }
     }
 
     /// Register a connection and return a receiver for responses
@@ -908,14 +1108,23 @@ impl SharedForwarder {
         let (mut read_half, mut write_half) = stream.into_split();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1024);
 
-        // Store the write channel
+        // Create TCP state for tracking seq/ack
+        // Initial client seq is 0 since we're establishing a new connection
+        let tcp_state = Arc::new(TcpState::new(src_ip, 0));
+
+        // Store the write channel and TCP state
         {
             let mut conns = self.tcp_connections.write().await;
             conns.insert(key.clone(), tx);
         }
+        {
+            let mut states = self.tcp_states.write().await;
+            states.insert(key.clone(), tcp_state.clone());
+        }
 
         // Spawn task to write data to TCP connection
         let tcp_conns = self.tcp_connections.clone();
+        let tcp_states = self.tcp_states.clone();
         let key_clone = key.clone();
         tokio::spawn(async move {
             while let Some(data) = rx.recv().await {
@@ -923,8 +1132,12 @@ impl SharedForwarder {
                     break;
                 }
             }
+            // Cleanup on disconnect
             let mut conns = tcp_conns.write().await;
             conns.remove(&key_clone);
+            drop(conns);
+            let mut states = tcp_states.write().await;
+            states.remove(&key_clone);
         });
 
         // Spawn task to read responses and send back to client
@@ -936,8 +1149,20 @@ impl SharedForwarder {
                 match read_half.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let response =
-                            Self::build_tcp_response(dst_addr, src_ip, src_port, &buf[..n]);
+                        // Use TCP state to get proper seq/ack numbers
+                        let seq = tcp_state.advance_seq(n);
+                        let ack = tcp_state.get_ack();
+                        // PSH+ACK flags (0x18) for data packets
+                        let flags = 0x18;
+                        let response = Self::build_tcp_response_with_state(
+                            dst_addr,
+                            src_ip,
+                            src_port,
+                            seq,
+                            ack,
+                            flags,
+                            &buf[..n],
+                        );
                         let channels = response_channels.read().await;
                         if let Some(tx) = channels.get(&conn_id) {
                             let _ = tx.try_send(response);
@@ -951,90 +1176,141 @@ impl SharedForwarder {
         });
     }
 
-    /// Build a TCP response packet (supports IPv4 and IPv6)
-    fn build_tcp_response(
+    /// Build a TCP response packet with proper seq/ack (supports IPv4 and IPv6)
+    fn build_tcp_response_with_state(
         src_addr: SocketAddr,
         dst_ip: IpAddr,
         dst_port: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
         payload: &[u8],
     ) -> Vec<u8> {
         match (src_addr.ip(), dst_ip) {
-            (IpAddr::V4(src_ip), IpAddr::V4(dst_ip)) => {
-                Self::build_tcp_response_v4(src_ip, src_addr.port(), dst_ip, dst_port, payload)
-            }
-            (IpAddr::V6(src_ip), IpAddr::V6(dst_ip)) => {
-                Self::build_tcp_response_v6(src_ip, src_addr.port(), dst_ip, dst_port, payload)
-            }
+            (IpAddr::V4(src_ip), IpAddr::V4(dst_ip)) => Self::build_tcp_response_v4(
+                src_ip,
+                src_addr.port(),
+                dst_ip,
+                dst_port,
+                seq,
+                ack,
+                flags,
+                payload,
+            ),
+            (IpAddr::V6(src_ip), IpAddr::V6(dst_ip)) => Self::build_tcp_response_v6(
+                src_ip,
+                src_addr.port(),
+                dst_ip,
+                dst_port,
+                seq,
+                ack,
+                flags,
+                payload,
+            ),
             _ => Vec::new(),
         }
     }
 
-    /// Build an IPv4 TCP response packet
+    /// Build an IPv4 TCP response packet with proper seq/ack/flags and checksums
+    #[allow(clippy::too_many_arguments)]
     fn build_tcp_response_v4(
         src_ip: Ipv4Addr,
         src_port: u16,
         dst_ip: Ipv4Addr,
         dst_port: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
         payload: &[u8],
     ) -> Vec<u8> {
         let tcp_header_len = 20;
         let ip_len = 20 + tcp_header_len + payload.len();
         let mut packet = vec![0u8; ip_len];
 
-        // IP Header
-        packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes());
-        packet[6..8].copy_from_slice(&[0x40, 0x00]);
-        packet[8] = 64;
-        packet[9] = 6;
+        // IP Header (20 bytes)
+        packet[0] = 0x45; // Version 4, IHL 5
+        packet[1] = 0x00; // DSCP/ECN
+        packet[2..4].copy_from_slice(&(ip_len as u16).to_be_bytes()); // Total length
+                                                                      // packet[4..6] - Identification (0)
+        packet[6..8].copy_from_slice(&[0x40, 0x00]); // Flags: Don't Fragment
+        packet[8] = 64; // TTL
+        packet[9] = 6; // Protocol: TCP
+                       // packet[10..12] - Header checksum (calculated below)
         packet[12..16].copy_from_slice(&src_ip.octets());
         packet[16..20].copy_from_slice(&dst_ip.octets());
 
-        // TCP Header
-        packet[20..22].copy_from_slice(&src_port.to_be_bytes());
-        packet[22..24].copy_from_slice(&dst_port.to_be_bytes());
-        packet[32] = 0x50;
-        packet[33] = 0x18;
+        // Calculate IP header checksum
+        let ip_checksum = Self::checksum_oneshot(&packet[0..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+        // TCP Header (20 bytes at offset 20)
+        packet[20..22].copy_from_slice(&src_port.to_be_bytes()); // Source port
+        packet[22..24].copy_from_slice(&dst_port.to_be_bytes()); // Dest port
+        packet[24..28].copy_from_slice(&seq.to_be_bytes()); // Sequence number
+        packet[28..32].copy_from_slice(&ack.to_be_bytes()); // Acknowledgment number
+        packet[32] = 0x50; // Data offset: 5 (20 bytes)
+        packet[33] = flags; // TCP flags
+        packet[34..36].copy_from_slice(&(65535u16).to_be_bytes()); // Window size
+                                                                   // packet[36..38] - Checksum (calculated below)
+                                                                   // packet[38..40] - Urgent pointer (0)
 
         // Payload
-        if !payload.is_empty() && packet.len() >= 40 + payload.len() {
+        if !payload.is_empty() {
             packet[40..40 + payload.len()].copy_from_slice(payload);
         }
+
+        // Calculate TCP checksum over TCP header + payload
+        let tcp_checksum = Self::tcp_checksum_v4(src_ip, dst_ip, &packet[20..]);
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
 
         packet
     }
 
-    /// Build an IPv6 TCP response packet
+    /// Build an IPv6 TCP response packet with proper seq/ack/flags and checksums
+    #[allow(clippy::too_many_arguments)]
     fn build_tcp_response_v6(
         src_ip: Ipv6Addr,
         src_port: u16,
         dst_ip: Ipv6Addr,
         dst_port: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
         payload: &[u8],
     ) -> Vec<u8> {
         let tcp_header_len = 20;
-        let payload_len = tcp_header_len + payload.len();
-        let ip_len = 40 + payload_len;
+        let tcp_payload_len = tcp_header_len + payload.len();
+        let ip_len = 40 + tcp_payload_len;
         let mut packet = vec![0u8; ip_len];
 
         // IPv6 Header (40 bytes)
-        packet[0] = 0x60;
-        packet[4..6].copy_from_slice(&(payload_len as u16).to_be_bytes());
+        packet[0] = 0x60; // Version 6
+                          // packet[1..4] - Traffic class + Flow label (0)
+        packet[4..6].copy_from_slice(&(tcp_payload_len as u16).to_be_bytes()); // Payload length
         packet[6] = 6; // Next header: TCP
         packet[7] = 64; // Hop limit
         packet[8..24].copy_from_slice(&src_ip.octets());
         packet[24..40].copy_from_slice(&dst_ip.octets());
 
-        // TCP Header
-        packet[40..42].copy_from_slice(&src_port.to_be_bytes());
-        packet[42..44].copy_from_slice(&dst_port.to_be_bytes());
-        packet[52] = 0x50;
-        packet[53] = 0x18;
+        // TCP Header (20 bytes at offset 40)
+        packet[40..42].copy_from_slice(&src_port.to_be_bytes()); // Source port
+        packet[42..44].copy_from_slice(&dst_port.to_be_bytes()); // Dest port
+        packet[44..48].copy_from_slice(&seq.to_be_bytes()); // Sequence number
+        packet[48..52].copy_from_slice(&ack.to_be_bytes()); // Acknowledgment number
+        packet[52] = 0x50; // Data offset: 5 (20 bytes)
+        packet[53] = flags; // TCP flags
+        packet[54..56].copy_from_slice(&(65535u16).to_be_bytes()); // Window size
+                                                                   // packet[56..58] - Checksum (calculated below)
+                                                                   // packet[58..60] - Urgent pointer (0)
 
         // Payload
-        if !payload.is_empty() && packet.len() >= 60 + payload.len() {
+        if !payload.is_empty() {
             packet[60..60 + payload.len()].copy_from_slice(payload);
         }
+
+        // Calculate TCP checksum over TCP header + payload
+        let tcp_checksum = Self::tcp_checksum_v6(src_ip, dst_ip, &packet[40..]);
+        packet[56..58].copy_from_slice(&tcp_checksum.to_be_bytes());
 
         packet
     }

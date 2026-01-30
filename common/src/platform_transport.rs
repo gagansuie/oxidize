@@ -352,6 +352,73 @@ pub mod linux {
 }
 
 // ============================================================================
+// Mobile (Android/iOS) Implementation - Standard UDP
+// ============================================================================
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub mod mobile {
+    use super::*;
+
+    /// Mobile optimized UDP transport
+    /// Uses standard UDP sockets - TUN handling is done at capture layer
+    pub struct MobileTransport {
+        socket: std::net::UdpSocket,
+        config: TransportConfig,
+        stats: TransportStats,
+    }
+
+    impl MobileTransport {
+        /// Create new mobile transport
+        pub fn new(config: TransportConfig) -> io::Result<Self> {
+            let socket = std::net::UdpSocket::bind(config.bind_addr)?;
+            socket.set_nonblocking(true)?;
+
+            Ok(Self {
+                socket,
+                config,
+                stats: TransportStats::default(),
+            })
+        }
+
+        /// Send multiple packets
+        pub fn send_batch(&mut self, packets: &[(SocketAddr, Bytes)]) -> io::Result<usize> {
+            let mut sent = 0;
+            for (dest, data) in packets {
+                match self.socket.send_to(data, dest) {
+                    Ok(n) => {
+                        self.stats.packets_sent += 1;
+                        self.stats.bytes_sent += n as u64;
+                        sent += 1;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            self.stats.batches_sent += 1;
+            Ok(sent)
+        }
+
+        /// Receive packets
+        pub fn recv(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+            let (n, addr) = self.socket.recv_from(buf)?;
+            self.stats.packets_received += 1;
+            self.stats.bytes_received += n as u64;
+            Ok((n, addr))
+        }
+
+        /// Get transport stats
+        pub fn stats(&self) -> &TransportStats {
+            &self.stats
+        }
+
+        /// Get underlying socket
+        pub fn socket(&self) -> &std::net::UdpSocket {
+            &self.socket
+        }
+    }
+}
+
+// ============================================================================
 // Cross-platform transport wrapper
 // ============================================================================
 
@@ -363,6 +430,10 @@ pub enum PlatformTransport {
     MacOs(macos::MacOsTransport),
     #[cfg(target_os = "windows")]
     Windows(windows::WindowsTransport),
+    #[cfg(target_os = "android")]
+    Android(mobile::MobileTransport),
+    #[cfg(target_os = "ios")]
+    Ios(mobile::MobileTransport),
 }
 
 impl PlatformTransport {
@@ -386,7 +457,25 @@ impl PlatformTransport {
                 config,
             )?))
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(target_os = "android")]
+        {
+            Ok(PlatformTransport::Android(mobile::MobileTransport::new(
+                config,
+            )?))
+        }
+        #[cfg(target_os = "ios")]
+        {
+            Ok(PlatformTransport::Ios(mobile::MobileTransport::new(
+                config,
+            )?))
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "ios"
+        )))]
         {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -409,7 +498,21 @@ impl PlatformTransport {
         {
             "Windows (IOCP)"
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(target_os = "android")]
+        {
+            "Android (UDP)"
+        }
+        #[cfg(target_os = "ios")]
+        {
+            "iOS (UDP)"
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "ios"
+        )))]
         {
             "Unknown"
         }
@@ -424,6 +527,10 @@ impl PlatformTransport {
             PlatformTransport::MacOs(t) => t.send_batch(packets),
             #[cfg(target_os = "windows")]
             PlatformTransport::Windows(t) => t.send_batch(packets),
+            #[cfg(target_os = "android")]
+            PlatformTransport::Android(t) => t.send_batch(packets),
+            #[cfg(target_os = "ios")]
+            PlatformTransport::Ios(t) => t.send_batch(packets),
         }
     }
 
@@ -436,6 +543,10 @@ impl PlatformTransport {
             PlatformTransport::MacOs(t) => t.recv(buf),
             #[cfg(target_os = "windows")]
             PlatformTransport::Windows(t) => t.recv(buf),
+            #[cfg(target_os = "android")]
+            PlatformTransport::Android(t) => t.recv(buf),
+            #[cfg(target_os = "ios")]
+            PlatformTransport::Ios(t) => t.recv(buf),
         }
     }
 
@@ -448,6 +559,10 @@ impl PlatformTransport {
             PlatformTransport::MacOs(t) => t.stats(),
             #[cfg(target_os = "windows")]
             PlatformTransport::Windows(t) => t.stats(),
+            #[cfg(target_os = "android")]
+            PlatformTransport::Android(t) => t.stats(),
+            #[cfg(target_os = "ios")]
+            PlatformTransport::Ios(t) => t.stats(),
         }
     }
 }

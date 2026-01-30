@@ -24,3 +24,4 @@ prometheus = "0.13"
 hyper = { version = "0.14", features = ["full"] }
 libc = "0.2"
 ring = { workspace = true }
+rand = "0.8"

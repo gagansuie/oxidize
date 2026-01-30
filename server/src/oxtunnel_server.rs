@@ -46,9 +46,9 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            max_packets_per_sec: 1000,              // 1000 pps per IP
-            max_connections_per_min: 10,            // 10 new connections/min per IP
-            max_sessions_per_ip: 5,                 // 5 concurrent sessions per IP
+            max_packets_per_sec: 50000,  // 50k pps per IP (high for tunnel traffic)
+            max_connections_per_min: 10, // 10 new connections/min per IP
+            max_sessions_per_ip: 5,      // 5 concurrent sessions per IP
             ban_duration: Duration::from_secs(300), // 5 minute ban
         }
     }
@@ -1366,14 +1366,32 @@ impl MobileServerHandler {
         }
 
         let mut buf = packet.to_vec();
-        let (header, payload) =
-            decode_packet(&mut buf, None).map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
 
-        if header.flags & flags::CONTROL != 0 {
-            self.handle_control_message(&header, payload, peer_addr)
+        // Look up session crypto for decryption (data packets are encrypted)
+        // We need to hold the lock while decrypting since CryptoEngine can't be cloned
+        // Note: Compare normalized addresses to handle IPv4 vs IPv4-mapped IPv6 mismatch
+        // (AF_XDP gives pure IPv4, but UDP socket handshakes store IPv4-mapped IPv6)
+        let sessions = self.sessions.read().await;
+        let session_crypto = sessions
+            .values()
+            .find(|s| Self::addrs_match(s.peer_addr, peer_addr) && s.encryption_enabled)
+            .map(|s| &s.crypto);
+
+        let (header, payload) = decode_packet(&mut buf, session_crypto)
+            .map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
+
+        // Clone payload before dropping the lock since payload borrows from buf
+        let payload_owned = payload.to_vec();
+        #[allow(clippy::clone_on_copy)]
+        let header_owned = header.clone();
+        drop(sessions);
+
+        if header_owned.flags & flags::CONTROL != 0 {
+            self.handle_control_message(&header_owned, &payload_owned, peer_addr)
                 .await
         } else {
-            self.handle_data_packet(&header, payload, peer_addr).await
+            self.handle_data_packet(&header_owned, &payload_owned, peer_addr)
+                .await
         }
     }
 
@@ -1674,6 +1692,36 @@ impl MobileServerHandler {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         peer_addr.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Compare two socket addresses, normalizing IPv4-mapped IPv6 to pure IPv4
+    /// This handles the mismatch between AF_XDP (pure IPv4) and UDP socket (IPv4-mapped IPv6)
+    fn addrs_match(a: SocketAddr, b: SocketAddr) -> bool {
+        if a == b {
+            return true;
+        }
+        // Normalize both to IPv4 if possible and compare
+        let a_normalized = match a {
+            SocketAddr::V6(v6) => {
+                if let Some(ipv4) = v6.ip().to_ipv4_mapped() {
+                    SocketAddr::new(IpAddr::V4(ipv4), v6.port())
+                } else {
+                    a
+                }
+            }
+            _ => a,
+        };
+        let b_normalized = match b {
+            SocketAddr::V6(v6) => {
+                if let Some(ipv4) = v6.ip().to_ipv4_mapped() {
+                    SocketAddr::new(IpAddr::V4(ipv4), v6.port())
+                } else {
+                    b
+                }
+            }
+            _ => b,
+        };
+        a_normalized == b_normalized
     }
 
     async fn forward_ip_packet(

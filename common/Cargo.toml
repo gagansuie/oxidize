@@ -48,8 +48,17 @@ tracing-subscriber = { workspace = true }
 nfq = "0.2"
 socket2 = { version = "0.5", features = ["all"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+socket2 = { version = "0.5", features = ["all"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windivert = { version = "0.6", features = ["vendored"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android uses libc for TUN operations - already included
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS uses libc for TUN operations - already included
 
 [dev-dependencies]
 criterion = "0.5"
