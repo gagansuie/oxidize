@@ -145,7 +145,10 @@ impl QuantizedLinear {
         #[cfg(not(target_arch = "aarch64"))]
         {
             self.forward_scalar(&quantized_input, weights, &mut output, scale, input_scale);
+            return output;
         }
+
+        #[allow(unreachable_code)]
         output
     }
 

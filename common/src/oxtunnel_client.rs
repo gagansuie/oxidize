@@ -13,6 +13,8 @@ use crate::oxtunnel_protocol::{
     HEADER_SIZE, MAX_PACKET_SIZE,
 };
 use std::net::SocketAddr;
+#[cfg(target_os = "macos")]
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1823,8 +1825,6 @@ impl ResponseInjector {
 
     #[cfg(target_os = "macos")]
     fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
-        use std::os::unix::io::AsRawFd;
-
         if packet.len() < 20 {
             return Err("IPv4 packet too short".to_string());
         }
@@ -1877,6 +1877,8 @@ impl ResponseInjector {
 
     #[cfg(target_os = "windows")]
     fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
+        use windivert::address::{WinDivertAddress, WinDivertNetworkData};
+        use windivert::layer::WinDivertDirection;
         use windivert::prelude::*;
 
         if packet.len() < 20 {
