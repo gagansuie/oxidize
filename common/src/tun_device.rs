@@ -176,11 +176,11 @@ impl TunDevice {
 
         let output = Command::new("ifconfig")
             .args([
-                &actual_name,
-                &addr_str,
-                &addr_str,
+                actual_name.as_str(),
+                addr_str.as_str(),
+                addr_str.as_str(),
                 "netmask",
-                &netmask_str,
+                netmask_str.as_str(),
                 "up",
             ])
             .output()

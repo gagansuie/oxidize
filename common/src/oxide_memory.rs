@@ -40,13 +40,20 @@ impl HugePageSize {
     }
 
     /// Get mmap flags for this page size
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub fn mmap_flags(&self) -> i32 {
         match self {
             HugePageSize::Size2MB => libc::MAP_HUGETLB | (21 << 26), // MAP_HUGE_2MB
             HugePageSize::Size1GB => libc::MAP_HUGETLB | (30 << 26), // MAP_HUGE_1GB
             HugePageSize::Regular => 0,
         }
+    }
+
+    /// Get mmap flags for this page size (non-Linux Unix: no huge page support)
+    #[cfg(all(unix, not(target_os = "linux")))]
+    pub fn mmap_flags(&self) -> i32 {
+        // Huge pages not supported on this platform, fall back to regular pages
+        0
     }
 }
 

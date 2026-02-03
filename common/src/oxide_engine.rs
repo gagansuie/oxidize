@@ -508,8 +508,15 @@ pub mod linux {
 #[cfg(target_os = "macos")]
 pub mod macos {
     use super::*;
+    use anyhow::Context;
     use std::os::unix::io::RawFd;
     use std::path::Path;
+
+    /// Wrapper for raw pointer to make it Send + Sync
+    /// Safety: The pointer is only accessed from one thread at a time via &mut self
+    struct SendSyncPtr(*mut u8);
+    unsafe impl Send for SendSyncPtr {}
+    unsafe impl Sync for SendSyncPtr {}
 
     // IOKit types for direct hardware access
     #[repr(C)]
@@ -552,7 +559,7 @@ pub mod macos {
         kq: RawFd,
 
         // Memory-mapped UMEM-style buffer
-        umem: *mut u8,
+        umem: SendSyncPtr,
         umem_size: usize,
 
         // Ring buffers (in shared memory)
@@ -580,7 +587,7 @@ pub mod macos {
                 stats: OxideStats::new(),
                 fd: -1,
                 kq: -1,
-                umem: std::ptr::null_mut(),
+                umem: SendSyncPtr(std::ptr::null_mut()),
                 umem_size: 0,
                 rx_ring: Box::new(OxideRing::new(config.ring_size)),
                 tx_ring: Box::new(OxideRing::new(config.ring_size)),
@@ -641,7 +648,7 @@ pub mod macos {
             self.umem_size = self.config.frame_count as usize * self.config.frame_size;
 
             // Use MAP_ANONYMOUS for shared memory
-            self.umem = unsafe {
+            self.umem.0 = unsafe {
                 mmap(
                     std::ptr::null_mut(),
                     self.umem_size,
@@ -652,14 +659,14 @@ pub mod macos {
                 ) as *mut u8
             };
 
-            if self.umem.is_null() || self.umem == libc::MAP_FAILED as *mut u8 {
+            if self.umem.0.is_null() || self.umem.0 == libc::MAP_FAILED as *mut u8 {
                 return Err(anyhow::anyhow!("Failed to allocate UMEM"));
             }
 
             // Pre-fault pages to avoid page faults in hot path
             unsafe {
                 for i in (0..self.umem_size).step_by(4096) {
-                    std::ptr::write_volatile(self.umem.add(i), 0);
+                    std::ptr::write_volatile(self.umem.0.add(i), 0);
                 }
             }
 
@@ -701,44 +708,54 @@ pub mod macos {
         }
 
         fn recv_batch<'a>(&'a mut self, packets: &mut [Option<OxidePacket<'a>>]) -> usize {
-            let mut count = 0;
             let max = packets
                 .len()
                 .min(MAX_BATCH_SIZE)
                 .min(self.packet_buffers.len());
-            let mut bytes = 0u64;
 
-            // Busy-poll read loop
+            // First pass: read packets and record metadata
+            let mut packet_lens: Vec<(usize, usize, u64)> = Vec::with_capacity(max); // (buf_idx, len, timestamp)
+            let fd = self.fd;
+            let timebase_numer = self.timebase_numer;
+            let timebase_denom = self.timebase_denom;
+
             for i in 0..max {
                 let buf = &mut self.packet_buffers[i];
-                let result = unsafe {
-                    libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                };
+                let result =
+                    unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 
                 if result > 0 {
                     let len = result as usize;
-                    let timestamp = self.now_ns();
-
-                    // Store in ring
-                    let idx = self
-                        .rx_ring
-                        .index(self.rx_ring.producer.load(Ordering::Relaxed));
-                    self.rx_descs[idx].len = len as u32;
-                    self.rx_descs[idx].timestamp_ns = timestamp;
-                    self.rx_ring.produce(1);
-
-                    if count < packets.len() {
-                        packets[count] = Some(OxidePacket {
-                            data: &buf[..len],
-                            timestamp_ns: timestamp,
-                            flags: 0,
-                        });
-                    }
-
-                    count += 1;
-                    bytes += len as u64;
+                    let timestamp =
+                        unsafe { mach_absolute_time() } * timebase_numer / timebase_denom;
+                    packet_lens.push((i, len, timestamp));
                 } else {
                     break;
+                }
+            }
+
+            let count = packet_lens.len();
+            let mut bytes = 0u64;
+
+            // Update ring descriptors
+            for (_, len, timestamp) in &packet_lens {
+                let idx = self
+                    .rx_ring
+                    .index(self.rx_ring.producer.load(Ordering::Relaxed));
+                self.rx_descs[idx].len = *len as u32;
+                self.rx_descs[idx].timestamp_ns = *timestamp;
+                self.rx_ring.produce(1);
+                bytes += *len as u64;
+            }
+
+            // Second pass: create packet references
+            for (pkt_idx, (buf_idx, len, timestamp)) in packet_lens.into_iter().enumerate() {
+                if pkt_idx < packets.len() {
+                    packets[pkt_idx] = Some(OxidePacket {
+                        data: &self.packet_buffers[buf_idx][..len],
+                        timestamp_ns: timestamp,
+                        flags: 0,
+                    });
                 }
             }
 
@@ -809,7 +826,7 @@ pub mod macos {
 
         fn is_zero_copy(&self) -> bool {
             // True zero-copy via UMEM
-            !self.umem.is_null()
+            !self.umem.0.is_null()
         }
 
         fn fd(&self) -> Option<i32> {
@@ -823,8 +840,8 @@ pub mod macos {
 
     impl Drop for MacOSRideEngine {
         fn drop(&mut self) {
-            if !self.umem.is_null() {
-                unsafe { munmap(self.umem as *mut libc::c_void, self.umem_size) };
+            if !self.umem.0.is_null() {
+                unsafe { munmap(self.umem.0 as *mut libc::c_void, self.umem_size) };
             }
             if self.kq >= 0 {
                 unsafe { libc::close(self.kq) };
