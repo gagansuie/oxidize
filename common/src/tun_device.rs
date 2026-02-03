@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 use tracing::{info, warn};
 
@@ -176,11 +177,11 @@ impl TunDevice {
 
         let output = Command::new("ifconfig")
             .args([
-                actual_name.as_str(),
-                addr_str.as_str(),
-                addr_str.as_str(),
+                &*actual_name,
+                &*addr_str,
+                &*addr_str,
                 "netmask",
-                netmask_str.as_str(),
+                &*netmask_str,
                 "up",
             ])
             .output()

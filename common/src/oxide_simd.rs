@@ -32,6 +32,7 @@ pub enum SimdCapability {
 
 impl SimdCapability {
     /// Detect the best available SIMD capability
+    #[allow(unreachable_code)]
     pub fn detect() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
@@ -452,11 +453,15 @@ impl SimdChecksum {
     /// Calculate internet checksum for a buffer
     #[inline]
     pub fn checksum(&self, data: &[u8]) -> u16 {
+        #[cfg(target_arch = "x86_64")]
         match self.capability {
-            SimdCapability::Avx512 if data.len() >= 64 => unsafe { self.checksum_avx512(data) },
-            SimdCapability::Avx2 if data.len() >= 32 => unsafe { self.checksum_avx2(data) },
-            _ => self.checksum_scalar(data),
+            SimdCapability::Avx512 if data.len() >= 64 => unsafe {
+                return self.checksum_avx512(data);
+            },
+            SimdCapability::Avx2 if data.len() >= 32 => unsafe { return self.checksum_avx2(data) },
+            _ => {}
         }
+        self.checksum_scalar(data)
     }
 
     #[inline(always)]
