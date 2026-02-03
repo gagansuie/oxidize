@@ -289,8 +289,10 @@ impl CpuPinning {
     #[cfg(target_os = "linux")]
     pub fn set_realtime_priority(&self) -> Result<(), String> {
         unsafe {
+            #[allow(clippy::needless_update)]
             let param = libc::sched_param {
                 sched_priority: 99, // Max priority
+                ..std::mem::zeroed()
             };
 
             let result = libc::sched_setscheduler(0, libc::SCHED_FIFO, &param);
