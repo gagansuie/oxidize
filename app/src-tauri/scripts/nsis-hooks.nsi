@@ -1,35 +1,7 @@
 ; NSIS hooks for Oxidize Windows installer
-; These run during NSIS installation to set up WinDivert and the daemon service
+; These run during NSIS installation to set up the daemon service
 
 !macro customInstall
-  ; Download and install WinDivert
-  DetailPrint "Downloading WinDivert driver..."
-  CreateDirectory "$INSTDIR\WinDivert"
-  
-  ; Download WinDivert zip
-  inetc::get /TIMEOUT=30000 "https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip" "$TEMP\WinDivert.zip" /END
-  Pop $0
-  StrCmp $0 "OK" +3
-    DetailPrint "Failed to download WinDivert: $0"
-    Goto skipWinDivert
-  
-  ; Extract WinDivert
-  DetailPrint "Extracting WinDivert..."
-  nsisunz::UnzipToLog "$TEMP\WinDivert.zip" "$TEMP\WinDivert"
-  
-  ; Copy x64 files
-  CopyFiles /SILENT "$TEMP\WinDivert\WinDivert-2.2.2-A\x64\*.*" "$INSTDIR\WinDivert"
-  
-  ; Cleanup temp files
-  Delete "$TEMP\WinDivert.zip"
-  RMDir /r "$TEMP\WinDivert"
-  
-  ; Add WinDivert to system PATH
-  DetailPrint "Adding WinDivert to PATH..."
-  nsExec::ExecToLog 'setx /M PATH "$INSTDIR\WinDivert;%PATH%"'
-  
-  skipWinDivert:
-  
   ; Install and start the daemon service
   DetailPrint "Installing Oxidize daemon service..."
   
@@ -70,8 +42,5 @@
   ; Remove firewall rule
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Oxidize Daemon"'
   
-  ; Remove WinDivert directory
-  RMDir /r "$INSTDIR\WinDivert"
-  
-  DetailPrint "Oxidize daemon service and WinDivert removed"
+  DetailPrint "Oxidize daemon service removed"
 !macroend

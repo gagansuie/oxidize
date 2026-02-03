@@ -1,6 +1,6 @@
 # Latitude.sh Bare Metal Deployment Guide
 
-Quick-start guide for deploying Oxidize on Latitude.sh bare metal with **AF_XDP kernel bypass** for maximum performance.
+Quick-start guide for deploying Oxidize on Latitude.sh bare metal with **AF_XDP kernel bypass (required)** for maximum performance.
 
 ## Server Specifications
 

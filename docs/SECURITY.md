@@ -2,22 +2,22 @@
 
 Oxidize is designed to be resilient against attacks. This guide covers security features and hardening recommendations.
 
-## Is Oxidize a VPN?
+## What is Oxidize?
 
-**Yes, Oxidize provides full VPN-like protection:**
+**Oxidize is a neural network-powered network accelerator** that optimizes your connection for lower latency and reduced packet loss. Security is a side benefit, not the primary goal.
 
 | Capability | Traditional VPN | Oxidize |
-|------------|-----------------|--------|
+|------------|-----------------|---------|
+| **Primary Goal** | Privacy/anonymity | **Performance/acceleration** |
 | Encrypts traffic | ✅ TLS/IPsec | ✅ ChaCha20-Poly1305 |
-| Hides client IP | ✅ | ✅ (relay IP visible to destinations) |
-| Tunnels traffic | ✅ All system traffic | ✅ All TCP + UDP via NFQUEUE |
-| Kernel integration | ✅ tun/tap device | ✅ NFQUEUE (userspace, no kernel modules) |
-| Protocol | OpenVPN/WireGuard/IPsec | AF_XDP/UDP |
-| DDoS Protection | ✅ | ✅ (attackers see relay IP, not yours) |
+| Reduces latency | ❌ (adds latency) | ✅ ML-optimized routing |
+| Reduces packet loss | ❌ | ✅ Adaptive FEC + prediction |
+| Tunnels traffic | ✅ All traffic | ✅ All TCP + UDP + ICMP |
+| Protocol | OpenVPN/WireGuard | OxTunnel + FLASH (AF_XDP) |
 
-**How it works:** The daemon uses NFQUEUE to intercept **all TCP and UDP traffic** at the kernel level, then tunnels it through an encrypted AF_XDP/UDP connection to the relay server. Destinations see the relay server's IP, not yours.
+**How it works:** The daemon captures traffic via TUN device, routes it through ML-optimized paths with adaptive FEC and congestion control. Traffic is encrypted for integrity, not primarily for privacy.
 
-> **Note:** The daemon is required for connection. Without it, no traffic is tunneled and your IP is not protected.
+> **Note:** Oxidize is designed for gamers, streamers, and anyone with suboptimal ISP routing—not for anonymity or bypassing geo-restrictions.
 
 ---
 
@@ -406,7 +406,7 @@ cat blocked_ips.txt | \
 
 | Feature | Oxidize | WireGuard | OpenVPN |
 |---------|---------|-----------|---------|
-| Protocol | QUIC + OxTunnel | Custom UDP | TLS/UDP |
+| Protocol | OxTunnel v3 (UDP → QUIC → TCP) | Custom UDP | TLS/UDP |
 | DDoS resistance | High | Medium | Low |
 | Speed | Very Fast | Very Fast | Slow |
 | Encryption | TLS 1.3 / ChaCha20 (optional) | ChaCha20 (always) | Various |
@@ -422,8 +422,8 @@ Oxidize uses **OxTunnel**, a unified cross-platform protocol that replaces WireG
 
 | Aspect | WireGuard | OxTunnel | Advantage |
 |--------|-----------|----------|-----------|
-| Header overhead | 32+ bytes | 9 bytes | **72% smaller** |
-| Transport | UDP only | **QUIC + UDP fallback** | **Encrypted, multiplexed** |
+| Header overhead | 32+ bytes | 12 bytes (v3 metadata) | **~62% smaller** |
+| Transport | UDP only | **UDP → QUIC → TCP** | **Works through restrictive networks** |
 | Encryption | Mandatory | Optional (QUIC encrypts) | **No double-encryption** |
 | Handshake | Multi-round Noise | Single round-trip | **Faster reconnects** |
 | Buffer allocation | Per-packet malloc | Zero-copy pool | **Lower CPU/memory** |
@@ -431,8 +431,8 @@ Oxidize uses **OxTunnel**, a unified cross-platform protocol that replaces WireG
 | Cross-platform | Separate implementations | **Unified protocol** | **Same code everywhere** |
 
 **Unified Architecture Benefits:**
-1. **Same protocol** on desktop (NFQUEUE), Android (VpnService), iOS (NEPacketTunnel)
-2. **QUIC primary** - All platforms use encrypted QUIC datagrams
-3. **UDP fallback** - Automatic fallback when QUIC is blocked
-4. **Single server** - Handles all client types with unified OxTunnel decoding
-5. **No double-encryption** - QUIC provides encryption, OxTunnel encryption optional
+1. **Same protocol** on desktop (TUN), Android (VpnService), iOS (NEPacketTunnel)
+2. **UDP primary** with QUIC/TCP fallback for restrictive networks
+3. **Server-side AF_XDP/FLASH** for maximum throughput
+4. **Single server** handles all client types with unified OxTunnel decoding
+5. **No double-encryption** - OxTunnel encryption optional when inner TLS exists

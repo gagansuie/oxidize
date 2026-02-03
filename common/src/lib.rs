@@ -19,7 +19,9 @@ pub mod udp_batch;
 pub mod zero_copy;
 
 // ML Engine (INT8 quantized for inline processing)
+pub mod advanced_ml;
 pub mod ai_engine;
+pub mod ml_data_quality;
 pub mod ml_optimized;
 pub mod ml_training;
 pub mod model_hub;
@@ -30,15 +32,27 @@ pub mod prefetch;
 pub mod priority_scheduler;
 pub mod traffic_classifier;
 
-// OxTunnel protocol (runs over AF_XDP/UDP)
+// OxTunnel protocol (runs over UDP; AF_XDP/FLASH on Linux servers)
 pub mod oxtunnel_client;
 pub mod oxtunnel_protocol;
 pub mod rohc;
-pub mod ultra_transport;
 pub mod varint_header;
 
-// Platform-specific optimized transport
-pub mod platform_transport;
+// TUN/VPN device management (cross-platform)
+pub mod tun_device;
+
+// QUIC/MASQUE transport (fallback for restrictive networks)
+pub mod quic_transport;
+
+// OXIDE Engine - server-side AF_XDP/FLASH (client path is TUN-only)
+// Non-Linux backends are legacy prototypes
+pub mod oxide_engine;
+
+// OXIDE SIMD - AVX-512/NEON parallel packet processing
+pub mod oxide_simd;
+
+// OXIDE Memory - Huge Pages, CPU Pinning, NUMA-aware allocation
+pub mod oxide_memory;
 
 // Mesh and caching
 pub mod edge_cache;
@@ -47,11 +61,8 @@ pub mod relay_mesh;
 // Benchmark utilities
 pub mod benchmark;
 
-// Kernel Bypass - AF_XDP for maximum throughput (Linux only)
-#[cfg(target_os = "linux")]
-pub mod kernel_bypass;
-
 // AF_XDP - High-performance zero-copy networking (Linux only)
+// Includes kernel bypass utilities (SpscRing, PacketBuffer, etc.)
 // Uses XDP (eXpress Data Path) for kernel-integrated acceleration
 // Benefits:
 // - Event-driven (no dedicated CPU cores)

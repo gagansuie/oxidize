@@ -10,10 +10,16 @@ use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use oxidize_common::af_xdp::{FlashSocket, XdpConfig};
 use oxidize_common::auth::ServerAuthConfig;
+use oxidize_common::compression::decompress_data;
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
     CryptoEngine, HandshakeInit, HandshakeResponse, IpPool, PacketBatch, PacketHeader,
     TunnelBufferPool, TunnelSession, TunnelStats, HEADER_SIZE, MAX_PACKET_SIZE, PROTOCOL_MAGIC,
+};
+use oxidize_common::packet::PacketInfo;
+use oxidize_common::packet_processor::{
+    decode_compressed_payload, encode_compressed_payload, CompressionMethod, PacketProcessor,
+    PacketProcessorConfig,
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -21,7 +27,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::forwarder::SharedForwarder;
@@ -518,7 +524,19 @@ pub struct OxTunnelServerConfig {
     pub listen_addr: SocketAddr,
     /// TCP fallback listen address for restrictive networks (port 51821)
     pub tcp_fallback_addr: Option<SocketAddr>,
+    /// QUIC fallback listen address for restrictive networks (port 51822)
+    pub quic_fallback_addr: Option<SocketAddr>,
     pub enable_encryption: bool,
+    /// Enable compression for tunnel payloads
+    pub enable_compression: bool,
+    /// Minimum payload size before compression is attempted
+    pub compression_threshold: usize,
+    /// Enable ROHC header compression
+    pub enable_rohc: bool,
+    /// Maximum packet size for ROHC compression
+    pub rohc_max_size: usize,
+    /// Enable AI heuristics for smart compression decisions
+    pub enable_ai_engine: bool,
     pub session_timeout: Duration,
     pub keepalive_interval: Duration,
     pub ip_pool_base: Ipv4Addr,
@@ -535,7 +553,14 @@ impl Default for OxTunnelServerConfig {
             listen_addr: "[::]:51820".parse().unwrap(),
             // TCP fallback for restrictive networks (firewalls blocking UDP)
             tcp_fallback_addr: Some("[::]:51821".parse().unwrap()),
+            // QUIC fallback for restrictive networks (looks like HTTPS)
+            quic_fallback_addr: Some("[::]:51822".parse().unwrap()),
             enable_encryption: true,
+            enable_compression: true,
+            compression_threshold: 512,
+            enable_rohc: true,
+            rohc_max_size: 1500,
+            enable_ai_engine: true,
             session_timeout: Duration::from_secs(300),
             keepalive_interval: Duration::from_secs(25),
             ip_pool_base: Ipv4Addr::new(10, 0, 0, 0),
@@ -559,6 +584,7 @@ pub struct OxTunnelServer {
     buffer_pool: Arc<TunnelBufferPool>,
     stats: Arc<TunnelStats>,
     rate_limiter: Arc<RateLimiter>,
+    packet_processor: Option<Arc<Mutex<PacketProcessor>>>,
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
     #[allow(clippy::type_complexity)]
     response_rx: Arc<RwLock<mpsc::Receiver<(Vec<u8>, SocketAddr)>>>,
@@ -607,6 +633,20 @@ impl OxTunnelServer {
             .await
             .context("Failed to create shared forwarder")?;
 
+        let packet_processor = if config.enable_compression {
+            let mut processor = PacketProcessor::with_config(PacketProcessorConfig {
+                enable_lz4: config.enable_compression,
+                enable_rohc: config.enable_rohc,
+                lz4_min_size: config.compression_threshold.max(64),
+                rohc_max_size: config.rohc_max_size,
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to init packet processor: {}", e))?;
+            processor.set_ai_enabled(config.enable_ai_engine);
+            Some(Arc::new(Mutex::new(processor)))
+        } else {
+            None
+        };
+
         Ok(Self {
             server_id: generate_id(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -616,6 +656,7 @@ impl OxTunnelServer {
             buffer_pool: Arc::new(TunnelBufferPool::new()),
             stats: Arc::new(TunnelStats::new()),
             rate_limiter: Arc::new(RateLimiter::new(RateLimitConfig::default())),
+            packet_processor,
             socket: Arc::new(socket),
             response_tx,
             response_rx: Arc::new(RwLock::new(response_rx)),
@@ -657,6 +698,55 @@ impl OxTunnelServer {
         UdpSocket::from_std(std_socket).context("Failed to convert to tokio UdpSocket")
     }
 
+    /// Validate FLASH prerequisites and surface actionable errors before startup
+    fn preflight_flash(&self, interface: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use oxidize_common::af_xdp::XdpProgram;
+            use std::path::Path;
+
+            info!("🔍 FLASH preflight checks on {}", interface);
+
+            let euid = unsafe { libc::geteuid() };
+            if euid != 0 {
+                anyhow::bail!("FLASH requires root/CAP_NET_ADMIN (euid={})", euid);
+            }
+
+            if !FlashSocket::is_supported() {
+                anyhow::bail!("AF_XDP not supported (requires Linux kernel 5.4+)");
+            }
+
+            let iface_path = format!("/sys/class/net/{}", interface);
+            if !Path::new(&iface_path).exists() {
+                anyhow::bail!("Network interface '{}' not found", interface);
+            }
+
+            let port = self.config.listen_addr.port();
+            let mut xdp_prog = XdpProgram::new(interface, port, 64).with_context(|| {
+                format!(
+                    "FLASH preflight failed to load XDP program on {}",
+                    interface
+                )
+            })?;
+            xdp_prog.attach_no_fallback(false).with_context(|| {
+                format!(
+                    "FLASH preflight failed to attach XDP program in native mode on {}",
+                    interface
+                )
+            })?;
+            drop(xdp_prog);
+
+            info!("✅ FLASH preflight passed");
+            Ok(())
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = interface;
+            Ok(())
+        }
+    }
+
     /// Run the OxTunnel server
     pub async fn run(self) -> Result<()> {
         // Spawn TCP fallback listener if enabled
@@ -670,6 +760,17 @@ impl OxTunnelServer {
             });
         }
 
+        // Spawn QUIC fallback listener if enabled
+        if let Some(quic_addr) = self.config.quic_fallback_addr {
+            let handler = self.clone_handler();
+            let rate_limiter = Arc::clone(&self.rate_limiter);
+            tokio::spawn(async move {
+                if let Err(e) = Self::run_quic_fallback(quic_addr, handler, rate_limiter).await {
+                    error!("QUIC fallback listener error: {}", e);
+                }
+            });
+        }
+
         #[cfg(target_os = "linux")]
         {
             let interface = self
@@ -677,6 +778,10 @@ impl OxTunnelServer {
                 .xdp_interface
                 .clone()
                 .unwrap_or_else(Self::detect_default_interface);
+            if let Err(e) = self.preflight_flash(&interface) {
+                error!("❌ FLASH preflight failed: {:#}", e);
+                return Err(e);
+            }
             self.run_with_xdp(interface).await
         }
 
@@ -764,6 +869,73 @@ impl OxTunnelServer {
         }
     }
 
+    /// Run QUIC fallback listener for restrictive networks where UDP is blocked
+    async fn run_quic_fallback(
+        addr: SocketAddr,
+        handler: MobileServerHandler,
+        rate_limiter: Arc<RateLimiter>,
+    ) -> Result<()> {
+        use oxidize_common::quic_transport::{
+            generate_self_signed_cert, QuicServer, QuicServerConfig,
+        };
+
+        // Generate self-signed cert for QUIC (in production, use real certs)
+        let (cert_chain, private_key) =
+            generate_self_signed_cert(vec!["localhost".to_string(), "oxidize".to_string()])?;
+
+        let quic_config = QuicServerConfig {
+            listen_addr: addr,
+            cert_chain,
+            private_key,
+            enable_0rtt: true,
+        };
+
+        let quic_server = QuicServer::new(quic_config).await?;
+        info!("🔄 QUIC fallback listener started on {}", addr);
+
+        loop {
+            if let Some(connection) = quic_server.accept().await {
+                let peer_addr = connection.remote_address();
+
+                // Rate limit check
+                if !rate_limiter.check_connection(peer_addr.ip()).await {
+                    debug!("Rate limited QUIC connection from {}", peer_addr);
+                    continue;
+                }
+
+                let handler = handler.clone();
+                let rate_limiter = Arc::clone(&rate_limiter);
+
+                tokio::spawn(async move {
+                    debug!("QUIC fallback connection from {}", peer_addr);
+
+                    loop {
+                        match connection.recv_datagram().await {
+                            Ok(data) => {
+                                // Rate limit packet
+                                if !rate_limiter.check_packet(peer_addr.ip()).await {
+                                    continue;
+                                }
+
+                                // Handle packet using same handler as UDP
+                                if let Err(e) = handler.handle_packet(&data, peer_addr).await {
+                                    debug!("QUIC packet handling error: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("QUIC receive error from {}: {}", peer_addr, e);
+                                break;
+                            }
+                        }
+                    }
+
+                    rate_limiter.remove_session(peer_addr.ip()).await;
+                    debug!("QUIC fallback connection closed: {}", peer_addr);
+                });
+            }
+        }
+    }
+
     /// Create a dual-stack TCP listener
     async fn create_dual_stack_tcp_listener(addr: SocketAddr) -> Result<tokio::net::TcpListener> {
         use socket2::{Domain, Socket, Type};
@@ -824,16 +996,8 @@ impl OxTunnelServer {
         };
 
         // Create FLASH AF_XDP sockets
-        let mut flash_socket = match FlashSocket::new(xdp_config) {
-            Ok(socket) => socket,
-            Err(e) => {
-                warn!(
-                    "Failed to create AF_XDP socket: {} - falling back to standard UDP",
-                    e
-                );
-                return self.run_standard().await;
-            }
-        };
+        let mut flash_socket = FlashSocket::new(xdp_config)
+            .context("Failed to create AF_XDP socket (FLASH is required)")?;
 
         let num_queues = flash_socket.num_queues();
         info!(
@@ -842,28 +1006,21 @@ impl OxTunnelServer {
         );
 
         // Load XDP BPF program to redirect packets to AF_XDP sockets
-        let mut xdp_prog = match XdpProgram::new(&interface, port, num_queues.max(64)) {
-            Ok(prog) => prog,
-            Err(e) => {
-                warn!(
-                    "Failed to load XDP program: {} - falling back to standard UDP",
-                    e
-                );
-                return self.run_standard().await;
-            }
-        };
+        let mut xdp_prog =
+            XdpProgram::new(&interface, port, num_queues.max(64)).with_context(|| {
+                format!(
+                    "Failed to load XDP program on {} (FLASH is required)",
+                    interface
+                )
+            })?;
 
-        // Attach XDP program to interface
-        if let Err(e) = xdp_prog.attach(false) {
-            warn!("Failed to attach XDP program: {} - trying SKB mode", e);
-            if let Err(e2) = xdp_prog.attach(true) {
-                warn!(
-                    "SKB mode also failed: {} - falling back to standard UDP",
-                    e2
-                );
-                return self.run_standard().await;
-            }
-        }
+        // Attach XDP program to interface (no fallback)
+        xdp_prog.attach_no_fallback(false).with_context(|| {
+            format!(
+                "Failed to attach XDP program in native mode on {} (FLASH is required)",
+                interface
+            )
+        })?;
 
         // Register AF_XDP sockets in XSKMAP for each queue
         let socket_fds = flash_socket.socket_fds();
@@ -872,10 +1029,15 @@ impl OxTunnelServer {
             socket_fds.len()
         );
         for (queue_id, socket_fd) in &socket_fds {
-            match xdp_prog.register_socket(*queue_id, *socket_fd) {
-                Ok(_) => info!("  ✅ Queue {} -> fd {}", queue_id, socket_fd),
-                Err(e) => warn!("  ❌ Queue {} failed: {}", queue_id, e),
-            }
+            xdp_prog
+                .register_socket(*queue_id, *socket_fd)
+                .with_context(|| {
+                    format!(
+                        "Failed to register AF_XDP socket for queue {} (FLASH is required)",
+                        queue_id
+                    )
+                })?;
+            info!("  ✅ Queue {} -> fd {}", queue_id, socket_fd);
         }
 
         info!("✅ XDP program loaded and attached to {}", interface);
@@ -899,7 +1061,7 @@ impl OxTunnelServer {
         let mut last_health_check = Instant::now();
         const MAINTAIN_INTERVAL: Duration = Duration::from_millis(100);
         const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-        const STALL_THRESHOLD_SECS: u64 = 60; // Fall back after 60s of no packets
+        const STALL_THRESHOLD_SECS: u64 = 60; // Fail after 60s of no packets
 
         loop {
             // Periodic maintenance: replenish fill rings even when idle
@@ -919,17 +1081,18 @@ impl OxTunnelServer {
                     flash_socket.populate_fill_rings();
                 }
 
-                // Check for stall and fall back to standard UDP
+                // Check for stall and fail fast (no fallback)
                 if flash_socket.is_stalled(STALL_THRESHOLD_SECS) {
                     error!(
-                        "🚨 AF_XDP stalled! No packets for {}s. Falling back to standard UDP...",
-                        health.idle_secs
+                        "🚨 AF_XDP stalled! No packets for {}s (free frames: {}).",
+                        health.idle_secs, health.free_frames
                     );
-                    // Drop XDP resources and switch to standard UDP
                     drop(flash_socket);
                     drop(xdp_prog);
-                    info!("🔄 Switched to standard UDP mode");
-                    return self.run_standard().await;
+                    return Err(anyhow::anyhow!(
+                        "AF_XDP stalled for {}s (FLASH required)",
+                        health.idle_secs
+                    ));
                 }
 
                 last_health_check = Instant::now();
@@ -1252,6 +1415,8 @@ impl OxTunnelServer {
             response_tx: self.response_tx.clone(),
             enable_encryption: self.config.enable_encryption,
             auth_config: self.auth_config.clone(),
+            packet_processor: self.packet_processor.clone(),
+            compression_threshold: self.config.compression_threshold,
         }
     }
 
@@ -1350,6 +1515,8 @@ struct MobileServerHandler {
     response_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
     enable_encryption: bool,
     auth_config: Option<Arc<ServerAuthConfig>>,
+    packet_processor: Option<Arc<Mutex<PacketProcessor>>>,
+    compression_threshold: usize,
 }
 
 impl MobileServerHandler {
@@ -1670,9 +1837,15 @@ impl MobileServerHandler {
         // Generate conn_id from peer address for response routing
         let conn_id = Self::peer_addr_to_conn_id(peer_addr);
 
+        let payload = if header.flags & flags::COMPRESSED != 0 {
+            self.decompress_payload(payload).await?
+        } else {
+            payload.to_vec()
+        };
+
         // Handle batch packets
         if header.flags & flags::BATCH != 0 {
-            let packets = PacketBatch::decode(payload)
+            let packets = PacketBatch::decode(&payload)
                 .map_err(|e| anyhow::anyhow!("Batch decode error: {}", e))?;
 
             for packet_data in packets {
@@ -1683,7 +1856,29 @@ impl MobileServerHandler {
         }
 
         // Single packet
-        self.forward_ip_packet(payload, conn_id, peer_addr).await
+        self.forward_ip_packet(&payload, conn_id, peer_addr).await
+    }
+
+    async fn decompress_payload(&self, payload: &[u8]) -> Result<Vec<u8>> {
+        if let Some((method, compressed)) = decode_compressed_payload(payload) {
+            if let Some(processor) = &self.packet_processor {
+                let mut guard = processor.lock().await;
+                return guard
+                    .decompress(compressed, method)
+                    .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e));
+            }
+
+            return match method {
+                CompressionMethod::Lz4 => decompress_data(compressed)
+                    .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e)),
+                _ => Err(anyhow::anyhow!(
+                    "Compressed payload requires PacketProcessor"
+                )),
+            };
+        }
+
+        // Legacy LZ4 payload without method header
+        decompress_data(payload).map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))
     }
 
     /// Convert peer address to a unique connection ID for response routing
@@ -1759,6 +1954,8 @@ impl MobileServerHandler {
 
         let response_tx = self.response_tx.clone();
         let stats = Arc::clone(&self.stats);
+        let packet_processor = self.packet_processor.clone();
+        let compression_threshold = self.compression_threshold.max(64);
 
         // Create crypto engine for this connection's responses
         let crypto = encryption_key.as_ref().map(|k| CryptoEngine::new(Some(k)));
@@ -1767,14 +1964,55 @@ impl MobileServerHandler {
             let mut seq: u32 = 0;
             while let Some(response_packet) = response_rx.recv().await {
                 // Encode response in OxTunnel format with encryption if key was provided
-                let mut buf = vec![0u8; response_packet.len() + HEADER_SIZE + 32]; // Extra space for auth tag
-                if let Ok(len) = encode_packet(
-                    &mut buf,
-                    &response_packet,
-                    seq,
-                    0, // Data packet
-                    crypto.as_ref(),
-                ) {
+                let mut packet_flags = 0u8;
+                let payload = if let Some(processor) = &packet_processor {
+                    if response_packet.len() < compression_threshold {
+                        response_packet.clone()
+                    } else {
+                        let info = PacketInfo::analyze(&response_packet).ok();
+                        let (src_port, dst_port, protocol) = info
+                            .as_ref()
+                            .map(|i| (i.src_port.unwrap_or(0), i.dst_port.unwrap_or(0), i.protocol))
+                            .unwrap_or((0, 0, 0));
+
+                        let mut guard = processor.lock().await;
+                        let compressed_packet = match guard.compress_smart(
+                            &response_packet,
+                            src_port,
+                            dst_port,
+                            protocol,
+                        ) {
+                            Ok(pkt) => Some(pkt),
+                            Err(e) => {
+                                debug!("Compression failed: {}", e);
+                                None
+                            }
+                        };
+
+                        if let Some(compressed_packet) = compressed_packet {
+                            if compressed_packet.method != CompressionMethod::None
+                                && compressed_packet.data.len() < response_packet.len()
+                            {
+                                packet_flags |= flags::COMPRESSED;
+                                encode_compressed_payload(
+                                    compressed_packet.method,
+                                    &compressed_packet.data,
+                                )
+                            } else {
+                                response_packet.clone()
+                            }
+                        } else {
+                            response_packet.clone()
+                        }
+                    }
+                } else {
+                    response_packet.clone()
+                };
+
+                let mut buf = vec![0u8; payload.len() + HEADER_SIZE + 32]; // Extra space for auth tag
+                if let Ok(len) =
+                    encode_packet(&mut buf, &payload, seq, packet_flags, crypto.as_ref())
+                {
                     seq = seq.wrapping_add(1);
                     if response_tx
                         .send((buf[..len].to_vec(), peer_addr))

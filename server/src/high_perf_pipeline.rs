@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
-// Kernel bypass is available on Linux
+// Kernel bypass utilities (consolidated into af_xdp)
 #[cfg(target_os = "linux")]
-use oxidize_common::kernel_bypass::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
+use oxidize_common::af_xdp::{BypassConfig, BypassPacket, BypassProcessor, UnifiedBypass};
 
 // 10x Optimized ML Engine (INT8 quantized, Transformer, PPO)
 use oxidize_common::ml_optimized::OptimizedMlEngine;

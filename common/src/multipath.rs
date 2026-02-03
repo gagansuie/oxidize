@@ -6,7 +6,11 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::ml_optimized::{
+    OptimizedMlEngine, PathId as MlPathId, PathMetrics as MlPathMetrics, TrafficContext, MAX_PATHS,
+};
 
 /// EMA (Exponential Moving Average) estimator for path metrics
 /// Provides faster response to network changes than rolling window
@@ -390,6 +394,93 @@ impl MultipathScheduler {
         path
     }
 
+    /// Record a path selection performed by an external selector (e.g., ML)
+    pub fn record_selection(&mut self, path_id: PathId) {
+        if let Some(metrics) = self.paths.get(&path_id) {
+            if metrics.is_healthy() {
+                self.stats.total_packets += 1;
+                *self.stats.packets_per_path.entry(path_id).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Check whether a specific path is healthy
+    pub fn is_path_healthy(&self, path_id: &PathId) -> bool {
+        self.paths
+            .get(path_id)
+            .map(|metrics| metrics.is_healthy())
+            .unwrap_or(false)
+    }
+
+    /// Select a path using the ML engine (UCB1 contextual bandit)
+    pub fn select_path_ml(
+        &mut self,
+        ml_engine: &mut OptimizedMlEngine,
+        traffic: TrafficContext,
+    ) -> Option<PathId> {
+        self.cleanup_stale_paths();
+
+        if self.paths.is_empty() {
+            return None;
+        }
+
+        let mut entries: Vec<(PathId, PathMetrics)> = self
+            .paths
+            .iter()
+            .map(|(id, metrics)| (*id, metrics.clone()))
+            .collect();
+        entries.sort_by_key(|(id, _)| Self::path_sort_key(id));
+        entries.truncate(MAX_PATHS);
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        for (idx, (_, metrics)) in entries.iter().enumerate() {
+            let rtt_us = (metrics.rtt_ms.max(0.0) * 1000.0) as u64;
+            let rtt_var_us = (metrics.jitter_ms.max(0.0) * 1000.0) as u64;
+            let bandwidth_bps = metrics.bandwidth.saturating_mul(8);
+            let loss_rate = metrics.loss_rate.clamp(0.0, 1.0) as f32;
+            let availability = if metrics.is_healthy() { 1.0 } else { 0.0 };
+            let last_update_ms =
+                now_ms.saturating_sub(metrics.last_updated.elapsed().as_millis() as u64);
+
+            let ml_metrics = MlPathMetrics {
+                path_id: MlPathId::from_index(idx),
+                rtt_us,
+                rtt_var_us,
+                bandwidth_bps,
+                loss_rate,
+                availability,
+                cost_factor: 1.0,
+                last_update_ms,
+            };
+
+            ml_engine.update_path_metrics(ml_metrics);
+        }
+
+        let selected = ml_engine.select_path(traffic);
+        let selected_idx = selected.to_index();
+        if let Some((path_id, metrics)) = entries.get(selected_idx) {
+            if metrics.is_healthy() {
+                self.record_selection(*path_id);
+                return Some(*path_id);
+            }
+        }
+
+        if let Some((path_id, _)) = entries.iter().find(|(_, metrics)| metrics.is_healthy()) {
+            self.record_selection(*path_id);
+            return Some(*path_id);
+        }
+
+        None
+    }
+
     /// Get all paths for redundant sending
     pub fn all_paths(&self) -> Vec<PathId> {
         self.paths
@@ -413,6 +504,25 @@ impl MultipathScheduler {
 
         self.rr_index = (self.rr_index + 1) % healthy.len();
         Some(healthy[self.rr_index])
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn path_sort_key(path_id: &PathId) -> ((u8, [u8; 16], u16), (u8, [u8; 16], u16)) {
+        (
+            Self::addr_sort_key(path_id.local),
+            Self::addr_sort_key(path_id.remote),
+        )
+    }
+
+    fn addr_sort_key(addr: SocketAddr) -> (u8, [u8; 16], u16) {
+        match addr {
+            SocketAddr::V4(v4) => {
+                let mut bytes = [0u8; 16];
+                bytes[..4].copy_from_slice(&v4.ip().octets());
+                (4, bytes, v4.port())
+            }
+            SocketAddr::V6(v6) => (6, v6.ip().octets(), v6.port()),
+        }
     }
 
     fn weighted_selection(&self) -> Option<PathId> {

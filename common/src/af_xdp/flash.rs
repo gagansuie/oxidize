@@ -298,7 +298,7 @@ impl FlashSocket {
     }
 
     /// Check if AF_XDP appears to be stalled (no packets for extended period)
-    /// Returns true if stalled and should fall back to standard UDP
+    /// Returns true if stalled and should trigger fail-fast handling
     pub fn is_stalled(&self, stall_threshold_secs: u64) -> bool {
         let idle_polls = self.idle_polls.load(Ordering::Relaxed);
         let total_rx = self.last_rx_count.load(Ordering::Relaxed);

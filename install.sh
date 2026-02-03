@@ -174,7 +174,7 @@ compression_threshold = 512
 buffer_size = 65536
 max_packet_queue = 10000
 
-# Packet settings (NFQUEUE)
+# Packet settings (TUN)
 packet_mtu = 1400
 
 # Connection settings
@@ -224,8 +224,8 @@ ProtectHome=read-only
 ReadWritePaths=/etc/resolv.conf /run
 
 # Required for TUN
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
@@ -291,12 +291,7 @@ setup_firewall() {
     
     case $OS in
         ubuntu|debian|fedora|centos|rhel|arch)
-            # NFQUEUE uses iptables rules (configured by daemon)
-            # No additional firewall rules needed for NFQUEUE
-            echo "NFQUEUE firewall rules managed by daemon"
-            
-            # iptables rules for NAT (if server mode)
-            # iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+            echo "No firewall rules needed for TUN capture"
             ;;
         macos)
             # macOS PF rules would go here
@@ -314,7 +309,7 @@ print_success() {
     echo -e "${BLUE}Status:${NC}"
     echo "  • Server: $SERVER_ADDR"
     echo "  • Service: Running and enabled on boot"
-    echo "  • NFQUEUE: Active (packet interception enabled)"
+    echo "  • TUN: Active (full capture enabled)"
     echo ""
     echo -e "${BLUE}Commands:${NC}"
     echo "  sudo systemctl status oxidize   # Check status"

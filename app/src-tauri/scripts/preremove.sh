@@ -21,9 +21,6 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
 fi
 
-# Remove iptables rules
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
-
 # Remove files
 rm -f "/etc/systemd/system/$SERVICE_NAME.service" 2>/dev/null || true
 rm -f "/usr/bin/oxidize-daemon" 2>/dev/null || true

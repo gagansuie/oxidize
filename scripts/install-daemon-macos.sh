@@ -3,12 +3,11 @@ set -e
 
 # Oxidize Daemon Installer for macOS
 # This script installs the oxidize-daemon as a privileged helper
-# with launchd, and configures PF rules for packet capture
+# with launchd (TUN-only capture/injection path)
 # Run with sudo
 
 DAEMON_BIN="/usr/local/bin/oxidize-daemon"
 LAUNCHD_PLIST="/Library/LaunchDaemons/sh.oxd.oxidize-daemon.plist"
-PF_ANCHOR="/etc/pf.anchors/sh.oxd.oxidize"
 RUN_DIR="/var/run/oxidize"
 CONFIG_DIR="/etc/oxidize"
 
@@ -67,38 +66,6 @@ mkdir -p "$CONFIG_DIR"
 chmod 755 "$RUN_DIR"
 chmod 755 "$CONFIG_DIR"
 
-# Create PF anchor for divert rules
-echo "→ Setting up PF (Packet Filter) rules..."
-cat > "$PF_ANCHOR" << 'EOF'
-# Oxidize PF anchor - divert UDP traffic for relay
-# Port 8668 is the default divert port
-
-# Divert outbound UDP to oxidize daemon
-pass out proto udp from any to any divert-to 127.0.0.1 port 8668
-EOF
-
-chmod 644 "$PF_ANCHOR"
-chown root:wheel "$PF_ANCHOR"
-
-# Add anchor to main PF config if not present
-PF_CONF="/etc/pf.conf"
-if ! grep -q "sh.oxd.oxidize" "$PF_CONF" 2>/dev/null; then
-    echo "  Adding anchor to pf.conf..."
-    # Backup original
-    cp "$PF_CONF" "$PF_CONF.oxidize-backup" 2>/dev/null || true
-    
-    # Add our anchor (after any existing anchors, before final rules)
-    cat >> "$PF_CONF" << 'EOF'
-
-# Oxidize network relay anchor
-anchor "sh.oxd.oxidize"
-load anchor "sh.oxd.oxidize" from "/etc/pf.anchors/sh.oxd.oxidize"
-EOF
-    echo "  ✓ PF anchor added"
-else
-    echo "  ✓ PF anchor already configured"
-fi
-
 # Create launchd plist for the daemon
 echo "→ Installing launchd service..."
 cat > "$LAUNCHD_PLIST" << EOF
@@ -142,24 +109,12 @@ cat > "$LAUNCHD_PLIST" << EOF
     <key>GroupName</key>
     <string>wheel</string>
     
-    <!-- Enable PF before starting -->
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>pfctl -e 2>/dev/null; pfctl -f /etc/pf.conf 2>/dev/null; exec /usr/local/bin/oxidize-daemon</string>
-    </array>
 </dict>
 </plist>
 EOF
 
 chmod 644 "$LAUNCHD_PLIST"
 chown root:wheel "$LAUNCHD_PLIST"
-
-# Enable PF if not already enabled
-echo "→ Enabling Packet Filter..."
-pfctl -e 2>/dev/null || true
-pfctl -f /etc/pf.conf 2>/dev/null || true
 
 # Load the launchd service
 echo "→ Loading launchd service..."
@@ -177,7 +132,6 @@ fi
 
 echo ""
 echo "Privileges configured at install-time:"
-echo "  • PF (Packet Filter) rules installed for divert sockets"
 echo "  • launchd service runs with root privileges"
 echo "  • Automatic startup on boot"
 echo ""
@@ -186,5 +140,3 @@ echo "  sudo launchctl list | grep oxidize     - Check status"
 echo "  sudo launchctl unload $LAUNCHD_PLIST   - Stop daemon"
 echo "  tail -f /var/log/oxidize-daemon.log   - View logs"
 echo ""
-echo "PF status:"
-pfctl -s info 2>/dev/null | head -5 || echo "  (run 'sudo pfctl -s info' to check)"

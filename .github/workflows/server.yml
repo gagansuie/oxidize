@@ -39,6 +39,7 @@ env:
   # Authentication secrets for relay servers
   OXIDIZE_APP_PUBLIC_KEY: ${{ secrets.OXIDIZE_APP_PUBLIC_KEY }}
   OXIDIZE_API_SECRET: ${{ secrets.OXIDIZE_API_SECRET }}
+  STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
 
 jobs:
   # ============================================
@@ -229,7 +230,8 @@ jobs:
         run: |
           ansible-playbook playbooks/setup.yml -v \
             -e "oxidize_app_public_key=${{ secrets.OXIDIZE_APP_PUBLIC_KEY }}" \
-            -e "oxidize_api_secret=${{ secrets.OXIDIZE_API_SECRET }}"
+            -e "oxidize_api_secret=${{ secrets.OXIDIZE_API_SECRET }}" \
+            -e "stats_token=${{ secrets.STATS_TOKEN }}"
 
       - name: Run Deploy Playbook
         working-directory: infrastructure/ansible
@@ -240,7 +242,8 @@ jobs:
           ansible-playbook playbooks/deploy.yml -v \
             -e "oxidize_binary_path=$OXIDIZE_BINARY" \
             -e "oxidize_app_public_key=${{ secrets.OXIDIZE_APP_PUBLIC_KEY }}" \
-            -e "oxidize_api_secret=${{ secrets.OXIDIZE_API_SECRET }}"
+            -e "oxidize_api_secret=${{ secrets.OXIDIZE_API_SECRET }}" \
+            -e "stats_token=${{ secrets.STATS_TOKEN }}"
 
       - name: Verify Deployment
         run: |

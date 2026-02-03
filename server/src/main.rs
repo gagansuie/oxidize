@@ -121,6 +121,13 @@ async fn main() -> Result<()> {
     let server_config = OxTunnelServerConfig {
         listen_addr: args.listen,
         enable_encryption: true,
+        enable_compression: config.enable_compression,
+        compression_threshold: config.compression_threshold,
+        enable_rohc: config.enable_rohc,
+        rohc_max_size: config.rohc_max_size,
+        enable_ai_engine: config.enable_ai_engine,
+        keepalive_interval: Duration::from_secs(config.keepalive_interval),
+        session_timeout: Duration::from_secs(config.connection_timeout),
         ..Default::default()
     };
 
@@ -228,6 +235,71 @@ async fn main() -> Result<()> {
             }
         });
         info!("🌐 HTTP server on http://{}", args.http_addr);
+    }
+
+    // Start stats push task if configured
+    if let Some(stats_url) = config.stats_push_url.clone() {
+        let push_stats = server.stats();
+        let push_interval = Duration::from_secs(config.stats_push_interval_secs);
+        let push_max_connections = args.max_connections;
+        let stats_token = std::env::var("STATS_TOKEN").ok();
+
+        if stats_token.is_none() {
+            warn!("⚠️  STATS_TOKEN not set - stats push will fail authentication");
+        }
+
+        info!(
+            "📤 Stats push to {} every {}s",
+            stats_url, config.stats_push_interval_secs
+        );
+
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            let client = reqwest::Client::new();
+
+            loop {
+                tokio::time::sleep(push_interval).await;
+
+                let connections = push_stats.active_sessions.load(Ordering::Relaxed);
+                let tx_bytes = push_stats.total_tx_bytes.load(Ordering::Relaxed);
+                let rx_bytes = push_stats.total_rx_bytes.load(Ordering::Relaxed);
+                let tx_packets = push_stats.total_tx_packets.load(Ordering::Relaxed);
+                let rx_packets = push_stats.total_rx_packets.load(Ordering::Relaxed);
+
+                let load_percent = if push_max_connections > 0 {
+                    ((connections as f64 / push_max_connections as f64) * 100.0).min(100.0) as u8
+                } else {
+                    0
+                };
+
+                let payload = serde_json::json!({
+                    "connections": connections,
+                    "max_connections": push_max_connections,
+                    "load_percent": load_percent,
+                    "tx_bytes": tx_bytes,
+                    "rx_bytes": rx_bytes,
+                    "tx_packets": tx_packets,
+                    "rx_packets": rx_packets
+                });
+
+                let mut request = client.post(&stats_url).json(&payload);
+                if let Some(ref token) = stats_token {
+                    request = request.header("Authorization", format!("Bearer {}", token));
+                }
+
+                match request.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        // Stats pushed successfully
+                    }
+                    Ok(resp) => {
+                        warn!("Stats push failed: HTTP {}", resp.status());
+                    }
+                    Err(e) => {
+                        warn!("Stats push error: {}", e);
+                    }
+                }
+            }
+        });
     }
 
     info!("🚀 OxTunnel server running...");

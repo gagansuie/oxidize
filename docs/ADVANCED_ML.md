@@ -4,7 +4,7 @@ This document covers the ML features implemented in Oxidize for network optimiza
 
 ## 10x Optimized ML Engine (`ml_optimized` module)
 
-The new optimized ML engine provides **10x faster inference** with minimal accuracy loss:
+The optimized ML engine provides **10x faster inference** with minimal accuracy loss:
 
 | Feature | Old | New | Improvement |
 |---------|-----|-----|-------------|
@@ -35,128 +35,162 @@ The engine pre-computes the next 100 decisions in the background:
 
 ---
 
-## Advanced Features (Scale-Ready)
+## ML Path Selector
 
-| Feature | Purpose | Latency Impact | Memory | When Needed |
-|---------|---------|----------------|--------|-------------|
-| **Federated Learning** | Privacy-preserving training | Async | ~1MB/client | Multi-server |
-| **Multi-agent RL** | Distributed congestion control | ~50µs/action | ~2MB/agent | Multi-flow fairness |
-| **A/B Testing** | Model deployment experiments | ~1µs | ~100KB/exp | Always |
-
-## 1. Federated Learning
-
-Privacy-preserving model training across distributed servers.
-
-### Architecture
-
-```
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   Server 1   │    │   Server 2   │    │   Server N   │
-│  (Training)  │    │  (Training)  │    │  (Training)  │
-└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-       │                   │                   │
-       │  Clipped +        │  Clipped +        │  Clipped +
-       │  Noised Δw        │  Noised Δw        │  Noised Δw
-       │                   │                   │
-       └─────────────┬─────┴─────────┬─────────┘
-                     │               │
-                     ▼               ▼
-              ┌──────────────────────────┐
-              │   FederatedCoordinator   │
-              │  ┌────────────────────┐  │
-              │  │ FedAvg Aggregation │  │
-              │  └────────────────────┘  │
-              │  ┌────────────────────┐  │
-              │  │ Privacy Accountant │  │
-              │  └────────────────────┘  │
-              └──────────────────────────┘
-```
-
-### Differential Privacy
-
-The coordinator applies differential privacy to protect individual client data:
-
-1. **Gradient Clipping**: Bounds sensitivity of each update
-2. **Gaussian Noise**: Adds calibrated noise to aggregated gradients
-3. **Privacy Accounting**: Tracks cumulative privacy budget spent
-
-### Configuration
+UCB1 bandit-based path selection for optimal routing per traffic type:
 
 ```rust
-use oxidize_common::advanced_ml::{FederatedConfig, FederatedCoordinator};
+use oxidize_common::ml_optimized::{OptimizedMlEngine, TrafficContext, PathId};
+
+let mut engine = OptimizedMlEngine::new();
+
+// Select best path for traffic type
+let path = engine.select_path(TrafficContext::Gaming);
+
+// Update with observed reward
+engine.update_path_reward(PathId::Primary, TrafficContext::Gaming, 0.95);
+```
+
+### Traffic Contexts
+
+| Context | Optimization Target |
+|---------|---------------------|
+| `Gaming` | Lowest latency |
+| `Streaming` | Highest bandwidth |
+| `VoIP` | Lowest jitter |
+| `Bulk` | Maximum throughput |
+| `Default` | Balanced |
+
+---
+
+## FEC Decision Engine
+
+ML-based Forward Error Correction decisions:
+
+```rust
+use oxidize_common::ml_optimized::{OptimizedMlEngine, NetworkFeatures};
+
+let engine = OptimizedMlEngine::new();
+
+let features = NetworkFeatures {
+    rtt_us: 50_000,
+    rtt_var_us: 5_000,
+    bandwidth_bps: 100_000_000,
+    loss_rate: 0.01,
+    ..Default::default()
+};
+
+let fec = engine.fec_decision(&features);
+if fec.inject_fec {
+    println!("Inject FEC with {}% redundancy", fec.redundancy_ratio * 100.0);
+}
+```
+
+---
+
+## Performance Impact
+
+All ML operations are designed for minimal hot-path latency:
+
+| Operation | Typical Latency |
+|-----------|-----------------|
+| Loss prediction (cached) | <1µs |
+| Loss prediction (uncached) | <50µs |
+| CWND optimization | <10µs |
+| Path selection | <5µs |
+| FEC decision | <100ns |
+
+Training operations run asynchronously via `BackgroundTrainer` and never block the packet path.
+
+---
+
+---
+
+## Advanced Features (Implemented, Integration TBD)
+
+The following features are fully implemented and tested but not yet wired into the server runtime.
+They are available as APIs in `oxidize_common::advanced_ml` for future integration.
+
+---
+
+## Federated Learning (`advanced_ml` module)
+
+> **Status: Integration TBD** - Requires multi-server deployment + central aggregation service
+
+Privacy-preserving model training across distributed servers with differential privacy.
+
+```rust
+use oxidize_common::advanced_ml::{FederatedConfig, FederatedCoordinator, FederatedClientUpdate, anonymize_client_id};
 
 let config = FederatedConfig {
     enable_dp: true,
-    dp_epsilon: 1.0,           // Privacy budget
-    dp_noise_multiplier: 1.1,  // Noise scale
-    dp_clip_norm: 1.0,         // Gradient clipping
-    min_clients: 3,            // Minimum for aggregation
-    round_duration_secs: 3600, // 1 hour rounds
+    dp_epsilon: 1.0,
+    dp_noise_multiplier: 1.1,
+    dp_clip_norm: 1.0,
+    min_clients: 3,
+    round_duration_secs: 3600,
     secure_aggregation: true,
 };
 
 let coordinator = FederatedCoordinator::new(config, initial_weights);
-```
 
-### Client Updates
-
-```rust
-use oxidize_common::advanced_ml::{FederatedClientUpdate, anonymize_client_id};
-
-// On each client/server
-let update = FederatedClientUpdate {
+// Submit client updates
+coordinator.submit_update(FederatedClientUpdate {
     client_hash: anonymize_client_id("server-123"),
     round: coordinator.current_round(),
-    weight_deltas: compute_local_gradients(),
+    weight_deltas: vec![0.1; 10],
     num_samples: 1000,
     local_loss: 0.05,
     timestamp_ms: now(),
-};
+})?;
 
-coordinator.submit_update(update)?;
-```
-
-### Aggregation
-
-```rust
-// On coordinator (runs periodically)
+// Aggregate when ready
 if coordinator.should_aggregate() {
     if let Some(new_weights) = coordinator.aggregate() {
-        // Distribute new global model to all clients
         broadcast_model(&new_weights);
     }
 }
 ```
 
-## 2. Multi-agent RL for Congestion Control
+### Differential Privacy
 
-Distributed reinforcement learning with inter-agent communication.
+- **Gradient Clipping**: Bounds sensitivity of each update
+- **Gaussian Noise**: Calibrated noise added to aggregated gradients
+- **Privacy Accounting**: Tracks cumulative epsilon budget
 
-### Architecture
+---
 
+## Multi-Agent RL for Congestion Control
+
+> **Status: Integration TBD** - For research/experimentation with multi-flow RL
+
+Distributed reinforcement learning with inter-agent communication for fairness.
+
+```rust
+use oxidize_common::advanced_ml::{MultiAgentCoordinator, MultiAgentConfig, CongestionAction, calculate_cooperative_reward};
+
+let coordinator = MultiAgentCoordinator::new(MultiAgentConfig::default());
+
+// Register agents (one per flow)
+coordinator.register_agent("flow_1".to_string());
+coordinator.register_agent("flow_2".to_string());
+
+// Update state and select action
+coordinator.update_state("flow_1", vec![rtt, loss, bw, ...]);
+let action = coordinator.select_action("flow_1");
+let new_cwnd = action.apply(current_cwnd);
+
+// Record cooperative reward
+let reward = calculate_cooperative_reward(
+    agent_throughput,
+    agent_latency_ms,
+    total_throughput,
+    fairness_index,
+);
+coordinator.record_reward("flow_1", reward);
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   MultiAgentCoordinator                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│   ┌─────────┐      ┌─────────┐      ┌─────────┐             │
-│   │ Agent 1 │◄────▶│ Agent 2 │◄────▶│ Agent N │             │
-│   │  (PPO)  │ msg  │  (PPO)  │ msg  │  (PPO)  │             │
-│   └────┬────┘      └────┬────┘      └────┬────┘             │
-│        │                │                │                   │
-│        └────────────────┼────────────────┘                   │
-│                         │                                    │
-│                         ▼                                    │
-│              ┌──────────────────────┐                        │
-│              │ Cooperative Reward   │                        │
-│              │ 0.7*individual +     │                        │
-│              │ 0.3*global*fairness  │                        │
-│              └──────────────────────┘                        │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
 
-### Actions (Same as single-agent PPO)
+### Actions
 
 | Action | Effect |
 |--------|--------|
@@ -165,205 +199,46 @@ Distributed reinforcement learning with inter-agent communication.
 | `Maintain` | No change |
 | `Decrease5` | CWND -= 5% |
 | `Decrease10` | CWND -= 10% |
-| `SlowStart` | Reset to initial CWND |
+| `SlowStart` | Reset to 10 MSS |
 
-### Configuration
+---
 
-```rust
-use oxidize_common::advanced_ml::{MultiAgentConfig, MultiAgentCoordinator};
+## A/B Testing Framework
 
-let config = MultiAgentConfig {
-    max_agents: 16,
-    state_dim: 8,
-    action_dim: 6,
-    message_dim: 16,
-    comm_rounds: 2,
-    gamma: 0.99,
-    learning_rate: 0.001,
-    epsilon: 1.0,
-    epsilon_decay: 0.995,
-    epsilon_min: 0.01,
-};
+> **Status: Integration TBD** - For A/B testing model variants in production
 
-let coordinator = MultiAgentCoordinator::new(config);
-```
-
-### Usage
+Statistical experimentation for model deployment with Welch's t-test.
 
 ```rust
-// Register agents (one per connection/flow)
-coordinator.register_agent("flow_1".to_string());
-coordinator.register_agent("flow_2".to_string());
-
-// Update agent state
-coordinator.update_state("flow_1", vec![rtt, loss, bw, ...]);
-
-// Broadcast messages for coordination
-coordinator.broadcast_message("flow_1", vec![my_cwnd, my_throughput, ...]);
-coordinator.distribute_messages();
-
-// Select action
-let action = coordinator.select_action("flow_1");
-apply_congestion_action(action);
-
-// Record reward
-let reward = calculate_cooperative_reward(
-    agent_throughput,
-    agent_latency,
-    total_throughput,
-    fairness_index,
-);
-coordinator.record_reward("flow_1", reward);
-```
-
-### Cooperative Reward
-
-The reward function balances individual performance with global fairness:
-
-```rust
-reward = 0.7 * individual_reward + 0.3 * cooperative_reward
-
-individual_reward = throughput_mbps - latency_penalty
-cooperative_reward = total_throughput * fairness_index
-```
-
-## 3. A/B Testing Framework
-
-Statistical experimentation for model deployment decisions.
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ABTestingFramework                        │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│   ┌──────────────┐                 ┌──────────────┐         │
-│   │   Control    │                 │  Treatment   │         │
-│   │ (Old v1.0)   │                 │ (Transformer)│         │
-│   └──────┬───────┘                 └──────┬───────┘         │
-│          │                                │                  │
-│          │  50% traffic                   │  50% traffic    │
-│          │                                │                  │
-│          └────────────────┬───────────────┘                  │
-│                           │                                  │
-│                           ▼                                  │
-│                ┌──────────────────────┐                      │
-│                │  T-Test Significance │                      │
-│                │  p < 0.05 → Winner   │                      │
-│                └──────────────────────┘                      │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Creating Experiments
-
-```rust
-use oxidize_common::advanced_ml::{
-    ABTestConfig, ABTestingFramework, ModelVariant
-};
+use oxidize_common::advanced_ml::{ABTestingFramework, ABTestConfig, ModelVariant, ABSample};
 
 let framework = ABTestingFramework::new();
 
-let control = ModelVariant {
-    name: "old_v1".to_string(),
-    model_path: "/models/old_v1.safetensors".to_string(),
-    is_treatment: false,
-};
-
-let treatment = ModelVariant {
-    name: "transformer_v1".to_string(),
-    model_path: "/models/transformer_v1.safetensors".to_string(),
-    is_treatment: true,
-};
-
-let config = ABTestConfig {
-    min_samples: 100,
-    confidence_level: 0.95,
-    treatment_fraction: 0.5,
-    max_duration_secs: 86400,
-    early_stopping: true,
-};
-
 let exp_id = framework.create_experiment(
-    "old_vs_transformer".to_string(),
-    control,
-    treatment,
-    config,
+    "transformer_vs_heuristic".to_string(),
+    ModelVariant { name: "heuristic".into(), model_path: "/m/h.safetensors".into(), is_treatment: false },
+    ModelVariant { name: "transformer".into(), model_path: "/m/t.safetensors".into(), is_treatment: true },
+    ABTestConfig { min_samples: 100, confidence_level: 0.95, treatment_fraction: 0.5, ..Default::default() },
 );
-```
 
-### Assigning Users
-
-```rust
-// Deterministic assignment based on user ID hash
+// Assign users deterministically
 let is_treatment = framework.get_assignment(&exp_id, &user_id)?;
 
-// Get model path for this user
-let model_path = framework.get_model_path(&exp_id, &user_id)?;
-```
-
-### Recording Results
-
-```rust
-use oxidize_common::advanced_ml::ABSample;
-
-// Record metric (e.g., throughput, latency)
+// Record samples
 framework.record_sample(&exp_id, ABSample {
     is_treatment,
     metric_value: measured_throughput,
     timestamp_ms: now(),
 });
-```
 
-### Getting Results
-
-```rust
-// Check if experiment has concluded
+// Get results
 if let Some(result) = framework.get_result(&exp_id) {
-    println!("Winner: {}", result.winner);
-    println!("Lift: {:.2}%", result.lift_percent);
-    println!("p-value: {:.4}", result.p_value);
+    println!("Winner: {} (lift: {:.1}%, p={:.4})", result.winner, result.lift_percent, result.p_value);
 }
-
-// Or manually conclude
-let result = framework.conclude_experiment(&exp_id)?;
 ```
 
-## Unified Engine
+### Features
 
-All five features are available through the `AdvancedMlEngine`:
-
-```rust
-use oxidize_common::advanced_ml::AdvancedMlEngine;
-
-// Client mode (no federation)
-let engine = AdvancedMlEngine::new();
-
-// Server mode (with federation)
-let engine = AdvancedMlEngine::new_with_federation(initial_weights);
-
-// Access components
-engine.online_learner.add_sample(...);
-engine.transformer.predict();
-engine.multi_agent.select_action("agent1");
-engine.ab_testing.create_experiment(...);
-
-// Get unified stats
-let stats = engine.stats();
-```
-
-## Performance Impact
-
-All features are designed for minimal hot-path latency:
-
-| Operation | Typical Latency |
-|-----------|-----------------|
-| Online learning sample add | <1µs |
-| Online learning gradient step | ~1ms |
-| Federated update submit | <10µs |
-| Transformer inference | ~100µs |
-| Multi-agent action selection | ~50µs |
-| A/B test assignment | ~1µs |
-
-Training and aggregation operations run asynchronously and never block the packet path.
+- **Welch's t-test**: Handles unequal variances
+- **Early stopping**: Auto-conclude on significance
+- **Deterministic assignment**: Consistent user bucketing

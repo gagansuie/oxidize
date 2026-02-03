@@ -41,33 +41,55 @@ Your ISP's routing is suboptimal:
 │                    Bidirectional OxTunnel Flow                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  OUTBOUND:                                                              │
+│  OUTBOUND (TUN + Userspace Fast Path):                                  │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         │
-│  │   App    │───►│ NFQUEUE  │───►│ OxTunnel │───►│  Server  │──► Internet
-│  │          │    │  (DROP)  │    │ Encrypt  │    │ Forward  │         │
+│  │   App    │───►│  oxtun0  │───►│ OxTunnel │───►│  Server  │──► Internet
+│  │ TCP/UDP  │    │  (TUN)   │    │ Encrypt  │    │ AF_XDP   │         │
 │  └──────────┘    └──────────┘    └──────────┘    └──────────┘         │
 │                                                                         │
 │  INBOUND:                                                               │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         │
-│  │   App    │◄───│ Response │◄───│ OxTunnel │◄───│  Server  │◄── Internet
-│  │          │    │ Injector │    │ Decrypt  │    │ Receive  │         │
+│  │   App    │◄───│  oxtun0  │◄───│ OxTunnel │◄───│  Server  │◄── Internet
+│  │ TCP/UDP  │    │ Inject   │    │ Decrypt  │    │ AF_XDP   │         │
 │  └──────────┘    └──────────┘    └──────────┘    └──────────┘         │
 │                                                                         │
+│  FALLBACK (QUIC/TCP): App ──► TUN ──► QUIC:51822 → TCP:51821 (blocked UDP)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Full bidirectional tunneling** — ALL TCP/UDP traffic flows through the relay and back
-- **Raw socket injection** — Responses injected directly into local network stack (no TUN device)
+- **Full TCP/UDP/ICMP coverage** — TUN device captures ALL IP traffic
+- **Kernel bypass (server, required)** — AF_XDP/FLASH on Linux servers with XDP-capable NICs
+- **Client fast path** — userspace batching + SIMD + buffer pools on all platforms
+- **Client path** — TUN/tunnel APIs only (no OS-specific kernel bypass)
+- **QUIC/TCP fallback** — Auto-switches to QUIC, then TCP when UDP is blocked
 - **System traffic preserved** — DNS, DHCP, NTP, mDNS, localhost excluded automatically
 - **Dedicated infrastructure** — no peer-to-peer, no bandwidth sharing with strangers
 - **Smart routing** — gaming tunneled, streaming bypassed for zero latency
 - **End-to-end encryption** — ChaCha20-Poly1305 on both directions
 
+## Why This Beats Everything
+
+- **Universal coverage**: TUN/tunnel APIs capture TCP/UDP/ICMP everywhere.
+- **Userspace classifier**: ML lookup tables drive per-flow FEC + path hints at wire speed.
+- **Zero-copy where it counts**: AF_XDP/FLASH on Linux servers for maximum throughput.
+- **Fastest-available default**: auto-selects the best path per OS with clean fallbacks.
+- **No legacy bottlenecks**: avoids kernel/userspace bounce overhead from obsolete capture modes.
+
+## Kernel Bypass Strategy (Per OS)
+
+| Platform | Default Path | Kernel Bypass |
+|----------|--------------|---------------|
+| Linux server | AF_XDP/FLASH | ✅ (required; XDP-capable NIC + root) |
+| Linux client | TUN + userspace fast path | ❌ (TUN-only) |
+| Windows | TUN + userspace fast path | ❌ (TUN-only) |
+| macOS | TUN + userspace fast path | ❌ (TUN-only) |
+| iOS/Android | Tunnel APIs + userspace fast path | ❌ (TUN-only) |
+
 ## Perfect For
 
 | 🎮 Gamers | 📱 Mobile Users | 🏢 Remote Workers | 🚀 Bad ISPs |
 |-----------|-----------------|-------------------|-------------|
-| Reduce jitter & packet loss | Better than carrier routing | VPN alternative, better perf | Bypass congestion |
+| Reduce jitter & packet loss | Better than carrier routing | Lower latency, better perf | Bypass congestion |
 
 ## Features
 
@@ -78,7 +100,7 @@ Your ISP's routing is suboptimal:
 - **Multi-path Support** - WiFi + LTE bandwidth aggregation and seamless failover
 
 ### ⚡ High-Performance Pipeline (100x Optimization)
-- **Kernel Bypass** - AF_XDP/XDP for bare metal (10-25 Gbps, no dedicated CPU cores)
+- **Kernel Bypass (server, required)** - AF_XDP/FLASH for bare metal (10-25 Gbps, no dedicated CPU cores)
 - **Zero-Copy I/O** - Direct packet access via AF_XDP UMEM
 - **UDP GSO/GRO Batching** - 64 packets per syscall, 5-10x throughput
 - **Zero-Copy Buffers** - Buffer pooling eliminates allocation overhead
@@ -91,39 +113,43 @@ Your ISP's routing is suboptimal:
 - **LZ4 Compression** - ~80 MB/s single-thread, scales with parallel compression
 - **Zero-Allocation Hot Path** - Ownership transfer instead of cloning in packet pipeline
 
-### 📱 OxTunnel Protocol (Unified Cross-Platform)
+### 📱 OxTunnel v3 Protocol (Unified Cross-Platform)
 Custom high-performance tunnel protocol replacing WireGuard with **unified architecture** for all platforms:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    OxTunnel Protocol (TCP + UDP)                    │
-├─────────────────────────────────────────────────────────────────────┤
-│  Linux:   App → NFQUEUE(DROP) → OxTunnel → Server → ResponseInjector│
-│  macOS:   App → PF/Utun → OxTunnel → Server → Raw Socket Inject    │
-│  Windows: App → WinDivert → OxTunnel → Server → WinDivert Inject   │
-│  Android: App → VpnService → OxTunnel → Server → VpnService        │
-│  iOS:     App → NEPacketTunnel → OxTunnel → Server → NEPacketTunnel│
-└─────────────────────────────────────────────────────────────────────┘
-    Server: AF_XDP/FLASH zero-copy (18-25 Gbps) + NAT/MASQUERADE
+┌─────────────────────────────────────────────────────────────────────────┐
+│               OxTunnel Protocol (UDP → QUIC → TCP Fallback)             │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Linux:   App → TUN (fast path) → OxTunnel:51820 → AF_XDP Server      │
+│  macOS:   App → TUN (utun) → OxTunnel:51820 → Server                  │
+│  Windows: App → TUN (Wintun) → OxTunnel:51820 → Server                │
+│  Android: App → VpnService → OxTunnel:51820 → Server                  │
+│  iOS:     App → NEPacketTunnel → OxTunnel:51820 → Server              │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Fallback: Any Platform → QUIC:51822 → TCP:51821 (when UDP blocked)   │
+└─────────────────────────────────────────────────────────────────────────┘
+    Server: AF_XDP/FLASH zero-copy (18-25 Gbps, required on Linux) + QUIC/TCP fallback
 ```
 
-- **Same protocol everywhere** - All platforms use identical OxTunnel encapsulation over UDP
-- **Platform-specific capture** - NFQUEUE (Linux), PF (macOS), WinDivert (Windows), VpnService (Android)
-- **AF_XDP/FLASH Server** - Kernel bypass on Linux bare metal, 18-25 Gbps zero-copy throughput
+- **TUN-based capture** - Full TCP/UDP/ICMP coverage on all platforms
+- **Kernel bypass (server, required)** - AF_XDP/FLASH on Linux servers with supported NICs
+- **Client path** - TUN/tunnel APIs only (no OS-specific kernel bypass)
+- **Mobile path** - VpnService/NEPacketTunnel with userspace fast path
+- **QUIC/TCP fallback** - UDP primary, QUIC fallback, TCP last resort
 - **0-RTT reconnection** - Instant session resumption via cached keys
-- **V2 Variable Headers** - 2-7 byte headers (avg 4B) with varint encoding, 55% smaller than V1
+- **V3 Metadata Header** - flow ID, importance, FEC level, path hints
 - **64 packets/batch** - Reduces syscalls by 64x
 - **Zero-copy buffer pools** - 128 pre-allocated buffers, no heap allocation per packet
 
 | Feature | WireGuard | OxTunnel |
 |---------|-----------|----------|
-| Header size | 32+ bytes | **4 bytes avg** (V2) |
+| Header size | 32+ bytes | **V3 compact metadata** (importance/flow/FEC/path) |
 | Encryption | Double (WG + TLS) | Single (ChaCha20-Poly1305) |
 | Handshake | Multi-round Noise | Single round-trip |
 | Buffer allocation | Per-packet malloc | Zero-copy pool |
 | Batch processing | No | 64 packets/batch |
-| Packet capture | TUN device | NFQUEUE/PF/WinDivert |
-| Transport | UDP only | OxTunnel (UDP + AF_XDP kernel bypass) |
+| Packet capture | TUN device | TUN everywhere + server AF_XDP |
+| Transport | UDP only | UDP → QUIC → TCP |
 | Cross-platform | Separate implementations | Unified protocol |
 
 ### 🎭 MASQUE-Inspired Architecture
@@ -221,20 +247,23 @@ cargo build --release
 
 ### Server Deployment (AF_XDP)
 
-For maximum performance on bare metal Linux servers:
+FLASH AF_XDP is **mandatory** on Linux relay servers (no UDP fallback). If FLASH
+cannot initialize, the server exits with an error.
 
 ```bash
-# 1. Setup system for AF_XDP (configures NIC, huge pages, sysctl)
-sudo ./scripts/xdp-setup.sh eth0 51820
+# 1. Setup system for AF_XDP (use provider-specific script)
+# Vultr:    sudo ./scripts/vultr/vultr-setup.sh
+# Latitude: sudo ./scripts/latitude/latitude-setup.sh
 
-# 2. Run server (AF_XDP is automatic on Linux)
+# 2. Run server (FLASH required on Linux)
 sudo ./target/release/oxidize-server --listen 0.0.0.0:51820
 ```
 
-AF_XDP provides 10-25 Gbps throughput with <0.2µs latency. Requires:
+AF_XDP provides 10-25 Gbps throughput with <0.2µs latency on **Linux servers**. Requires:
 - Linux 5.4+ kernel
 - Root privileges
 - XDP-capable NIC (Intel i40e/ixgbe, Mellanox mlx5, etc.)
+If any requirement is missing, the server will fail fast instead of falling back.
 
 ## Configuration
 
@@ -271,7 +300,12 @@ Modern GUI built with Tauri. Requires daemon for full traffic tunneling.
 **macOS:** Right-click → Open to bypass Gatekeeper, or `xattr -cr /Applications/Oxidize.app`
 
 ### Mobile (Coming Soon)
-Same OxTunnel protocol. Uses native VPN APIs (VpnService/NEPacketTunnel).
+Same OxTunnel protocol. Uses native tunnel APIs (VpnService/NEPacketTunnel) with userspace fast path.
+
+**Smart Network Features:**
+- **HandoffPredictor** - Predicts WiFi→LTE transitions 5+ seconds ahead, triggers proactive FEC
+- **MptcpRedundancyScheduler** - Duplicates critical packets (gaming/VoIP) on multiple paths
+- Industry-standard approach used by Apple FaceTime, Zoom, and cloud gaming services
 
 ```bash
 cd app && npx tauri android build   # Android
@@ -280,17 +314,26 @@ cd app && npx tauri ios build       # iOS
 
 ## Daemon
 
-OxTunnel captures TCP+UDP via NFQUEUE and tunnels over encrypted UDP datagrams.
+OxTunnel uses TUN device (`oxtun0`) with userspace fast path for full TCP/UDP/ICMP tunneling. AF_XDP/FLASH is server-side.
+
+Client capture/injection is TUN-only; installers do not configure legacy capture rules or raw socket drivers.
 
 ```bash
 sudo systemctl status oxidize-daemon   # Check status
 sudo systemctl restart oxidize-daemon  # Restart
 sudo journalctl -u oxidize-daemon -f   # View logs
+
+# TUN mode (default) captures ALL IP traffic
+# QUIC fallback activates when UDP:51820 is blocked
+# TCP fallback activates when UDP/QUIC are blocked
 ```
 
 ## Documentation
 
 - [OXTUNNEL.md](docs/OXTUNNEL.md) - Protocol specification
+- [OXIDE_ENGINE.md](docs/OXIDE_ENGINE.md) - Server-side kernel bypass engine (AF_XDP/FLASH)
+- [TUN_QUIC_IMPLEMENTATION.md](docs/TUN_QUIC_IMPLEMENTATION.md) - TUN/QUIC architecture details
+- [AF_XDP.md](docs/AF_XDP.md) - FLASH/AF_XDP kernel bypass
 - [DEEP_LEARNING.md](docs/DEEP_LEARNING.md) - ML engine details
 - [SECURITY.md](docs/SECURITY.md) - Security & DDoS protection
 - [Deployment guides](docs/) - Vultr, Latitude.sh setup
@@ -298,13 +341,8 @@ sudo journalctl -u oxidize-daemon -f   # View logs
 ## Uninstall
 
 ```bash
-# Linux/macOS
+# Linux/macOS/Windows (Git Bash)
 curl -fsSL https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall.sh | sudo bash
-```
-
-```bash
-# Windows (PowerShell as Admin)
-irm https://raw.githubusercontent.com/gagansuie/oxidize/main/scripts/uninstall-windows.ps1 | iex
 ```
 
 ## License

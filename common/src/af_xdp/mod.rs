@@ -31,3 +31,24 @@ pub use stats::*;
 
 mod flash;
 pub use flash::FlashSocket;
+
+// High-performance utilities (consolidated from kernel_bypass.rs)
+pub mod utils;
+pub use utils::{
+    packet_flags,
+    security,
+    AlignedCounter,
+    // Backward compatibility types
+    BypassConfig,
+    BypassMode,
+    BypassPacket,
+    BypassProcessor,
+    PacketBuffer,
+    PacketParser,
+    ParsedPacket,
+    SpscRing,
+    UnifiedBypass,
+    CACHE_LINE_SIZE,
+    MAX_BURST_SIZE,
+    PACKET_BUFFER_SIZE,
+};

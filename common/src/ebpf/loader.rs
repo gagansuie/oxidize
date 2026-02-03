@@ -3,6 +3,8 @@
 //! Loads and attaches eBPF programs to network interfaces using aya.
 
 #[cfg(target_os = "linux")]
+use crate::af_xdp::XdpProgram;
+#[cfg(target_os = "linux")]
 use std::io;
 #[cfg(target_os = "linux")]
 use tracing::info;
@@ -69,6 +71,7 @@ pub struct EbpfLoader {
     interface: String,
     mode: XdpAttachMode,
     port: u16,
+    program: Option<XdpProgram>,
 }
 
 #[cfg(target_os = "linux")]
@@ -82,6 +85,7 @@ impl EbpfLoader {
             interface: interface.to_string(),
             mode,
             port,
+            program: None,
         }
     }
 
@@ -91,6 +95,7 @@ impl EbpfLoader {
             interface: interface.to_string(),
             mode,
             port,
+            program: None,
         }
     }
 
@@ -111,29 +116,32 @@ impl EbpfLoader {
     /// eBPF program. Currently returns Unsupported error, causing graceful
     /// fallback to standard UDP sockets. For XDP acceleration, deploy the
     /// pre-compiled oxidize-xdp binary on servers with XDP-capable NICs.
-    pub fn load_xdp_program(&self) -> io::Result<i32> {
+    pub fn load_xdp_program(&mut self) -> io::Result<i32> {
         info!(
             "Loading XDP program on {} (port {}, mode {:?})",
             self.interface, self.port, self.mode
         );
 
-        // XDP program loading is not yet implemented
-        // Full implementation requires:
-        // 1. aya crate for eBPF program loading
-        // 2. Compiled eBPF bytecode (oxidize-xdp.o)
-        // 3. Build script to compile eBPF C code
-        //
-        // For now, return an error indicating XDP is not available
-        // The system will fall back to standard UDP sockets
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "XDP program loading not yet implemented - using standard sockets",
-        ))
+        let mut program = XdpProgram::new(&self.interface, self.port, 64)?;
+
+        let skb_mode = matches!(self.mode, XdpAttachMode::Generic);
+        if let Err(e) = program.attach(skb_mode) {
+            if !skb_mode {
+                program.attach(true)?;
+            } else {
+                return Err(e);
+            }
+        }
+
+        let prog_fd = program.prog_fd();
+        self.program = Some(program);
+        Ok(prog_fd)
     }
 
     /// Detach the XDP program from interface
-    pub fn detach(&self) -> io::Result<()> {
+    pub fn detach(&mut self) -> io::Result<()> {
         info!("Detaching XDP program from {}", self.interface);
+        self.program.take();
         Ok(())
     }
 

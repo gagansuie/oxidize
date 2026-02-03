@@ -30,24 +30,8 @@ chown oxidize:oxidize "$RUN_DIR" 2>/dev/null || true
 # Ensure daemon is executable
 [ -f "$DAEMON_BIN" ] && chmod +x "$DAEMON_BIN" 2>/dev/null || true
 
-# Set network capabilities if setcap exists
-command -v setcap >/dev/null 2>&1 && setcap 'cap_net_admin,cap_net_raw+eip' "$DAEMON_BIN" 2>/dev/null || true
-
-# Create iptables rules script
-cat > "$CONFIG_DIR/nfqueue-rules.sh" 2>/dev/null << 'RULES' || true
-#!/bin/bash
-QUEUE_NUM=0
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
-iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass || true
-RULES
-chmod +x "$CONFIG_DIR/nfqueue-rules.sh" 2>/dev/null || true
-
-# Create cleanup script
-cat > "$CONFIG_DIR/cleanup-rules.sh" 2>/dev/null << 'CLEANUP' || true
-#!/bin/bash
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
-CLEANUP
-chmod +x "$CONFIG_DIR/cleanup-rules.sh" 2>/dev/null || true
+# Set network capabilities if setcap exists (TUN requires CAP_NET_ADMIN)
+command -v setcap >/dev/null 2>&1 && setcap 'cap_net_admin+eip' "$DAEMON_BIN" 2>/dev/null || true
 
 # Create systemd service
 cat > "$SERVICE_FILE" 2>/dev/null << 'EOF' || true
@@ -58,9 +42,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=-/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/bin/oxidize-daemon
-ExecStopPost=-/etc/oxidize/cleanup-rules.sh
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info

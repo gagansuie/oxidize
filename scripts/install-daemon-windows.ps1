@@ -1,6 +1,6 @@
 # Oxidize Daemon Installer for Windows
 # This script installs the oxidize-daemon as a Windows service
-# and sets up WinDivert driver for packet capture
+# TUN-only capture/injection path
 # Run as Administrator
 
 #Requires -RunAsAdministrator
@@ -17,7 +17,6 @@ $ServiceName = "OxidizeDaemon"
 $ServiceDisplayName = "Oxidize Network Relay Daemon"
 $InstallDir = "$env:ProgramFiles\Oxidize"
 $DaemonExe = "$InstallDir\oxidize-daemon.exe"
-$WinDivertDir = "$InstallDir\WinDivert"
 
 # Find the daemon binary
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -66,56 +65,6 @@ if (-not (Test-Path $InstallDir)) {
 Write-Host "→ Installing daemon binary..."
 Copy-Item -Path $SourceBin -Destination $DaemonExe -Force
 
-# Download and install WinDivert
-Write-Host "→ Setting up WinDivert driver..."
-$WinDivertVersion = "2.2.2"
-$WinDivertUrl = "https://github.com/basil00/WinDivert/releases/download/v$WinDivertVersion/WinDivert-$WinDivertVersion-A.zip"
-$WinDivertZip = "$env:TEMP\WinDivert.zip"
-
-if (-not (Test-Path $WinDivertDir)) {
-    New-Item -ItemType Directory -Path $WinDivertDir -Force | Out-Null
-}
-
-# Check if WinDivert is already installed
-$WinDivertDll = "$WinDivertDir\WinDivert.dll"
-$WinDivertSys = "$WinDivertDir\WinDivert64.sys"
-
-if (-not (Test-Path $WinDivertDll) -or -not (Test-Path $WinDivertSys)) {
-    Write-Host "  Downloading WinDivert v$WinDivertVersion..."
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $WinDivertUrl -OutFile $WinDivertZip -UseBasicParsing
-        
-        Write-Host "  Extracting WinDivert..."
-        Expand-Archive -Path $WinDivertZip -DestinationPath "$env:TEMP\WinDivert" -Force
-        
-        # Copy x64 files
-        $ExtractedDir = "$env:TEMP\WinDivert\WinDivert-$WinDivertVersion-A\x64"
-        Copy-Item -Path "$ExtractedDir\*" -Destination $WinDivertDir -Force -Recurse
-        
-        # Cleanup
-        Remove-Item -Path $WinDivertZip -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path "$env:TEMP\WinDivert" -Recurse -Force -ErrorAction SilentlyContinue
-        
-        Write-Host "  ✓ WinDivert installed" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "  ⚠ Failed to download WinDivert: $_" -ForegroundColor Yellow
-        Write-Host "  Please manually download from: https://github.com/basil00/WinDivert/releases"
-        Write-Host "  And extract to: $WinDivertDir"
-    }
-} else {
-    Write-Host "  ✓ WinDivert already installed" -ForegroundColor Green
-}
-
-# Add WinDivert to PATH for the service
-Write-Host "→ Configuring environment..."
-$MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-if ($MachinePath -notlike "*$WinDivertDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$MachinePath;$WinDivertDir", "Machine")
-    Write-Host "  ✓ Added WinDivert to system PATH" -ForegroundColor Green
-}
-
 # Create Windows service
 Write-Host "→ Creating Windows service..."
 $ServiceParams = @{
@@ -161,7 +110,6 @@ if ($service.Status -eq "Running") {
 
 Write-Host ""
 Write-Host "Privileges configured at install-time:" -ForegroundColor Cyan
-Write-Host "  • WinDivert driver installed for packet capture"
 Write-Host "  • Windows service runs with SYSTEM privileges"
 Write-Host "  • Firewall rule configured"
 Write-Host ""

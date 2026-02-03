@@ -17,13 +17,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 #[cfg(feature = "ai")]
 use candle_core::{DType, Device, Result as CandleResult, Tensor};
 #[cfg(feature = "ai")]
 use candle_nn::{linear, seq, Activation, Linear, Module, Optimizer, VarBuilder, VarMap};
 
+use crate::ml_data_quality::DataQualityValidator;
 use crate::ml_optimized::{DrlExperience, LossSample};
 
 // ============================================================================
@@ -541,11 +542,16 @@ impl Default for TrainingConfig {
     }
 }
 
-/// Thread-safe training data buffers
+/// Thread-safe training data buffers with data quality validation
 pub struct TrainingBuffers {
     pub loss_samples: RwLock<VecDeque<LossSample>>,
     pub drl_experiences: RwLock<VecDeque<DrlExperience>>,
     max_samples: usize,
+    /// Data quality validator to prevent garbage data from DDoS attacks
+    validator: RwLock<DataQualityValidator>,
+    /// Statistics for rejected samples
+    rejected_loss_samples: AtomicU64,
+    rejected_drl_experiences: AtomicU64,
 }
 
 impl TrainingBuffers {
@@ -554,24 +560,82 @@ impl TrainingBuffers {
             loss_samples: RwLock::new(VecDeque::with_capacity(max_samples)),
             drl_experiences: RwLock::new(VecDeque::with_capacity(max_samples)),
             max_samples,
+            validator: RwLock::new(DataQualityValidator::new()),
+            rejected_loss_samples: AtomicU64::new(0),
+            rejected_drl_experiences: AtomicU64::new(0),
         }
     }
 
-    pub fn add_loss_sample(&self, sample: LossSample) {
+    /// Add loss sample with validation to prevent garbage data
+    /// Returns true if sample was added, false if rejected
+    pub fn add_loss_sample(&self, sample: LossSample) -> bool {
+        // Validate sample before adding
+        if let Ok(mut validator) = self.validator.write() {
+            if let Err(e) = validator.validate_loss_sample(&sample) {
+                self.rejected_loss_samples.fetch_add(1, Ordering::Relaxed);
+                warn!("Rejected invalid loss sample: {}", e);
+                return false;
+            }
+        } else {
+            // If we can't acquire validator lock, reject to be safe
+            self.rejected_loss_samples.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        // Add validated sample
         if let Ok(mut samples) = self.loss_samples.write() {
             samples.push_back(sample);
             while samples.len() > self.max_samples {
                 samples.pop_front();
             }
+            true
+        } else {
+            false
         }
     }
 
-    pub fn add_experience(&self, exp: DrlExperience) {
+    /// Add DRL experience with validation to prevent garbage data
+    /// Returns true if experience was added, false if rejected
+    pub fn add_experience(&self, exp: DrlExperience) -> bool {
+        // Validate experience before adding
+        if let Ok(validator) = self.validator.read() {
+            if let Err(e) = validator.validate_drl_experience(&exp) {
+                self.rejected_drl_experiences
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!("Rejected invalid DRL experience: {}", e);
+                return false;
+            }
+        } else {
+            // If we can't acquire validator lock, reject to be safe
+            self.rejected_drl_experiences
+                .fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        // Add validated experience
         if let Ok(mut exps) = self.drl_experiences.write() {
             exps.push_back(exp);
             while exps.len() > self.max_samples {
                 exps.pop_front();
             }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get statistics about rejected samples
+    pub fn rejection_stats(&self) -> (u64, u64) {
+        (
+            self.rejected_loss_samples.load(Ordering::Relaxed),
+            self.rejected_drl_experiences.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Clear validator history (useful after DDoS subsides)
+    pub fn clear_validator_history(&self) {
+        if let Ok(mut validator) = self.validator.write() {
+            validator.clear_history();
         }
     }
 }
@@ -1143,19 +1207,26 @@ mod tests {
     #[test]
     fn test_training_buffers() {
         let buffers = TrainingBuffers::new(100);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
         for i in 0..150 {
-            buffers.add_loss_sample(LossSample {
-                timestamp_ms: i as u64,
-                rtt_us: 50000,
-                rtt_var_us: 5000,
-                bandwidth_bps: 100_000_000,
-                loss_rate: 0.01,
+            let loss_rate = 0.01 + (i as f32 % 40.0) * 0.001;
+            let sample = LossSample {
+                timestamp_ms: now_ms.saturating_sub(i),
+                rtt_us: 20_000 + i * 10_000,
+                rtt_var_us: 5_000,
+                bandwidth_bps: 100_000_000 + (i * 10_000_000),
+                loss_rate,
                 inflight: 100,
                 buffer_occupancy: 0.3,
                 ipg_us: 1000,
-                future_loss: 0.02,
-            });
+                future_loss: (loss_rate + 0.01).min(0.5),
+            };
+
+            assert!(buffers.add_loss_sample(sample));
         }
 
         let samples = buffers.loss_samples.read().unwrap();

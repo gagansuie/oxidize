@@ -3,6 +3,7 @@
 //! Benchmarks connection latency and throughput using the OxTunnel protocol.
 
 use anyhow::Result;
+use oxidize_common::oxtunnel_protocol::{PING_MAGIC, PONG_MAGIC};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -115,16 +116,6 @@ pub struct SpeedTest {
 }
 
 impl SpeedTest {
-    /// Create a new speed test with server address
-    pub fn new(server_addr: SocketAddr) -> Self {
-        Self {
-            config: SpeedTestConfig {
-                server_addr,
-                ..Default::default()
-            },
-        }
-    }
-
     /// Create with custom config
     pub fn with_config(config: SpeedTestConfig) -> Self {
         Self { config }
@@ -142,27 +133,34 @@ impl SpeedTest {
 
         // Warmup
         info!("Warming up ({} packets)...", self.config.warmup_packets);
-        for _ in 0..self.config.warmup_packets {
-            let packet = vec![0u8; self.config.packet_size];
-            let _ = socket.send(&packet).await;
+        let warmup_size = self.config.packet_size.max(8);
+        let mut warmup_packet = vec![0u8; warmup_size];
+        warmup_packet[..4].copy_from_slice(&PING_MAGIC);
+        for i in 0..self.config.warmup_packets {
+            warmup_packet[4..8].copy_from_slice(&(i as u32).to_le_bytes());
+            let _ = socket.send(&warmup_packet).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         // Latency test (ping-pong)
         info!("Testing latency...");
         let mut latencies = Vec::with_capacity(100);
-        let _ping_packet = [0x01u8; 64]; // Small ping packet
+        let mut ping_packet = vec![0u8; 64];
+        ping_packet[..4].copy_from_slice(&PING_MAGIC);
 
-        for _ in 0..100 {
+        for i in 0..100 {
             let start = Instant::now();
-            socket.send(&[0x01; 64]).await?;
+            ping_packet[4..8].copy_from_slice(&(i as u32).to_le_bytes());
+            socket.send(&ping_packet).await?;
 
             let mut buf = [0u8; 128];
             if let Ok(Ok(_)) =
                 tokio::time::timeout(Duration::from_secs(1), socket.recv(&mut buf)).await
             {
-                let elapsed = start.elapsed().as_micros() as u64;
-                latencies.push(elapsed);
+                if buf[..4] == PONG_MAGIC {
+                    let elapsed = start.elapsed().as_micros() as u64;
+                    latencies.push(elapsed);
+                }
             }
         }
 
@@ -189,7 +187,9 @@ impl SpeedTest {
             self.config.packet_count, self.config.packet_size
         );
 
-        let packet = vec![0xAAu8; self.config.packet_size];
+        let packet_size = self.config.packet_size.max(8);
+        let mut packet = vec![0xAAu8; packet_size];
+        packet[..4].copy_from_slice(&PING_MAGIC);
         let start = Instant::now();
         let mut sent = 0;
         let mut received = 0;
@@ -197,7 +197,7 @@ impl SpeedTest {
         for i in 0..self.config.packet_count {
             // Include sequence number in packet
             let mut pkt = packet.clone();
-            pkt[0..4].copy_from_slice(&(i as u32).to_le_bytes());
+            pkt[4..8].copy_from_slice(&(i as u32).to_le_bytes());
 
             if socket.send(&pkt).await.is_ok() {
                 sent += 1;
@@ -205,10 +205,10 @@ impl SpeedTest {
 
             // Non-blocking receive check
             let mut buf = [0u8; 2048];
-            if let Ok(result) =
+            if let Ok(Ok(len)) =
                 tokio::time::timeout(Duration::from_micros(100), socket.recv(&mut buf)).await
             {
-                if result.is_ok() {
+                if len >= 4 && buf[..4] == PONG_MAGIC {
                     received += 1;
                 }
             }
@@ -219,14 +219,18 @@ impl SpeedTest {
         while drain_start.elapsed() < Duration::from_millis(500) {
             let mut buf = [0u8; 2048];
             match tokio::time::timeout(Duration::from_millis(50), socket.recv(&mut buf)).await {
-                Ok(Ok(_)) => received += 1,
+                Ok(Ok(len)) => {
+                    if len >= 4 && buf[..4] == PONG_MAGIC {
+                        received += 1;
+                    }
+                }
                 _ => break,
             }
         }
 
         let duration = start.elapsed();
         let duration_ms = duration.as_millis() as u64;
-        let bytes_sent = sent * self.config.packet_size;
+        let bytes_sent = sent * packet_size;
         let throughput_mbps = (bytes_sent as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
         let packet_loss = if sent > 0 {
             ((sent - received) as f64 / sent as f64) * 100.0

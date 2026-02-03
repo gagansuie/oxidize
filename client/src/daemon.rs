@@ -67,16 +67,7 @@ pub fn install_daemon() -> Result<()> {
         cp "{}" /usr/local/bin/oxidize-daemon
         chmod +x /usr/local/bin/oxidize-daemon
         
-        # Create iptables rules script for NFQUEUE
-        cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
-#!/bin/bash
-QUEUE_NUM=0
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
-iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass
-RULES
-        chmod +x /etc/oxidize/nfqueue-rules.sh
-        
-        # Create systemd service (runs as root for NFQUEUE/iptables)
+        # Create systemd service (runs as root for TUN access)
         cat > /etc/systemd/system/oxidize-daemon.service << 'EOF'
 [Unit]
 Description=Oxidize Network Relay Daemon
@@ -85,9 +76,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/local/bin/oxidize-daemon
-ExecStopPost=/sbin/iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
@@ -212,7 +201,7 @@ pub fn install_daemon() -> Result<()> {
         New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
         Copy-Item "{}" -Destination "$targetDir\oxidize-daemon.exe" -Force
         
-        # Create Windows service (runs as LocalSystem for WinDivert access)
+        # Create Windows service (runs as LocalSystem for required privileges)
         sc.exe create OxidizeDaemon binPath= "$targetDir\oxidize-daemon.exe" DisplayName= "Oxidize Network Relay Daemon" start= auto obj= LocalSystem
         sc.exe failure OxidizeDaemon reset= 86400 actions= restart/5000/restart/10000/restart/30000
         sc.exe description OxidizeDaemon "Oxidize network relay daemon for traffic tunneling"

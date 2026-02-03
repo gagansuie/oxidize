@@ -175,12 +175,6 @@ uninstall_linux() {
     echo -e "${YELLOW}Removing runtime directories...${NC}"
     rm -rf /var/run/oxidize
 
-    echo -e "${YELLOW}Cleaning iptables NFQUEUE rules...${NC}"
-    iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
-    iptables -D OUTPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-    iptables -D OUTPUT -p udp --dport 67 -j ACCEPT 2>/dev/null || true
-    iptables -D OUTPUT -p udp --dport 68 -j ACCEPT 2>/dev/null || true
-
     echo -e "${YELLOW}Removing system user...${NC}"
     userdel oxidize 2>/dev/null || true
 
@@ -342,7 +336,7 @@ uninstall_windows() {
         Remove-Item -Path \"\$env:PUBLIC\\Desktop\\Oxidize.lnk\" -Force -ErrorAction SilentlyContinue
     " 2>/dev/null || true
     
-    # Clean WinDivert from PATH
+    # Clean Oxidize entries from PATH
     echo -e "${YELLOW}Cleaning system PATH...${NC}"
     powershell.exe -Command "
         \$path = [Environment]::GetEnvironmentVariable('Path', 'Machine')

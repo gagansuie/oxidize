@@ -25,3 +25,5 @@ hyper = { version = "0.14", features = ["full"] }
 libc = "0.2"
 ring = { workspace = true }
 rand = "0.8"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = { workspace = true }

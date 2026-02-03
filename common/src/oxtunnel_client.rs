@@ -1,7 +1,7 @@
 //! OxTunnel Client Integration
 //!
 //! Provides packet batching, optional encryption, and OxTunnel encapsulation
-//! for the daemon's NFQUEUE pipeline. Works with AF_XDP and optimized UDP.
+//! for the daemon's TUN pipeline. Works with optimized UDP.
 //!
 //! ## Performance Optimizations:
 //! - **Adaptive batch timeout**: Adjusts based on traffic rate (500µs-2000µs)
@@ -13,8 +13,6 @@ use crate::oxtunnel_protocol::{
     HEADER_SIZE, MAX_PACKET_SIZE,
 };
 use std::net::SocketAddr;
-#[cfg(target_os = "macos")]
-use std::os::fd::{AsRawFd, IntoRawFd};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -643,8 +641,8 @@ pub struct CaptureConfig {
     pub capture_icmp: bool,
     /// Exclude these destination IPs (e.g., relay server)
     pub exclude_ips: Vec<std::net::IpAddr>,
-    /// NFQUEUE number (Linux only)
-    pub queue_num: u16,
+    /// TUN device configuration (TUN mode)
+    pub tun_config: Option<crate::tun_device::TunConfig>,
     /// TUN file descriptor (Android/iOS only - provided by VpnService/NetworkExtension)
     pub tun_fd: Option<i32>,
 }
@@ -656,17 +654,19 @@ impl Default for CaptureConfig {
             capture_udp: true,
             capture_icmp: false,
             exclude_ips: Vec::new(),
-            queue_num: 0,
+            tun_config: Some(crate::tun_device::TunConfig::default()),
             tun_fd: None,
         }
     }
 }
 
 /// Cross-platform packet capture service
-/// Uses NFQUEUE on Linux, WinDivert on Windows, BPF on macOS
+/// Uses TUN (recommended) on all platforms
 pub struct PacketCaptureService {
     config: CaptureConfig,
     stop_flag: Arc<AtomicBool>,
+    /// TUN device (if using TUN mode)
+    tun_device: Option<Arc<std::sync::Mutex<crate::tun_device::TunDevice>>>,
 }
 
 impl PacketCaptureService {
@@ -674,7 +674,25 @@ impl PacketCaptureService {
         Self {
             config,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            tun_device: None,
         }
+    }
+
+    /// Create with existing TUN device (for sharing between capture and injection)
+    pub fn with_tun_device(
+        config: CaptureConfig,
+        tun_device: Arc<std::sync::Mutex<crate::tun_device::TunDevice>>,
+    ) -> Self {
+        Self {
+            config,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            tun_device: Some(tun_device),
+        }
+    }
+
+    /// Get TUN device (if in TUN mode)
+    pub fn tun_device(&self) -> Option<Arc<std::sync::Mutex<crate::tun_device::TunDevice>>> {
+        self.tun_device.clone()
     }
 
     /// Start packet capture, returns receiver for captured packets
@@ -695,589 +713,76 @@ impl PacketCaptureService {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 
-    /// Get the platform name for logging
+    /// Get the capture mode name for logging
+    pub fn mode_name(&self) -> &'static str {
+        "TUN"
+    }
+
+    /// Get the platform name for logging (legacy, use mode_name instead)
     pub fn platform_name() -> &'static str {
-        #[cfg(target_os = "linux")]
-        {
-            "NFQUEUE"
-        }
-        #[cfg(target_os = "windows")]
-        {
-            "WinDivert"
-        }
-        #[cfg(target_os = "macos")]
-        {
-            "BPF"
-        }
-        #[cfg(target_os = "android")]
-        {
-            "Android-VpnService"
-        }
-        #[cfg(target_os = "ios")]
-        {
-            "iOS-NetworkExtension"
-        }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "windows",
-            target_os = "macos",
-            target_os = "android",
-            target_os = "ios"
-        )))]
-        {
-            "Unsupported"
-        }
+        "TUN" // Default to TUN for new deployments
     }
 }
 
 // ============================================================================
-// Linux: NFQUEUE capture
+// Desktop platforms: TUN capture
 // ============================================================================
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn run_platform_capture(
     tx: mpsc::Sender<Vec<u8>>,
     stop_flag: Arc<AtomicBool>,
     config: CaptureConfig,
 ) {
-    use nfq::{Queue, Verdict};
-    use std::process::Command;
-
-    info!(
-        "📦 Linux NFQUEUE capture starting on queue {}...",
-        config.queue_num
-    );
-    info!(
-        "   TCP: {}, UDP: {}",
-        config.capture_tcp, config.capture_udp
-    );
-
-    // CRITICAL: Aggressively clean up ALL old iptables rules first to prevent accumulation
-    // This fixes the bug where rules accumulate on repeated connect/disconnect cycles
-    info!("📦 Cleaning up ALL existing NFQUEUE rules...");
-    let queue_num = config.queue_num.to_string();
-
-    // Remove ALL NFQUEUE rules (loop until none remain)
-    for _ in 0..100 {
-        let tcp_result = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output();
-        let udp_result = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output();
-        // Also try without --queue-bypass flag (older rules may not have it)
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-            ])
-            .output();
-
-        // Stop when both deletions fail (no more rules to delete)
-        let tcp_failed = tcp_result.map(|o| !o.status.success()).unwrap_or(true);
-        let udp_failed = udp_result.map(|o| !o.status.success()).unwrap_or(true);
-        if tcp_failed && udp_failed {
-            break;
-        }
-    }
-
-    // Remove ALL relay server exclusion rules (loop until none remain)
-    for ip in &config.exclude_ips {
-        for _ in 0..50 {
-            let result = Command::new("iptables")
-                .args(["-D", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
-                .output();
-            if result.map(|o| !o.status.success()).unwrap_or(true) {
-                break;
-            }
-        }
-        // Also clean INPUT rules
-        for _ in 0..50 {
-            let result = Command::new("iptables")
-                .args(["-D", "INPUT", "-s", &ip.to_string(), "-j", "ACCEPT"])
-                .output();
-            if result.map(|o| !o.status.success()).unwrap_or(true) {
-                break;
-            }
-        }
-    }
-
-    // Clean up old system exclusion rules (DNS, DHCP, etc.)
-    for _ in 0..10 {
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])
-            .output();
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D", "OUTPUT", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D", "OUTPUT", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D", "OUTPUT", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
-            .output();
-    }
-
-    info!("✅ Old iptables rules cleaned up");
-
-    // STEP 1: Add NFQUEUE rules FIRST (they will be at the bottom after exclusions are added)
-    // Using -A (append) instead of -I (insert) so exclusions added with -I come BEFORE
-    let mut rules_added = true;
-    if config.capture_udp
-        && Command::new("iptables")
-            .args([
-                "-A",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-    {
-        rules_added = false;
-    }
-    if config.capture_tcp
-        && Command::new("iptables")
-            .args([
-                "-A",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                &queue_num,
-                "--queue-bypass",
-            ])
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-    {
-        rules_added = false;
-    }
-
-    if rules_added {
-        info!("✅ iptables NFQUEUE rules added (appended to end of chain)");
-    } else {
-        warn!("⚠️ Failed to add some iptables rules - packet capture may not work");
-    }
-
-    // STEP 2: Add exclusion rules with -I (insert at TOP) so they come BEFORE NFQUEUE
-    // Order matters! These are inserted in reverse order (last inserted = first checked)
-
-    // Localhost traffic - never tunnel local traffic (inserted last = checked first)
-    let _ = Command::new("iptables")
-        .args(["-I", "OUTPUT", "1", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
-        .output();
-
-    // mDNS (port 5353) - local network discovery
-    let _ = Command::new("iptables")
-        .args([
-            "-I", "OUTPUT", "1", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
-        ])
-        .output();
-
-    // NTP (port 123) - required for time sync
-    let _ = Command::new("iptables")
-        .args([
-            "-I", "OUTPUT", "1", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
-        ])
-        .output();
-
-    // DHCP (port 67-68) - required for IP address renewal
-    let _ = Command::new("iptables")
-        .args([
-            "-I", "OUTPUT", "1", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
-        ])
-        .output();
-
-    // DNS (port 53) - required for name resolution
-    let _ = Command::new("iptables")
-        .args([
-            "-I", "OUTPUT", "1", "-p", "tcp", "--dport", "53", "-j", "ACCEPT",
-        ])
-        .output();
-    let _ = Command::new("iptables")
-        .args([
-            "-I", "OUTPUT", "1", "-p", "udp", "--dport", "53", "-j", "ACCEPT",
-        ])
-        .output();
-
-    // CRITICAL: Relay server exclusion - MUST be at the very top (inserted last)
-    // This ensures tunnel traffic to the relay server is NEVER captured by NFQUEUE
-    for ip in &config.exclude_ips {
-        // Insert at position 1 (top of chain) to guarantee it's checked first
-        let _ = Command::new("iptables")
-            .args(["-I", "OUTPUT", "1", "-d", &ip.to_string(), "-j", "ACCEPT"])
-            .output();
-        let _ = Command::new("iptables")
-            .args(["-I", "INPUT", "1", "-s", &ip.to_string(), "-j", "ACCEPT"])
-            .output();
-        info!(
-            "✅ Relay server {} excluded from capture (rule at top of chain)",
-            ip
-        );
-    }
-
-    info!("✅ System traffic excluded from tunnel (DNS, DHCP, NTP, mDNS, localhost)");
-
-    let mut queue = match Queue::open() {
-        Ok(q) => q,
-        Err(e) => {
-            error!("Failed to open NFQUEUE: {}", e);
-            cleanup_iptables_rules(&config);
-            return;
-        }
-    };
-
-    if let Err(e) = queue.bind(config.queue_num) {
-        error!("Failed to bind NFQUEUE {}: {}", config.queue_num, e);
-        cleanup_iptables_rules(&config);
-        return;
-    }
-
-    info!(
-        "✅ NFQUEUE bound to queue {} - capturing TCP+UDP packets",
-        config.queue_num
-    );
-
-    let mut packet_count: u64 = 0;
-    let mut last_log = std::time::Instant::now();
-
-    while !stop_flag.load(Ordering::Relaxed) {
-        match queue.recv() {
-            Ok(mut msg) => {
-                let payload = msg.get_payload().to_vec();
-
-                // Send packet through tunnel channel (non-blocking)
-                match tx.try_send(payload) {
-                    Ok(_) => {
-                        packet_count += 1;
-                        // DROP the original packet - it will be forwarded through the tunnel
-                        msg.set_verdict(Verdict::Drop);
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // Channel is full: drop this packet to keep tunnel-only behavior
-                        msg.set_verdict(Verdict::Drop);
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        warn!("Tunnel channel closed - stopping capture");
-                        stop_flag.store(true, Ordering::Relaxed);
-                        msg.set_verdict(Verdict::Accept);
-                    }
-                }
-                let _ = queue.verdict(msg);
-
-                // Log progress every 10 seconds
-                if last_log.elapsed().as_secs() >= 10 {
-                    let pps = packet_count as f64 / last_log.elapsed().as_secs_f64();
-                    info!("📦 NFQUEUE: {} packets, {:.0} pps", packet_count, pps);
-                    last_log = std::time::Instant::now();
-                }
-            }
-            Err(e) => {
-                if !stop_flag.load(Ordering::Relaxed) {
-                    warn!("NFQUEUE recv error: {}", e);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-    }
-
-    // Clean up iptables rules on exit
-    cleanup_iptables_rules(&config);
-    info!("📦 NFQUEUE capture stopped after {} packets", packet_count);
-}
-
-#[cfg(target_os = "linux")]
-fn cleanup_iptables_rules(config: &CaptureConfig) {
-    use std::process::Command;
-
-    info!("📦 Cleaning up iptables NFQUEUE rules...");
-    let queue_num = config.queue_num.to_string();
-
-    // Clean up system traffic exclusion rules
-    let _ = Command::new("iptables")
-        .args(["-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])
-        .output();
-    let _ = Command::new("iptables")
-        .args(["-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"])
-        .output();
-    let _ = Command::new("iptables")
-        .args([
-            "-D", "OUTPUT", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
-        ])
-        .output();
-    let _ = Command::new("iptables")
-        .args([
-            "-D", "OUTPUT", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
-        ])
-        .output();
-    let _ = Command::new("iptables")
-        .args([
-            "-D", "OUTPUT", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
-        ])
-        .output();
-    let _ = Command::new("iptables")
-        .args(["-D", "OUTPUT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
-        .output();
-
-    // Clean up exclusion rules (both directions)
-    for ip in &config.exclude_ips {
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-d", &ip.to_string(), "-j", "ACCEPT"])
-            .output();
-        let _ = Command::new("iptables")
-            .args(["-D", "INPUT", "-s", &ip.to_string(), "-j", "ACCEPT"])
-            .output();
-    }
-
-    // Clean up NFQUEUE rules from OUTPUT chain (and INPUT for backwards compat)
-    for chain in &["OUTPUT", "INPUT"] {
-        if config.capture_tcp {
-            let _ = Command::new("iptables")
-                .args([
-                    "-D",
-                    chain,
-                    "-p",
-                    "tcp",
-                    "-j",
-                    "NFQUEUE",
-                    "--queue-num",
-                    &queue_num,
-                    "--queue-bypass",
-                ])
-                .output();
-        }
-        if config.capture_udp {
-            let _ = Command::new("iptables")
-                .args([
-                    "-D",
-                    chain,
-                    "-p",
-                    "udp",
-                    "-j",
-                    "NFQUEUE",
-                    "--queue-num",
-                    &queue_num,
-                    "--queue-bypass",
-                ])
-                .output();
-        }
-    }
+    run_tun_capture(tx, stop_flag, config);
 }
 
 // ============================================================================
-// Windows: WinDivert capture
+// TUN capture (full TCP/UDP/ICMP coverage)
 // ============================================================================
-#[cfg(target_os = "windows")]
-fn run_platform_capture(
-    tx: mpsc::Sender<Vec<u8>>,
-    stop_flag: Arc<AtomicBool>,
-    config: CaptureConfig,
-) {
-    use windivert::prelude::*;
-
-    info!("📦 Windows WinDivert capture starting...");
-
-    // Build filter based on config
-    let mut filter_parts = Vec::new();
-    if config.capture_tcp {
-        filter_parts.push("tcp");
-    }
-    if config.capture_udp {
-        filter_parts.push("udp");
-    }
-
-    let filter = format!("outbound and ({})", filter_parts.join(" or "));
-
-    let handle = match WinDivert::network(&filter, 0, WinDivertFlags::new()) {
-        Ok(h) => h,
-        Err(e) => {
-            error!("Failed to open WinDivert: {}", e);
-            return;
-        }
-    };
-
-    info!("✅ WinDivert opened with filter: {}", filter);
-
-    let mut packet_count: u64 = 0;
-    let mut last_log = std::time::Instant::now();
-
-    while !stop_flag.load(Ordering::Relaxed) {
-        match handle.recv(None) {
-            Ok(packet) => {
-                let data = packet.data.to_vec();
-
-                match tx.try_send(data) {
-                    Ok(_) => {
-                        packet_count += 1;
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // Channel full: drop this packet from tunnel capture only
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        warn!("Tunnel channel closed - stopping capture");
-                        stop_flag.store(true, Ordering::Relaxed);
-                    }
-                }
-
-                // Re-inject packet to allow normal traffic flow
-                let _ = handle.send(&packet);
-
-                if last_log.elapsed().as_secs() >= 10 {
-                    let pps = packet_count as f64 / last_log.elapsed().as_secs_f64();
-                    info!("📦 WinDivert: {} packets, {:.0} pps", packet_count, pps);
-                    last_log = std::time::Instant::now();
-                }
-            }
-            Err(e) => {
-                if !stop_flag.load(Ordering::Relaxed) {
-                    warn!("WinDivert recv error: {}", e);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-    }
-
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn run_tun_capture(tx: mpsc::Sender<Vec<u8>>, stop_flag: Arc<AtomicBool>, config: CaptureConfig) {
+    info!("📦 TUN capture starting...");
     info!(
-        "📦 WinDivert capture stopped after {} packets",
-        packet_count
+        "   TCP: {}, UDP: {}, ICMP: {}",
+        config.capture_tcp, config.capture_udp, config.capture_icmp
     );
-}
 
-// ============================================================================
-// macOS: BPF capture
-// ============================================================================
-#[cfg(target_os = "macos")]
-fn run_platform_capture(
-    tx: mpsc::Sender<Vec<u8>>,
-    stop_flag: Arc<AtomicBool>,
-    config: CaptureConfig,
-) {
-    use std::io::Read;
-
-    info!("📦 macOS BPF capture starting...");
-
-    // Find available BPF device
-    let bpf_path = (0..256)
-        .map(|i| format!("/dev/bpf{}", i))
-        .find(|path| std::path::Path::new(path).exists());
-
-    let bpf_path = match bpf_path {
-        Some(p) => p,
-        None => {
-            error!("No available BPF device found");
-            return;
-        }
-    };
-
-    let mut bpf_file = match std::fs::File::open(&bpf_path) {
-        Ok(f) => f,
+    // Create TUN device
+    let tun_config = config.tun_config.unwrap_or_default();
+    let mut tun_device = match crate::tun_device::TunDevice::new(tun_config) {
+        Ok(dev) => dev,
         Err(e) => {
-            error!("Failed to open BPF device {}: {}", bpf_path, e);
+            error!("Failed to create TUN device: {}", e);
             return;
         }
     };
 
-    info!("✅ BPF device opened: {}", bpf_path);
+    info!("✅ TUN device {} ready for capture", tun_device.name());
 
-    let mut packet_count: u64 = 0;
-    let mut last_log = std::time::Instant::now();
+    // Read packets from TUN device
     let mut buf = vec![0u8; 65536];
-
     while !stop_flag.load(Ordering::Relaxed) {
-        match bpf_file.read(&mut buf) {
-            Ok(len) if len > 0 => {
-                let payload = buf[..len].to_vec();
-
-                match tx.try_send(payload) {
-                    Ok(_) => {
-                        packet_count += 1;
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // Channel full: drop this packet from tunnel capture only
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        warn!("Tunnel channel closed - stopping capture");
-                        stop_flag.store(true, Ordering::Relaxed);
+        match tun_device.read(&mut buf) {
+            Ok(len) => {
+                if len > 0 {
+                    let packet = buf[..len].to_vec();
+                    if tx.blocking_send(packet).is_err() {
+                        debug!("TUN capture: channel closed");
+                        break;
                     }
                 }
-
-                if last_log.elapsed().as_secs() >= 10 {
-                    let pps = packet_count as f64 / last_log.elapsed().as_secs_f64();
-                    info!("📦 BPF: {} packets, {:.0} pps", packet_count, pps);
-                    last_log = std::time::Instant::now();
-                }
-            }
-            Ok(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
             }
             Err(e) => {
-                if !stop_flag.load(Ordering::Relaxed) {
-                    warn!("BPF read error: {}", e);
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
                 }
+                warn!("TUN read error: {}", e);
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
     }
 
-    info!("📦 BPF capture stopped after {} packets", packet_count);
+    info!("TUN capture stopped");
 }
 
 // ============================================================================
@@ -1474,7 +979,7 @@ fn run_platform_capture(
     _config: CaptureConfig,
 ) {
     error!("❌ Packet capture not supported on this platform");
-    error!("   Supported: Linux (NFQUEUE), Windows (WinDivert), macOS (BPF), Android (VpnService), iOS (NetworkExtension)");
+    error!("   Supported: TUN/tunnel APIs (Linux/macOS/Windows/Android/iOS)");
 }
 
 // ============================================================================
@@ -1532,26 +1037,14 @@ impl OxTunnelPipeline {
 // ============================================================================
 
 /// Response injector for injecting tunnel responses into the local network stack
-/// Uses raw sockets on Linux, WinDivert on Windows, utun on macOS, TUN on Android/iOS
+/// TUN injection path (desktop TUN device or mobile fd)
 pub struct ResponseInjector {
-    #[cfg(target_os = "linux")]
-    raw_socket_v4: Option<std::os::unix::io::RawFd>,
-    #[cfg(target_os = "linux")]
-    raw_socket_v6: Option<std::os::unix::io::RawFd>,
-    #[cfg(target_os = "macos")]
-    utun_fd: Option<std::os::unix::io::RawFd>,
-    #[cfg(target_os = "windows")]
-    windivert_handle: Option<WinDivertInjector>,
+    /// TUN device for injection (desktop platforms)
+    tun_device: Option<Arc<std::sync::Mutex<crate::tun_device::TunDevice>>>,
+    /// TUN fd (Android/iOS - provided by VpnService/NetworkExtension)
     #[cfg(any(target_os = "android", target_os = "ios"))]
     tun_fd: Option<i32>,
     stats: Arc<ResponseInjectorStats>,
-}
-
-/// Windows WinDivert injector wrapper
-#[cfg(target_os = "windows")]
-pub struct WinDivertInjector {
-    // WinDivert handle stored for injection
-    // Note: actual injection uses WinDivert::send()
 }
 
 #[derive(Default)]
@@ -1562,80 +1055,26 @@ pub struct ResponseInjectorStats {
 }
 
 impl ResponseInjector {
-    /// Create a new response injector
+    /// Create a new response injector (configure with TUN backend)
     pub fn new() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            let raw_socket_v4 = Self::create_raw_socket_v4();
-            let raw_socket_v6 = Self::create_raw_socket_v6();
-
-            if raw_socket_v4.is_some() {
-                info!("✅ Response injector: IPv4 raw socket created");
-            } else {
-                warn!(
-                    "⚠️ Response injector: Failed to create IPv4 raw socket (requires CAP_NET_RAW)"
-                );
-            }
-            if raw_socket_v6.is_some() {
-                info!("✅ Response injector: IPv6 raw socket created");
-            } else {
-                warn!(
-                    "⚠️ Response injector: Failed to create IPv6 raw socket (requires CAP_NET_RAW)"
-                );
-            }
-
-            Self {
-                raw_socket_v4,
-                raw_socket_v6,
-                stats: Arc::new(ResponseInjectorStats::default()),
-            }
+        Self {
+            tun_device: None,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            tun_fd: None,
+            stats: Arc::new(ResponseInjectorStats::default()),
         }
+    }
 
-        #[cfg(target_os = "macos")]
-        {
-            let utun_fd = Self::create_utun_socket();
-            if utun_fd.is_some() {
-                info!("✅ Response injector: macOS utun socket created");
-            } else {
-                warn!("⚠️ Response injector: Failed to create utun socket (requires root)");
-            }
-            Self {
-                utun_fd,
-                stats: Arc::new(ResponseInjectorStats::default()),
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            info!("✅ Response injector: Windows WinDivert mode");
-            Self {
-                windivert_handle: Some(WinDivertInjector {}),
-                stats: Arc::new(ResponseInjectorStats::default()),
-            }
-        }
-
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        {
-            // TUN fd will be set by the mobile app via set_tun_fd()
-            info!("✅ Response injector: Mobile TUN mode (fd will be provided by app)");
-            Self {
-                tun_fd: None,
-                stats: Arc::new(ResponseInjectorStats::default()),
-            }
-        }
-
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows",
-            target_os = "android",
-            target_os = "ios"
-        )))]
-        {
-            warn!("⚠️ Response injector: Platform not supported");
-            Self {
-                stats: Arc::new(ResponseInjectorStats::default()),
-            }
+    /// Create response injector with TUN device (recommended)
+    pub fn with_tun_device(
+        tun_device: Arc<std::sync::Mutex<crate::tun_device::TunDevice>>,
+    ) -> Self {
+        info!("✅ Response injector: TUN mode");
+        Self {
+            tun_device: Some(tun_device),
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            tun_fd: None,
+            stats: Arc::new(ResponseInjectorStats::default()),
         }
     }
 
@@ -1646,52 +1085,6 @@ impl ResponseInjector {
         info!("✅ Response injector: TUN fd set to {}", fd);
     }
 
-    #[cfg(target_os = "linux")]
-    fn create_raw_socket_v4() -> Option<std::os::unix::io::RawFd> {
-        use std::os::unix::io::IntoRawFd;
-
-        match socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::RAW,
-            Some(socket2::Protocol::from(libc::IPPROTO_RAW)),
-        ) {
-            Ok(sock) => {
-                // Set IP_HDRINCL so we can provide the full IP header
-                if sock.set_header_included_v4(true).is_err() {
-                    warn!("Failed to set IP_HDRINCL on raw socket");
-                }
-                Some(sock.into_raw_fd())
-            }
-            Err(e) => {
-                debug!(
-                    "Failed to create raw IPv4 socket: {} (requires CAP_NET_RAW)",
-                    e
-                );
-                None
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn create_raw_socket_v6() -> Option<std::os::unix::io::RawFd> {
-        use std::os::unix::io::IntoRawFd;
-
-        match socket2::Socket::new(
-            socket2::Domain::IPV6,
-            socket2::Type::RAW,
-            Some(socket2::Protocol::from(libc::IPPROTO_RAW)),
-        ) {
-            Ok(sock) => Some(sock.into_raw_fd()),
-            Err(e) => {
-                debug!(
-                    "Failed to create raw IPv6 socket: {} (requires CAP_NET_RAW)",
-                    e
-                );
-                None
-            }
-        }
-    }
-
     /// Inject a response packet into the local network stack
     /// The packet should be a complete IP packet (with IP header)
     pub fn inject(&self, packet: &[u8]) -> Result<(), String> {
@@ -1700,239 +1093,54 @@ impl ResponseInjector {
         }
 
         let version = (packet[0] >> 4) & 0x0F;
-
         match version {
-            4 => self.inject_ipv4(packet),
-            6 => self.inject_ipv6(packet),
-            _ => Err(format!("Unknown IP version: {}", version)),
+            4 if packet.len() < 20 => return Err("IPv4 packet too short".to_string()),
+            6 if packet.len() < 40 => return Err("IPv6 packet too short".to_string()),
+            4 | 6 => {}
+            _ => return Err(format!("Unknown IP version: {}", version)),
         }
+
+        if let Some(ref tun_device) = self.tun_device {
+            return self.inject_to_tun(tun_device, packet);
+        }
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            if let Some(fd) = self.tun_fd {
+                return self.inject_to_tun_fd(fd, packet);
+            }
+        }
+
+        Err("No injection backend configured".to_string())
     }
 
-    #[cfg(target_os = "linux")]
-    fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
-        if packet.len() < 20 {
-            return Err("IPv4 packet too short".to_string());
-        }
+    /// Inject packet to TUN device (all platforms)
+    fn inject_to_tun(
+        &self,
+        tun_device: &Arc<std::sync::Mutex<crate::tun_device::TunDevice>>,
+        packet: &[u8],
+    ) -> Result<(), String> {
+        let mut tun = tun_device
+            .lock()
+            .map_err(|e| format!("TUN lock error: {}", e))?;
 
-        let fd = self.raw_socket_v4.ok_or("No IPv4 raw socket available")?;
-
-        // Extract destination IP from packet header (bytes 16-19)
-        let dst_ip = std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-
-        // Create destination sockaddr
-        let dest_addr =
-            socket2::SockAddr::from(std::net::SocketAddr::new(std::net::IpAddr::V4(dst_ip), 0));
-
-        let result = unsafe {
-            libc::sendto(
-                fd,
-                packet.as_ptr() as *const libc::c_void,
-                packet.len(),
-                0,
-                dest_addr.as_ptr(),
-                dest_addr.len() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            let errno = std::io::Error::last_os_error();
-            self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-            Err(format!("IPv4 injection failed: {}", errno))
-        } else {
-            self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
-            self.stats
-                .bytes_injected
-                .fetch_add(packet.len() as u64, Ordering::Relaxed);
-            Ok(())
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn inject_ipv6(&self, packet: &[u8]) -> Result<(), String> {
-        if packet.len() < 40 {
-            return Err("IPv6 packet too short".to_string());
-        }
-
-        let fd = self.raw_socket_v6.ok_or("No IPv6 raw socket available")?;
-
-        // Extract destination IP from packet header (bytes 24-39)
-        let mut dst_bytes = [0u8; 16];
-        dst_bytes.copy_from_slice(&packet[24..40]);
-        let dst_ip = std::net::Ipv6Addr::from(dst_bytes);
-
-        let dest_addr =
-            socket2::SockAddr::from(std::net::SocketAddr::new(std::net::IpAddr::V6(dst_ip), 0));
-
-        let result = unsafe {
-            libc::sendto(
-                fd,
-                packet.as_ptr() as *const libc::c_void,
-                packet.len(),
-                0,
-                dest_addr.as_ptr(),
-                dest_addr.len() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            let errno = std::io::Error::last_os_error();
-            self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-            Err(format!("IPv6 injection failed: {}", errno))
-        } else {
-            self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
-            self.stats
-                .bytes_injected
-                .fetch_add(packet.len() as u64, Ordering::Relaxed);
-            Ok(())
-        }
-    }
-
-    // ========================================================================
-    // macOS Implementation - utun device
-    // ========================================================================
-
-    #[cfg(target_os = "macos")]
-    fn create_utun_socket() -> Option<std::os::unix::io::RawFd> {
-        use std::os::unix::io::IntoRawFd;
-
-        // On macOS, we use a raw socket with IP_HDRINCL for injection
-        // utun requires more setup, so we use raw sockets similar to Linux
-        match socket2::Socket::new(
-            socket2::Domain::IPV4,
-            socket2::Type::RAW,
-            Some(socket2::Protocol::from(libc::IPPROTO_RAW)),
-        ) {
-            Ok(sock) => {
-                // Set IP_HDRINCL so we provide the full IP header
-                let enable: libc::c_int = 1;
-                unsafe {
-                    libc::setsockopt(
-                        sock.as_raw_fd(),
-                        libc::IPPROTO_IP,
-                        libc::IP_HDRINCL,
-                        &enable as *const _ as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    );
-                }
-                Some(sock.into_raw_fd())
+        match tun.write(packet) {
+            Ok(_) => {
+                self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_injected
+                    .fetch_add(packet.len() as u64, Ordering::Relaxed);
+                Ok(())
             }
             Err(e) => {
-                debug!("Failed to create macOS raw socket: {} (requires root)", e);
-                None
+                self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
+                Err(format!("TUN write error: {}", e))
             }
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
-        if packet.len() < 20 {
-            return Err("IPv4 packet too short".to_string());
-        }
-
-        let fd = self.utun_fd.ok_or("No macOS socket available")?;
-
-        // Extract destination IP from packet header (bytes 16-19)
-        let dst_ip = std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-        let dest_addr =
-            socket2::SockAddr::from(std::net::SocketAddr::new(std::net::IpAddr::V4(dst_ip), 0));
-
-        let result = unsafe {
-            libc::sendto(
-                fd,
-                packet.as_ptr() as *const libc::c_void,
-                packet.len(),
-                0,
-                dest_addr.as_ptr(),
-                dest_addr.len() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            let errno = std::io::Error::last_os_error();
-            self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-            Err(format!("macOS IPv4 injection failed: {}", errno))
-        } else {
-            self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
-            self.stats
-                .bytes_injected
-                .fetch_add(packet.len() as u64, Ordering::Relaxed);
-            Ok(())
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn inject_ipv6(&self, packet: &[u8]) -> Result<(), String> {
-        if packet.len() < 40 {
-            return Err("IPv6 packet too short".to_string());
-        }
-        // macOS IPv6 raw socket injection
-        // For now, log and skip - full implementation needs separate IPv6 socket
-        self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-        Err("macOS IPv6 injection requires additional setup".to_string())
-    }
-
-    // ========================================================================
-    // Windows Implementation - WinDivert
-    // ========================================================================
-
-    #[cfg(target_os = "windows")]
-    fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
-        use windivert::address::{WinDivertAddress, WinDivertNetworkData};
-        use windivert::layer::WinDivertDirection;
-        use windivert::prelude::*;
-
-        if packet.len() < 20 {
-            return Err("IPv4 packet too short".to_string());
-        }
-
-        // Create a temporary WinDivert handle for injection
-        // Filter "false" means we only inject, don't capture
-        let handle = WinDivert::network("false", 0, WinDivertFlags::new().set_send_only())
-            .map_err(|e| format!("WinDivert open failed: {}", e))?;
-
-        // Create WinDivert packet with inbound direction (response coming in)
-        let wd_packet = WinDivertPacket {
-            data: packet.to_vec().into(),
-            address: WinDivertAddress::Network(WinDivertNetworkData {
-                if_idx: 0,
-                sub_if_idx: 0,
-                direction: WinDivertDirection::Inbound,
-                ..Default::default()
-            }),
-        };
-
-        handle
-            .send(&wd_packet)
-            .map_err(|e| format!("WinDivert send failed: {}", e))?;
-
-        self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .bytes_injected
-            .fetch_add(packet.len() as u64, Ordering::Relaxed);
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn inject_ipv6(&self, packet: &[u8]) -> Result<(), String> {
-        // Windows WinDivert handles IPv6 the same way
-        self.inject_ipv4(packet)
-    }
-
-    // ========================================================================
-    // Android/iOS Implementation - TUN device
-    // ========================================================================
-
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    fn inject_ipv4(&self, packet: &[u8]) -> Result<(), String> {
-        if packet.len() < 20 {
-            return Err("IPv4 packet too short".to_string());
-        }
-
-        let fd = self
-            .tun_fd
-            .ok_or("TUN fd not set - call set_tun_fd() first")?;
-
-        // Write directly to TUN device
+    fn inject_to_tun_fd(&self, fd: i32, packet: &[u8]) -> Result<(), String> {
         let result =
             unsafe { libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
 
@@ -1947,61 +1155,6 @@ impl ResponseInjector {
                 .fetch_add(packet.len() as u64, Ordering::Relaxed);
             Ok(())
         }
-    }
-
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    fn inject_ipv6(&self, packet: &[u8]) -> Result<(), String> {
-        if packet.len() < 40 {
-            return Err("IPv6 packet too short".to_string());
-        }
-
-        let fd = self
-            .tun_fd
-            .ok_or("TUN fd not set - call set_tun_fd() first")?;
-
-        // Write directly to TUN device (same as IPv4)
-        let result =
-            unsafe { libc::write(fd, packet.as_ptr() as *const libc::c_void, packet.len()) };
-
-        if result < 0 {
-            let errno = std::io::Error::last_os_error();
-            self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-            Err(format!("TUN write failed: {}", errno))
-        } else {
-            self.stats.packets_injected.fetch_add(1, Ordering::Relaxed);
-            self.stats
-                .bytes_injected
-                .fetch_add(packet.len() as u64, Ordering::Relaxed);
-            Ok(())
-        }
-    }
-
-    // ========================================================================
-    // Unsupported platforms
-    // ========================================================================
-
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        target_os = "ios"
-    )))]
-    fn inject_ipv4(&self, _packet: &[u8]) -> Result<(), String> {
-        self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-        Err("IPv4 injection not supported on this platform".to_string())
-    }
-
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "windows",
-        target_os = "android",
-        target_os = "ios"
-    )))]
-    fn inject_ipv6(&self, _packet: &[u8]) -> Result<(), String> {
-        self.stats.injection_errors.fetch_add(1, Ordering::Relaxed);
-        Err("IPv6 injection not supported on this platform".to_string())
     }
 
     /// Get injection statistics
@@ -2011,67 +1164,22 @@ impl ResponseInjector {
 
     /// Check if the injector is functional
     pub fn is_available(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            self.raw_socket_v4.is_some() || self.raw_socket_v6.is_some()
+        if self.tun_device.is_some() {
+            return true;
         }
-        #[cfg(target_os = "macos")]
-        {
-            self.utun_fd.is_some()
-        }
-        #[cfg(target_os = "windows")]
-        {
-            self.windivert_handle.is_some()
-        }
+
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
-            self.tun_fd.is_some()
+            return self.tun_fd.is_some();
         }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows",
-            target_os = "android",
-            target_os = "ios"
-        )))]
-        {
-            false
-        }
+
+        false
     }
 }
 
 impl Default for ResponseInjector {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for ResponseInjector {
-    fn drop(&mut self) {
-        if let Some(fd) = self.raw_socket_v4 {
-            unsafe { libc::close(fd) };
-        }
-        if let Some(fd) = self.raw_socket_v6 {
-            unsafe { libc::close(fd) };
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for ResponseInjector {
-    fn drop(&mut self) {
-        if let Some(fd) = self.utun_fd {
-            unsafe { libc::close(fd) };
-        }
-    }
-}
-
-#[cfg(any(target_os = "android", target_os = "ios"))]
-impl Drop for ResponseInjector {
-    fn drop(&mut self) {
-        // TUN fd is owned by the app, we don't close it
-        // The app is responsible for closing the TUN device
     }
 }
 
@@ -2173,5 +1281,45 @@ mod tests {
         let regular_packet = vec![0x45; 100];
         let (immediate, _batch) = encap.add_to_batch_traffic_aware(&regular_packet);
         assert!(immediate.is_none()); // Regular packet batched
+    }
+
+    #[test]
+    fn test_inject_empty_packet() {
+        let injector = ResponseInjector::new();
+        let err = injector.inject(&[]).unwrap_err();
+        assert!(err.contains("Empty packet"));
+    }
+
+    #[test]
+    fn test_inject_invalid_version() {
+        let injector = ResponseInjector::new();
+        let packet = vec![0x00; 20];
+        let err = injector.inject(&packet).unwrap_err();
+        assert!(err.contains("Unknown IP version"));
+    }
+
+    #[test]
+    fn test_inject_short_ipv4() {
+        let injector = ResponseInjector::new();
+        let packet = vec![0x45; 10];
+        let err = injector.inject(&packet).unwrap_err();
+        assert!(err.contains("IPv4 packet too short"));
+    }
+
+    #[test]
+    fn test_inject_short_ipv6() {
+        let injector = ResponseInjector::new();
+        let packet = vec![0x60; 20];
+        let err = injector.inject(&packet).unwrap_err();
+        assert!(err.contains("IPv6 packet too short"));
+    }
+
+    #[test]
+    fn test_inject_missing_tun() {
+        let injector = ResponseInjector::new();
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        let err = injector.inject(&packet).unwrap_err();
+        assert!(err.contains("No injection backend configured"));
     }
 }

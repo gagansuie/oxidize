@@ -2,57 +2,43 @@
 
 OxTunnel is Oxidize's **unified cross-platform** tunnel protocol for desktop and mobile connectivity. It replaces WireGuard with a lighter, faster implementation optimized for modern networks and works seamlessly across all platforms.
 
-> **Full Traffic Support**: OxTunnel tunnels **both TCP and UDP** traffic through AF_XDP/UDP, ensuring all your network activity benefits from Oxidize's optimizations.
+> **Full Traffic Support**: OxTunnel tunnels **TCP/UDP/ICMP** via TUN/tunnel APIs, with **AF_XDP/FLASH required on Linux servers** and a **userspace fast path on clients**.
 
 ## Unified Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        OxTunnel Unified Protocol                        │
+│                        OxTunnel v3 Unified Protocol                      │
 ├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
-│  │   Desktop   │    │   Mobile    │    │   Mobile    │                 │
-│  │   (Linux)   │    │  (Android)  │    │    (iOS)    │                 │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘                 │
-│         │                  │                  │                         │
-│  ┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐                 │
-│  │  NFQUEUE    │    │ VpnService  │    │ NEPacketTun │                 │
-│  │  Capture    │    │   Capture   │    │   Capture   │                 │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘                 │
-│         │                  │                  │                         │
-│         └────────────┬─────┴──────────────────┘                         │
-│                      │                                                  │
-│              ┌───────▼───────┐                                          │
-│              │   OxTunnel    │  ◄── Unified packet encapsulation        │
-│              │   Batching    │      (9-byte header, optional crypto)    │
-│              └───────┬───────┘                                          │
-│                      │                                                  │
-│         ┌────────────┼────────────┐                                     │
-│         │            │            │                                     │
-│  ┌──────▼──────┐ ┌───▼───┐ ┌──────▼──────┐                             │
-│  │   AF_XDP    │ │  UDP  │ │    UDP      │                             │
-│  │  (Linux)    │ │(Other)│ │  (Mobile)   │                             │
-│  │  Zero-Copy  │ │       │ │             │                             │
-│  └──────┬──────┘ └───┬───┘ └──────┬──────┘                             │
-│         │            │            │                                     │
-│         └────────────┴────────────┘                                     │
-│                      │                                                  │
-│              ┌───────▼───────┐                                          │
-│              │  Relay Server │                                          │
-│              │  (Unified)    │                                          │
-│              └───────────────┘                                          │
-│                                                                         │
+│  Desktop Clients                           Mobile Clients                │
+│  ┌─────────────┐                           ┌──────────────┐              │
+│  │   Apps      │                           │    Apps      │              │
+│  └──────┬──────┘                           └──────┬───────┘              │
+│         │                                          │                     │
+│  ┌──────▼──────┐                           ┌──────▼───────┐             │
+│  │ TUN/utun/   │                           │ VpnService/  │             │
+│  │ Wintun      │                           │ NEPacketTun  │             │
+│  └──────┬──────┘                           └──────┬───────┘             │
+│         └───────────────┬─────────────────────────┘                     │
+│                         ▼                                               │
+│              Userspace classifier + fast path                           │
+│              (flow scoring, FEC hints, SIMD parsing)                    │
+│                         ▼                                               │
+│                  OxTunnel v3 header + batching                          │
+│                         ▼                                               │
+│               UDP → QUIC → TCP transport fallback                       │
+│                         ▼                                               │
+│                Relay server (Linux AF_XDP/FLASH)                        │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key Benefits:**
-- **Same protocol** on desktop, Android, and iOS
-- **AF_XDP primary** on Linux for kernel bypass (18-25 Gbps)
-- **Optimized UDP** for macOS/Windows/mobile
-- **Single server** handles all client types
+- **Same protocol** on desktop and mobile
+- **TUN everywhere** for full TCP/UDP/ICMP coverage
+- **AF_XDP/FLASH required on Linux servers** for maximum throughput
+- **Client path** — TUN/tunnel APIs only (no OS-specific kernel bypass)
 - **Dual-stack IPv4/IPv6** - server binds to `[::]:51820` for both
-- **TCP fallback** on port 51821 for restrictive networks (firewalls blocking UDP)
+- **Transport fallback**: UDP → QUIC → TCP (full-duplex)
 
 ## Why OxTunnel?
 
@@ -62,26 +48,29 @@ WireGuard is excellent, but has limitations for our use case:
 |------------|-----------|-------------------|
 | Mandatory encryption | Always ChaCha20-Poly1305 | Optional - skip on trusted networks |
 | Complex handshake | Multi-round Noise protocol | Single round-trip |
-| Header overhead | 32+ bytes | 9 bytes |
+| Header overhead | 32+ bytes | 12 bytes (v3 metadata) |
 | Buffer allocation | malloc per packet | Zero-copy pool |
 | Batch processing | Not supported | Native batching |
 
 ## Protocol Specification
 
-### Packet Header (9 bytes)
+### Packet Header (v3 metadata, 12 bytes)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Magic (2)  │  Flags (1)  │  SeqNum (4)  │  Length (2)     │
-├─────────────────────────────────────────────────────────────┤
-│    0x4F58   │   0bXXXXXXXX │   uint32_be  │   uint16_be     │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Magic (2) │ Ver/Flags (1) │ Importance (1) │ FlowID (4) │ FEC (1) │ Path (1) │ Len (2) │
+├────────────────────────────────────────────────────────────────────────────┤
+│ 0x4F58    │ 0bVVVFFFFF    │ 0-255          │ uint32_be  │ 0-255   │ 0-255    │ u16_be  │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Magic**: `0x4F58` ("OX" for Oxidize) - Protocol identification
-- **Flags**: Bitfield for packet options
-- **SeqNum**: 32-bit sequence number for ordering/dedup
-- **Length**: Payload length in bytes
+- **Magic**: `0x4F58` ("OX" for Oxidize)
+- **Ver/Flags**: High bits encode version (v3 = `0b011`), low bits encode flags
+- **Importance**: 0-255 traffic priority used by the userspace classifier
+- **FlowID**: 32-bit flow identifier for per-flow routing/FEC decisions
+- **FEC**: Redundancy level (0-255)
+- **Path**: Path hint (0-255) for multipath routing
+- **Len**: Payload length in bytes
 
 ### Flags
 
@@ -199,7 +188,7 @@ mobile_tunnel_port = 51820
 
 | Metric | WireGuard | OxTunnel | Improvement |
 |--------|-----------|----------|-------------|
-| Header overhead | 32 bytes | 9 bytes | **72% smaller** |
+| Header overhead | 32 bytes | 12 bytes (v3 metadata) | **~62% smaller** |
 | Handshake RTT | 2-3 | 1 | **50-66% faster** |
 | Encryption (optional) | Always | Skip when safe | **~40% faster** |
 | Buffer allocation | malloc/packet | Zero-copy | **Lower CPU** |
@@ -244,14 +233,16 @@ OxTunnel is specifically optimized for mobile:
 
 ## Cross-Platform Support
 
-| Platform | Capture | Protocols | Transport | IPv6 | TCP Fallback | Status |
-|----------|---------|-----------|-----------|------|--------------|--------|
-| Linux (server) | - | TCP + UDP + ICMP | AF_XDP | ✅ | ✅ Port 51821 | ✅ Full support |
-| Linux (client) | NFQUEUE | TCP + UDP + ICMP | AF_XDP/UDP | ✅ | ✅ Auto | ✅ Full support |
-| macOS | PF/Utun | TCP + UDP + ICMP | Optimized UDP | ✅ | ✅ Auto | ✅ Full support |
-| Windows | WinDivert | TCP + UDP + ICMP | Optimized UDP | ✅ | ✅ Auto | ✅ Full support |
-| Android | VpnService | TCP + UDP + ICMP | UDP | ✅ | ✅ Auto | ✅ Full support |
-| iOS | NEPacketTunnel | TCP + UDP + ICMP | UDP | ✅ | ✅ Auto | ✅ Full support |
+| Platform | Capture | Protocols | Transport | IPv6 | Fallback | Status |
+|----------|---------|-----------|-----------|------|----------|--------|
+| Linux (server) | - | TCP + UDP + ICMP | AF_XDP/FLASH (required) | ✅ | N/A (FLASH required) | ✅ Full support |
+| Linux (client) | TUN | TCP + UDP + ICMP | UDP → QUIC → TCP | ✅ | ✅ Auto | ✅ Full support |
+| macOS | utun | TCP + UDP + ICMP | UDP → QUIC → TCP | ✅ | ✅ Auto | ✅ Full support |
+| Windows | Wintun | TCP + UDP + ICMP | UDP → QUIC → TCP | ✅ | ✅ Auto | ✅ Full support |
+| Android | VpnService | TCP + UDP + ICMP | UDP → QUIC → TCP | ✅ | ✅ Auto | ✅ Full support |
+| iOS | NEPacketTunnel | TCP + UDP + ICMP | UDP → QUIC → TCP | ✅ | ✅ Auto | ✅ Full support |
+
+**Note:** UDP → QUIC → TCP fallback applies to client transport only. Linux servers always run FLASH AF_XDP.
 
 **All platforms use the same OxTunnel protocol** with platform-specific packet capture and optimized transport.
 
@@ -263,10 +254,9 @@ The server binds to `[::]:51820` by default, which accepts both IPv4 and IPv6 co
 
 ### TCP Fallback for Restrictive Networks
 
-For networks that block UDP (corporate firewalls, some hotels), clients automatically fall back to TCP:
-- Server listens on port **51821/tcp** alongside UDP on 51820
-- Client auto-detects: tries UDP first, falls back to TCP if blocked
-- Same OxTunnel protocol over length-prefixed TCP framing
+For networks that block UDP (corporate firewalls, some hotels), clients automatically fall back:
+- Try **UDP** first, then **QUIC:51822**, then **TCP:51821**
+- Same OxTunnel protocol over QUIC datagrams or length-prefixed TCP framing
 - Slightly higher latency than UDP but works everywhere
 
 ## ICMP (Ping) Support
@@ -300,8 +290,8 @@ OxTunnel implements full bidirectional tunneling with response injection:
 │                                                                         │
 │  CLIENT OUTBOUND:                                                       │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐         │
-│  │   App    │───►│ NFQUEUE  │───►│ OxTunnel │───►│   UDP    │         │
-│  │ (TCP/UDP)│    │  (DROP)  │    │ Encrypt  │    │ to Server│         │
+│  │   App    │───►│  TUN     │───►│ OxTunnel │───►│   UDP    │         │
+│  │ (TCP/UDP)│    │ Capture  │    │ Encrypt  │    │ to Server│         │
 │  └──────────┘    └──────────┘    └──────────┘    └────┬─────┘         │
 │                                                       │                │
 │  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│─ ─ ─ ─ ─ ─ ─  │
@@ -328,8 +318,8 @@ OxTunnel implements full bidirectional tunneling with response injection:
 
 | Component | Platform | Description |
 |-----------|----------|-------------|
-| **NFQUEUE Capture** | Linux | Intercepts OUTPUT chain only, DROPs original packets |
-| **Response Injector** | Linux | Raw socket with `IP_HDRINCL` injects responses |
+| **TUN Capture** | All | Full TCP/UDP/ICMP capture via TUN/tunnel APIs |
+| **Response Injector** | All | TUN device injection for responses |
 | **NAT/MASQUERADE** | Server | Source NAT for tunnel IP pool (10.0.0.0/8) |
 | **SharedForwarder** | Server | Routes responses back to correct client |
 
@@ -346,52 +336,29 @@ The following traffic is **never tunneled** to ensure system functionality:
 | Localhost | 127.0.0.0/8 | Local traffic never tunneled |
 | Relay Server | (dynamic) | Tunnel traffic itself excluded |
 
-### Response Injection (Linux)
+### Response Injection (TUN-only)
 
-The `ResponseInjector` uses raw sockets to inject decrypted response packets directly into the local network stack:
+The `ResponseInjector` writes responses directly into the same TUN device used for capture:
 
 ```rust
-// Creates raw socket with IP_HDRINCL (we provide full IP header)
-let sock = socket2::Socket::new(Domain::IPV4, Type::RAW, Protocol::from(IPPROTO_RAW))?;
-sock.set_header_included_v4(true)?;
-
-// Extract destination IP from packet header (bytes 16-19 for IPv4)
-let dst_ip = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-let dest_addr = SockAddr::from(SocketAddr::new(IpAddr::V4(dst_ip), 0));
+let response_injector = Arc::new(ResponseInjector::with_tun_device(tun_device));
 
 // Inject complete IP packet (header + payload)
-libc::sendto(fd, packet.as_ptr(), packet.len(), 0, dest_addr.as_ptr(), dest_addr.len());
+response_injector.inject(&packet)?;
 ```
 
 **Requirements:**
-- `CAP_NET_RAW` capability (daemon runs as root)
-- IPv4 and IPv6 raw sockets created at startup
-- Destination extracted from IP header for routing
+- TUN device configured and shared with the injector
+- Mobile platforms provide a TUN fd via the OS VPN APIs
+- Client injection is TUN-only; legacy NFQUEUE/WinDivert/raw-socket capture paths are removed
 
-### NFQUEUE Capture Flow
+### TUN Capture Flow
 
-NFQUEUE only captures the **OUTPUT chain** (outbound traffic). Responses come through the tunnel and are injected via raw sockets:
+TUN captures all outbound IP traffic after route setup. System traffic is excluded via routing rules and explicit allowlists (DNS/DHCP/NTP/mDNS/localhost).
 
-```bash
-# Capture outbound TCP/UDP (OUTPUT chain only)
-iptables -I OUTPUT -p tcp -j NFQUEUE --queue-num 0 --queue-bypass
-iptables -I OUTPUT -p udp -j NFQUEUE --queue-num 0 --queue-bypass
-
-# Exclude system traffic
-iptables -I OUTPUT -p udp --dport 53 -j ACCEPT      # DNS
-iptables -I OUTPUT -p udp --dport 67:68 -j ACCEPT   # DHCP
-iptables -I OUTPUT -p udp --dport 123 -j ACCEPT     # NTP
-iptables -I OUTPUT -p udp --dport 5353 -j ACCEPT    # mDNS
-iptables -I OUTPUT -d 127.0.0.0/8 -j ACCEPT         # Localhost
-
-# Exclude relay server (both directions)
-iptables -I OUTPUT -d $RELAY_IP -j ACCEPT
-iptables -I INPUT -s $RELAY_IP -j ACCEPT
-```
-
-**Verdict handling:**
-- Packet sent to tunnel → `Verdict::Drop` (original packet dropped)
-- Tunnel channel full → `Verdict::Accept` (fallback to direct)
+**Flow:**
+- App packets enter TUN → userspace classifier → OxTunnel v3 header → transport (UDP → QUIC → TCP)
+- Responses return through OxTunnel → decrypted → injected back into TUN
 
 ### Server-Side Forwarder (SharedForwarder)
 
@@ -454,7 +421,7 @@ OxTunnel tunnels TCP traffic through UDP datagrams with connection pooling on th
 │                                                                     │
 │  Client Side:                                                       │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐     │
-│  │   App    │───►│ NFQUEUE  │───►│  Client  │───►│   UDP    │     │
+│  │   App    │───►│   TUN    │───►│  Client  │───►│   UDP    │     │
 │  │ (TCP/UDP)│    │ Capture  │    │ Batching │    │ Datagram │     │
 │  └──────────┘    └──────────┘    └──────────┘    └────┬─────┘     │
 │                                                       │            │
@@ -527,11 +494,13 @@ server.run().await?;
 
 ```rust
 use relay_client::client::{RelayClient, ClientConfig};
-use oxidize_common::oxtunnel_client::{PacketCaptureService, CaptureConfig, ResponseInjector};
+use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService, ResponseInjector};
+use oxidize_common::tun_device::{TunConfig, TunDevice};
 
 // 1. Configure client
+let server_addr = "<server_ip>:51820".parse()?;
 let config = ClientConfig {
-    server_addr: "<server_ip>:51820".parse()?,
+    server_addr,
     enable_encryption: true,
     enable_compression: true,
     ..Default::default()
@@ -541,38 +510,43 @@ let config = ClientConfig {
 let client = RelayClient::new(config).await?;
 client.connect().await?;
 
-// 3. Start packet capture (NFQUEUE on Linux, WinDivert on Windows, BPF on macOS)
+// 3. Create shared TUN device
+let tun_config = TunConfig::default();
+let tun_device = Arc::new(std::sync::Mutex::new(TunDevice::new(tun_config)?));
+
+// 4. Start packet capture (TUN mode)
 let capture_config = CaptureConfig {
     capture_tcp: true,
     capture_udp: true,
-    exclude_ips: vec![server_addr.ip()],  // Don't capture tunnel traffic
-    queue_num: 0,
+    capture_icmp: true,
+    exclude_ips: vec![server_addr.ip()], // Don't capture tunnel traffic
+    ..Default::default()
 };
-let capture_service = PacketCaptureService::new(capture_config);
+let capture_service = PacketCaptureService::with_tun_device(capture_config, tun_device.clone());
 let (packet_rx, capture_handle) = capture_service.start();
 
-// 4. Create response injector (raw sockets for injecting responses)
-let response_injector = Arc::new(ResponseInjector::new());
+// 5. Create response injector (TUN injection)
+let response_injector = Arc::new(ResponseInjector::with_tun_device(tun_device));
 
-// 5. Run bidirectional tunnel
+// 6. Run bidirectional tunnel
 // - Outbound: capture_rx → encrypt → send to server
-// - Inbound: recv from server → decrypt → inject via raw socket
+// - Inbound: recv from server → decrypt → inject via TUN
 client.run_with_injection(packet_rx, response_injector).await?;
 ```
 
-### Client (Mobile - UDP + VpnService)
+### Client (Mobile - UDP + Platform Tunnel)
 
 ```rust
 use relay_client::client::{RelayClient, ClientConfig};
 
-// Mobile uses optimized UDP with VpnService/NEPacketTunnel capture
+// Mobile uses platform tunnel APIs (VpnService/NEPacketTunnel)
 let config = ClientConfig {
     server_addr: "<server_ip>:51820".parse()?,
     enable_encryption: true,
     enable_compression: true,
     ..Default::default()
 };
-// Same OxTunnel protocol, platform-specific packet capture
+// Same OxTunnel protocol, UDP → QUIC → TCP fallback
 ```
 
 ### Transport Configuration
@@ -590,7 +564,8 @@ let config = TransportConfig {
 
 let transport = PlatformTransport::new(config)?;
 println!("Using: {}", PlatformTransport::platform_name());
-// Linux: "Linux (sendmmsg)" or AF_XDP
+// Linux client: "Linux (sendmmsg)"
+// Linux server: AF_XDP/FLASH required
 // macOS: "macOS (kqueue)"
 // Windows: "Windows (IOCP)"
 ```
@@ -611,4 +586,3 @@ println!("Using: {}", PlatformTransport::platform_name());
 - [INSTALL.md](INSTALL.md) - Installation guide
 - [SECURITY.md](SECURITY.md) - Security comparison with WireGuard
 - [DEEP_LEARNING.md](DEEP_LEARNING.md) - Deep learning engine documentation
-- [KERNEL_BYPASS.md](KERNEL_BYPASS.md) - 100x kernel bypass optimizations

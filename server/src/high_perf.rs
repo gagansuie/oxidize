@@ -13,6 +13,7 @@ use oxidize_common::adaptive_fec::{AdaptiveFec, FecLevel};
 use oxidize_common::ai_engine::HeuristicEngine;
 use oxidize_common::edge_cache::{CacheConfig, EdgeCache};
 use oxidize_common::low_latency::LatencyTracker;
+use oxidize_common::ml_optimized::{OptimizedMlEngine, TrafficContext};
 use oxidize_common::multipath::{MultipathScheduler, PathId, PathMetrics, SchedulingStrategy};
 use oxidize_common::parallel_compression::ParallelCompressor;
 use oxidize_common::priority_scheduler::PriorityScheduler;
@@ -111,6 +112,8 @@ pub struct HighPerfPipeline {
     coalescer: Mutex<UdpCoalescer>,
     /// Multi-path scheduler
     multipath: Mutex<MultipathScheduler>,
+    /// ML path selector engine
+    ml_engine: Mutex<OptimizedMlEngine>,
     /// Parallel compressor for multi-threaded compression
     parallel_compressor: ParallelCompressor,
     /// Priority scheduler for traffic prioritization
@@ -179,6 +182,7 @@ impl HighPerfPipeline {
             batcher: Mutex::new(UdpBatcher::with_config(config.max_batch_size, 1472)),
             coalescer: Mutex::new(UdpCoalescer::default()),
             multipath: Mutex::new(MultipathScheduler::new(SchedulingStrategy::Weighted)),
+            ml_engine: Mutex::new(OptimizedMlEngine::new()),
             parallel_compressor: ParallelCompressor::new(100), // Min 100 bytes to compress
             priority_scheduler: Mutex::new(PriorityScheduler::new(1000)),
             simd_fec_level,
@@ -355,12 +359,23 @@ impl HighPerfPipeline {
 
     /// Get next path for sending (multi-path)
     pub async fn next_path(&self) -> Option<PathId> {
-        if self.config.enable_multipath {
-            let mut mp = self.multipath.lock().await;
-            mp.next_path()
-        } else {
-            None
+        self.next_path_for_traffic(TrafficContext::Web).await
+    }
+
+    /// Get next path for sending using ML selection for a traffic class
+    pub async fn next_path_for_traffic(&self, traffic: TrafficContext) -> Option<PathId> {
+        if !self.config.enable_multipath {
+            return None;
         }
+
+        let mut mp = self.multipath.lock().await;
+        let mut ml_engine = self.ml_engine.lock().await;
+
+        if let Some(path) = mp.select_path_ml(&mut ml_engine, traffic) {
+            return Some(path);
+        }
+
+        mp.next_path()
     }
 
     /// Record packet acknowledgment (for FEC adaptation)

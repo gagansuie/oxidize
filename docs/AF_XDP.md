@@ -1,6 +1,6 @@
 # ⚡ AF_XDP Zero-Copy Networking
 
-AF_XDP (Address Family XDP) provides **kernel-bypass zero-copy packet I/O** for maximum throughput on Linux servers. Oxidize uses **FLASH (Fast Linked AF_XDP Sockets)** as the default networking layer on Linux, achieving **18-25 Gbps** with sub-microsecond latency.
+AF_XDP (Address Family XDP) provides **kernel-bypass zero-copy packet I/O** for maximum throughput on Linux servers. Oxidize uses **FLASH (Fast Linked AF_XDP Sockets)** as the required networking layer on Linux relay servers, achieving **18-25 Gbps** with sub-microsecond latency. If FLASH cannot initialize, the server exits with an error.
 
 ## FLASH: Fast Linked AF_XDP Sockets
 
@@ -110,8 +110,9 @@ FLASH automatically detects NIC queues via:
 
 ### System Configuration
 ```bash
-# Run the setup script (recommended)
-sudo ./scripts/xdp-setup.sh <interface> <port>
+# Use provider-specific setup script (recommended)
+# Vultr:    sudo ./scripts/vultr/vultr-setup.sh
+# Latitude: sudo ./scripts/latitude/latitude-setup.sh
 
 # Or configure manually:
 # 1. Enable BPF JIT
@@ -213,7 +214,7 @@ loop {
 | Platform | Networking Layer | Notes |
 |----------|-----------------|-------|
 | **Linux (Server)** | AF_XDP | Zero-copy, mandatory, no fallback |
-| **Linux (Client)** | Standard UDP | Clients don't need AF_XDP |
+| **Linux (Client)** | TUN + UDP | Clients use TUN/tunnel APIs, no AF_XDP |
 | **macOS** | High-perf UDP | 16MB buffers, sendmsg batching |
 | **Windows** | High-perf UDP | WSASendMsg, large buffers |
 | **Android/iOS** | Standard UDP | VpnService/NEPacketTunnel APIs |
@@ -307,9 +308,64 @@ Tested on Latitude.sh bare metal (AMD EPYC, dual 10 Gbps NICs):
 | Per-packet latency | <0.2µs |
 | CPU utilization @ 10 Gbps | ~40% single core |
 
+## High-Performance Utilities
+
+The `af_xdp/utils` module provides high-performance data structures used throughout Oxidize:
+
+### AlignedCounter
+Cache-line aligned atomic counter (prevents false sharing):
+```rust
+use oxidize_common::af_xdp::AlignedCounter;
+
+let counter = AlignedCounter::new(0);
+counter.inc();
+counter.add(100);
+println!("Count: {}", counter.get());
+```
+
+### SpscRing
+Lock-free single-producer single-consumer ring buffer:
+```rust
+use oxidize_common::af_xdp::SpscRing;
+
+let ring = SpscRing::<u32>::new(4096);
+ring.push(42);
+let value = ring.pop(); // Some(42)
+
+// Batch operations
+ring.push_batch(&mut items);
+ring.pop_batch(&mut output, 64);
+```
+
+### PacketBuffer
+Zero-copy packet buffer with pre-allocated memory:
+```rust
+use oxidize_common::af_xdp::PacketBuffer;
+
+let mut buf = PacketBuffer::new();
+buf.set_data(&packet_bytes);
+process(buf.data());
+```
+
+### Security Utilities
+```rust
+use oxidize_common::af_xdp::security;
+
+// Constant-time comparison (timing-attack safe)
+let matches = security::constant_time_compare(&a, &b);
+
+// Packet validation
+let result = security::validate_packet(&data);
+
+// Rate limiting
+let limiter = security::RateLimiter::new(10_000, 1_000); // 10k/s, 1k burst
+if limiter.allow() { process_packet(); }
+```
+
 ## See Also
 
 - [OXTUNNEL.md](OXTUNNEL.md) - OxTunnel protocol specification
 - [DEEP_LEARNING.md](DEEP_LEARNING.md) - ML engine for congestion control
 - [SECURITY.md](SECURITY.md) - Security architecture
+- [MOBILE_DEPLOYMENT.md](MOBILE_DEPLOYMENT.md) - Mobile smart network features
 - [Linux XDP Documentation](https://www.kernel.org/doc/html/latest/networking/af_xdp.html)

@@ -1251,20 +1251,6 @@ pub async fn install_daemon(app: tauri::AppHandle) -> Result<String, String> {
         cp "{}" /usr/local/bin/oxidize-daemon 2>/dev/null || true
         chmod 755 /usr/local/bin/oxidize-daemon 2>/dev/null || true
         
-        cat > /etc/oxidize/nfqueue-rules.sh << 'RULES'
-#!/bin/bash
-QUEUE_NUM=0
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM 2>/dev/null || true
-iptables -I OUTPUT -p udp -j NFQUEUE --queue-num $QUEUE_NUM --queue-bypass || true
-RULES
-        chmod +x /etc/oxidize/nfqueue-rules.sh 2>/dev/null || true
-        
-        cat > /etc/oxidize/cleanup-rules.sh << 'CLEANUP'
-#!/bin/bash
-iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
-CLEANUP
-        chmod +x /etc/oxidize/cleanup-rules.sh 2>/dev/null || true
-        
         cat > /etc/systemd/system/oxidize-daemon.service << 'EOF'
 [Unit]
 Description=Oxidize Network Relay Daemon
@@ -1273,9 +1259,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStartPre=-/etc/oxidize/nfqueue-rules.sh
 ExecStart=/usr/local/bin/oxidize-daemon
-ExecStopPost=-/etc/oxidize/cleanup-rules.sh
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
@@ -1468,7 +1452,6 @@ pub async fn uninstall_daemon() -> Result<String, String> {
         rm -f /usr/bin/oxidize-daemon 2>/dev/null || true
         rm -rf /var/run/oxidize 2>/dev/null || true
         rm -rf /etc/oxidize 2>/dev/null || true
-        iptables -D OUTPUT -p udp -j NFQUEUE --queue-num 0 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
         echo "=== Uninstall complete ==="
         exit 0

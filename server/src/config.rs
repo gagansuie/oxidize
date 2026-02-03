@@ -84,6 +84,14 @@ pub struct Config {
     /// Maximum early data size in bytes for 0-RTT (default 16KB)
     #[serde(default = "default_max_early_data_size")]
     pub max_early_data_size: u32,
+
+    // === Stats Reporting ===
+    /// URL to push stats to (e.g., https://oxd.sh/api/servers/stats)
+    #[serde(default)]
+    pub stats_push_url: Option<String>,
+    /// Interval in seconds between stats pushes (default: 30)
+    #[serde(default = "default_stats_push_interval")]
+    pub stats_push_interval_secs: u64,
 }
 
 fn default_enable_oxtunnel() -> bool {
@@ -158,6 +166,10 @@ fn default_max_early_data_size() -> u32 {
     u32::MAX // QUIC requires 0 or u32::MAX for early data
 }
 
+fn default_stats_push_interval() -> u64 {
+    30 // Push stats every 30 seconds
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -190,6 +202,8 @@ impl Default for Config {
             ml_upload_interval_secs: 3600,
             enable_0rtt: true,
             max_early_data_size: u32::MAX, // QUIC requires 0 or u32::MAX
+            stats_push_url: None,
+            stats_push_interval_secs: 30,
         }
     }
 }

@@ -79,14 +79,6 @@ async fn main() -> Result<()> {
         shutdown_signal().await;
         warn!("Shutdown signal received, cleaning up...");
 
-        // CRITICAL: Clean up iptables rules FIRST before anything else
-        // This ensures network connectivity is restored even if other cleanup fails
-        #[cfg(target_os = "linux")]
-        {
-            info!("📦 Cleaning up iptables rules on shutdown...");
-            cleanup_all_iptables_rules();
-        }
-
         // Abort client task
         let mut state_guard = shutdown_state.lock().await;
         if let Some(task) = state_guard.client_task.take() {
@@ -97,17 +89,6 @@ async fn main() -> Result<()> {
         info!("Cleanup complete, exiting");
         std::process::exit(0);
     });
-
-    // Set up panic hook to clean up iptables on crash
-    #[cfg(target_os = "linux")]
-    {
-        let default_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |panic_info| {
-            eprintln!("PANIC: Cleaning up iptables rules before crash...");
-            cleanup_all_iptables_rules();
-            default_hook(panic_info);
-        }));
-    }
 
     // Platform-specific IPC listener
     #[cfg(unix)]
@@ -287,25 +268,7 @@ async fn handle_connect(
     // which properly cleans up old rules and adds new ones with correct ordering.
     // The exclusion rule is added at position 1 (top of chain) by PacketCaptureService.
 
-    // Create OxTunnel client
-    // On Linux, use AF_XDP/FLASH for maximum performance (requires root)
-    #[cfg(target_os = "linux")]
-    let xdp_interface = if nix::unistd::geteuid().is_root() {
-        // Auto-detect default interface for AF_XDP
-        match detect_default_interface() {
-            Some(iface) => {
-                info!("🚀 AF_XDP/FLASH enabled on interface: {}", iface);
-                Some(iface)
-            }
-            None => {
-                warn!("Could not detect interface, falling back to UDP");
-                None
-            }
-        }
-    } else {
-        warn!("Not running as root, AF_XDP disabled (using UDP)");
-        None
-    };
+    // Create OxTunnel client (TUN-only client path)
 
     let oxtunnel_config = relay_client::client::ClientConfig {
         server_addr,
@@ -315,10 +278,12 @@ async fn handle_connect(
         enable_encryption: true,
         encryption_key: None,
         enable_compression: true,
+        compression_threshold: 512,
+        enable_rohc: true,
+        rohc_max_size: 1500,
+        enable_ai_engine: true,
         keepalive_interval: std::time::Duration::from_secs(25),
         connection_timeout: std::time::Duration::from_secs(30),
-        #[cfg(target_os = "linux")]
-        xdp_interface,
         auth_config: None,
     };
 
@@ -333,7 +298,7 @@ async fn handle_connect(
         }
     };
 
-    // STEP 3: Establish OxTunnel connection BEFORE NFQUEUE setup
+    // STEP 3: Establish OxTunnel connection
     if let Err(e) = client.connect().await {
         return DaemonResponse {
             success: false,
@@ -343,35 +308,74 @@ async fn handle_connect(
     }
     info!("✅ OxTunnel handshake complete to {}", server_addr);
 
-    // STEP 4: Cross-platform packet capture using unified PacketCaptureService
-    // Note: iptables rules for NFQUEUE are now set up inside PacketCaptureService on Linux
-    // Configure capture with relay server exclusion
+    // STEP 4: Configure TUN capture (full coverage)
+    use oxidize_common::tun_device::{TunConfig, TunDevice};
+
+    let config = TunConfig {
+        name: "oxtun0".to_string(),
+        address: "10.200.200.1".parse().unwrap(),
+        netmask: 24,
+        mtu: 1500,
+        packet_info: false,
+    };
+
+    info!("Creating TUN device for full-coverage acceleration...");
+    let device = match TunDevice::new(config.clone()) {
+        Ok(dev) => {
+            info!("✅ TUN device {} created", dev.name());
+            Arc::new(std::sync::Mutex::new(dev))
+        }
+        Err(e) => {
+            return DaemonResponse {
+                success: false,
+                message: format!("Failed to create TUN device: {}", e),
+                data: None,
+            };
+        }
+    };
+
+    // Set up routing through TUN device
+    if let Ok(tun) = device.lock() {
+        if let Err(e) = tun.set_default_route(server_addr.ip()) {
+            warn!("Failed to set default route: {}", e);
+        }
+    }
+
+    let tun_device = Some(device);
+    let tun_config = Some(config);
+
+    // STEP 5: Configure packet capture
     let capture_config = CaptureConfig {
-        capture_tcp: false,
+        capture_tcp: true,
         capture_udp: true,
-        capture_icmp: false,
+        capture_icmp: true,
         exclude_ips: vec![server_addr.ip()],
-        queue_num: 0,
+        tun_config: tun_config.clone(),
         tun_fd: None,
     };
 
     let capture_tcp = capture_config.capture_tcp;
     let capture_udp = capture_config.capture_udp;
+    let capture_icmp = capture_config.capture_icmp;
 
-    // Start cross-platform packet capture service
-    let capture_service = PacketCaptureService::new(capture_config);
+    // Start packet capture service
+    let capture_service = PacketCaptureService::with_tun_device(
+        capture_config,
+        tun_device.as_ref().expect("TUN device missing").clone(),
+    );
     let (oxtunnel_rx, capture_handle) = capture_service.start();
 
-    // Create response injector for injecting tunnel responses into local network
-    let response_injector = Arc::new(ResponseInjector::new());
-    if response_injector.is_available() {
-        info!("✅ Response injector ready for bidirectional tunnel");
-    } else {
-        warn!("⚠️ Response injector not available - tunnel may be unidirectional");
-    }
+    // Create response injector (TUN)
+    let response_injector = Arc::new(ResponseInjector::with_tun_device(
+        tun_device.as_ref().expect("TUN device missing").clone(),
+    ));
+    info!(
+        "✅ Response injector ready ({} mode)",
+        capture_service.mode_name()
+    );
 
-    // Get platform name for logging
-    let platform = PacketCaptureService::platform_name();
+    // Get capture mode name for logging
+    let platform = capture_service.mode_name();
 
     // Wrap client in Arc for sharing between task and state (for graceful disconnect)
     let client = Arc::new(client);
@@ -385,8 +389,11 @@ async fn handle_connect(
         info!("🚀 Starting relay client ({} mode)...", platform);
         info!("   ├─ Mode: {} packet capture", platform);
         info!("   ├─ OxTunnel protocol: enabled");
-        info!("   ├─ Response injection: enabled");
-        info!("   └─ Capturing TCP: {}, UDP: {}", capture_tcp, capture_udp);
+        info!("   ├─ Response injection: {}", platform);
+        info!(
+            "   └─ Capturing TCP: {}, UDP: {}, ICMP: {}",
+            capture_tcp, capture_udp, capture_icmp
+        );
 
         if let Err(e) = client_for_task
             .run_with_injection(oxtunnel_rx, response_injector)
@@ -411,15 +418,14 @@ async fn handle_connect(
 
     DaemonResponse {
         success: true,
-        message: format!(
-            "Connected to {} ({})",
-            server_addr,
-            PacketCaptureService::platform_name()
-        ),
+        message: format!("Connected to {} ({} mode)", server_addr, platform),
         data: Some(serde_json::json!({
             "server_id": server_id,
             "server_addr": server_addr.to_string(),
-            "platform": PacketCaptureService::platform_name(),
+            "mode": platform,
+            "tcp_enabled": true,
+            "udp_enabled": true,
+            "icmp_enabled": true,
         })),
     }
 }
@@ -441,18 +447,15 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         client.disconnect().await;
     }
 
-    // Abort the client task (capture service cleans up iptables rules internally)
+    // Abort the client task
     if let Some(task) = state_guard.client_task.take() {
         task.abort();
         info!("Client task aborted");
     }
 
-    // NOTE: iptables cleanup is now handled by PacketCaptureService's cleanup_iptables_rules()
-    // which is called when the capture service stops (via capture_service.stop() in the task)
-
     // Brief delay to allow cleanup to complete before allowing reconnect
     drop(state_guard);
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let mut state_guard = state.lock().await;
 
     let uptime = state_guard
@@ -644,128 +647,4 @@ async fn handle_windows_client(
     }
 
     Ok(())
-}
-
-/// Aggressively clean up ALL iptables rules created by the daemon
-/// This is called on shutdown, panic, and disconnect to ensure network connectivity is restored
-#[cfg(target_os = "linux")]
-fn cleanup_all_iptables_rules() {
-    use std::process::Command;
-
-    // Remove ALL NFQUEUE rules (loop until none remain)
-    for _ in 0..100 {
-        let tcp_result = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                "0",
-                "--queue-bypass",
-            ])
-            .output();
-        let udp_result = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                "0",
-                "--queue-bypass",
-            ])
-            .output();
-        // Also try without --queue-bypass flag
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                "0",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "-j",
-                "NFQUEUE",
-                "--queue-num",
-                "0",
-            ])
-            .output();
-
-        let tcp_failed = tcp_result.map(|o| !o.status.success()).unwrap_or(true);
-        let udp_failed = udp_result.map(|o| !o.status.success()).unwrap_or(true);
-        if tcp_failed && udp_failed {
-            break;
-        }
-    }
-
-    // Clean up system exclusion rules
-    for _ in 0..20 {
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT"])
-            .output();
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT"])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D", "OUTPUT", "-p", "udp", "--dport", "67:68", "-j", "ACCEPT",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D", "OUTPUT", "-p", "udp", "--dport", "123", "-j", "ACCEPT",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args([
-                "-D", "OUTPUT", "-p", "udp", "--dport", "5353", "-j", "ACCEPT",
-            ])
-            .output();
-        let _ = Command::new("iptables")
-            .args(["-D", "OUTPUT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
-            .output();
-    }
-
-    // Note: Relay server exclusion rules are left to PacketCaptureService cleanup
-    // or will be cleaned on next connect
-}
-
-/// Detect default network interface for AF_XDP (Linux only)
-#[cfg(target_os = "linux")]
-fn detect_default_interface() -> Option<String> {
-    // Read default route to find interface
-    if let Ok(content) = std::fs::read_to_string("/proc/net/route") {
-        for line in content.lines().skip(1) {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 2 && fields[1] == "00000000" {
-                // Default route (destination 0.0.0.0)
-                return Some(fields[0].to_string());
-            }
-        }
-    }
-
-    // Fallback: try common interface names
-    for iface in &["eth0", "ens3", "enp0s3", "eno1"] {
-        let path = format!("/sys/class/net/{}", iface);
-        if std::path::Path::new(&path).exists() {
-            return Some(iface.to_string());
-        }
-    }
-
-    None
 }

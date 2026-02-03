@@ -95,7 +95,7 @@ reconnect_delay_ms = 50
 # Max delay during sustained outages  
 max_reconnect_delay_ms = 5000
 
-# 0 = infinite retries (recommended for VPN)
+# 0 = infinite retries (recommended for always-on acceleration)
 max_reconnect_attempts = 0
 
 # Buffer packets during reconnection
@@ -126,7 +126,7 @@ watch -n1 'curl -s http://localhost:9090/metrics | grep connections_active'
 
 ### Test Zero-Downtime
 ```bash
-# In terminal 1: Run continuous ping through VPN
+# In terminal 1: Run continuous ping through tunnel
 ping -i 0.1 8.8.8.8
 
 # In terminal 2: Deploy update

@@ -15,8 +15,8 @@
 //! - Memory: <10MB for all models
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -668,6 +668,8 @@ pub struct OptimizedMlEngine {
     cache: Arc<SpeculativeCache>,
     /// Inference statistics
     stats: MlStats,
+    /// Path selection state (UCB1 contextual bandit)
+    path_selector: Mutex<MlPathSelector>,
     /// Whether model weights are pinned to L3 cache
     cache_pinned: bool,
 }
@@ -768,6 +770,7 @@ impl OptimizedMlEngine {
             congestion_controller: PPOController::new(8),
             cache: Arc::new(SpeculativeCache::new(100)),
             stats: MlStats::default(),
+            path_selector: Mutex::new(MlPathSelector::default()),
             cache_pinned: false,
         }
     }
@@ -1131,9 +1134,196 @@ pub struct FecDecision {
     pub redundancy_ratio: f32,
 }
 
-// ============================================================================
+// =============================================================================
+// ML Path Selection (UCB1 + Contextual Bonus)
+// =============================================================================
+
+#[derive(Debug, Clone)]
+struct PathStats {
+    pulls: u64,
+    total_reward: f64,
+}
+
+impl Default for PathStats {
+    fn default() -> Self {
+        Self {
+            pulls: 0,
+            total_reward: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TrafficStats {
+    total_pulls: u64,
+    path_stats: [PathStats; MAX_PATHS],
+}
+
+impl Default for TrafficStats {
+    fn default() -> Self {
+        Self {
+            total_pulls: 0,
+            path_stats: std::array::from_fn(|_| PathStats::default()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MlPathSelector {
+    metrics: [Option<PathMetrics>; MAX_PATHS],
+    traffic_stats: [TrafficStats; TrafficContext::COUNT],
+    exploration_factor: f64,
+    bonus_weight: f64,
+    stale_threshold_ms: u64,
+}
+
+impl Default for MlPathSelector {
+    fn default() -> Self {
+        Self {
+            metrics: std::array::from_fn(|_| None),
+            traffic_stats: std::array::from_fn(|_| TrafficStats::default()),
+            exploration_factor: 1.4,
+            bonus_weight: 0.35,
+            stale_threshold_ms: 30_000,
+        }
+    }
+}
+
+impl MlPathSelector {
+    fn update_metrics(&mut self, mut metrics: PathMetrics) {
+        if metrics.last_update_ms == 0 {
+            metrics.last_update_ms = Self::now_ms();
+        }
+        let idx = metrics.path_id.to_index();
+        self.metrics[idx] = Some(metrics);
+    }
+
+    fn update_reward(&mut self, path: PathId, traffic: TrafficContext, reward: f32) {
+        let idx = path.to_index();
+        let traffic_idx = traffic.to_index();
+        let reward = reward.clamp(0.0, 1.0) as f64;
+        let stats = &mut self.traffic_stats[traffic_idx].path_stats[idx];
+        stats.total_reward += reward;
+    }
+
+    fn select_path(&mut self, traffic: TrafficContext) -> PathId {
+        let now_ms = Self::now_ms();
+        let traffic_idx = traffic.to_index();
+        let total_pulls = self.traffic_stats[traffic_idx].total_pulls.max(1) as f64;
+
+        let mut unexplored: Vec<(PathId, f64)> = Vec::new();
+        let mut best_path = None;
+        let mut best_score = f64::MIN;
+
+        for (idx, metrics) in self.metrics.iter().enumerate() {
+            let Some(metrics) = metrics else {
+                continue;
+            };
+
+            if !self.is_path_available(metrics, now_ms) {
+                continue;
+            }
+
+            let path_id = PathId::from_index(idx);
+            let pulls = self.traffic_stats[traffic_idx].path_stats[idx].pulls;
+            let bonus = self.contextual_bonus(metrics, traffic);
+
+            if pulls == 0 {
+                unexplored.push((path_id, bonus));
+                continue;
+            }
+
+            let avg_reward =
+                self.traffic_stats[traffic_idx].path_stats[idx].total_reward / pulls as f64;
+            let exploration =
+                self.exploration_factor * ((total_pulls.ln() / pulls as f64).max(0.0)).sqrt();
+            let score = avg_reward + self.bonus_weight * bonus + exploration;
+
+            if score > best_score {
+                best_score = score;
+                best_path = Some(path_id);
+            }
+        }
+
+        let selected = if !unexplored.is_empty() {
+            unexplored
+                .into_iter()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map(|(path, _)| path)
+        } else {
+            best_path
+        }
+        .unwrap_or(PathId::Primary);
+
+        let idx = selected.to_index();
+        let stats = &mut self.traffic_stats[traffic_idx];
+        stats.total_pulls = stats.total_pulls.saturating_add(1);
+        stats.path_stats[idx].pulls = stats.path_stats[idx].pulls.saturating_add(1);
+
+        selected
+    }
+
+    fn is_path_available(&self, metrics: &PathMetrics, now_ms: u64) -> bool {
+        let stale = metrics.last_update_ms != 0
+            && now_ms.saturating_sub(metrics.last_update_ms) > self.stale_threshold_ms;
+        let healthy = metrics.loss_rate < 0.5 && metrics.rtt_us < 1_000_000;
+        metrics.availability > 0.1 && healthy && !stale
+    }
+
+    fn contextual_bonus(&self, metrics: &PathMetrics, traffic: TrafficContext) -> f64 {
+        let rtt_score = 1.0 - (metrics.rtt_us as f64 / 200_000.0).min(1.0);
+        let jitter_score = 1.0 - (metrics.rtt_var_us as f64 / 100_000.0).min(1.0);
+        let loss_score = 1.0 - (metrics.loss_rate as f64).min(1.0);
+        let bandwidth_score = (metrics.bandwidth_bps as f64 / 200_000_000.0).min(1.0);
+
+        let base = match traffic {
+            TrafficContext::Gaming | TrafficContext::VoIP => {
+                0.5 * rtt_score + 0.3 * jitter_score + 0.2 * loss_score
+            }
+            TrafficContext::Streaming => 0.5 * bandwidth_score + 0.3 * loss_score + 0.2 * rtt_score,
+            TrafficContext::Bulk => 0.6 * bandwidth_score + 0.2 * loss_score + 0.2 * rtt_score,
+            TrafficContext::Web => 0.4 * rtt_score + 0.3 * bandwidth_score + 0.3 * loss_score,
+        };
+
+        let cost_factor = metrics.cost_factor.max(1.0) as f64;
+        base * (metrics.availability as f64) / cost_factor
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    pub fn calculate_reward(
+        traffic: TrafficContext,
+        rtt_us: u64,
+        loss_rate: f32,
+        throughput_mbps: f32,
+    ) -> f32 {
+        let latency_score = 1.0 - (rtt_us as f32 / 200_000.0).min(1.0);
+        let loss_score = 1.0 - loss_rate.min(1.0);
+        let throughput_score = (throughput_mbps / 200.0).min(1.0);
+
+        let reward = match traffic {
+            TrafficContext::Gaming | TrafficContext::VoIP => {
+                0.6 * latency_score + 0.3 * loss_score + 0.1 * throughput_score
+            }
+            TrafficContext::Streaming => {
+                0.5 * throughput_score + 0.3 * loss_score + 0.2 * latency_score
+            }
+            TrafficContext::Bulk => 0.6 * throughput_score + 0.2 * loss_score + 0.2 * latency_score,
+            TrafficContext::Web => 0.4 * latency_score + 0.3 * throughput_score + 0.3 * loss_score,
+        };
+
+        reward.clamp(0.0, 1.0)
+    }
+}
+
+// =============================================================================
 // Additional compatibility methods for ml_integration.rs
-// ============================================================================
+// =============================================================================
 
 impl OptimizedMlEngine {
     /// Get FEC decision based on network features
@@ -1159,18 +1349,26 @@ impl OptimizedMlEngine {
         }
     }
 
-    /// Update path metrics (stub - path selection handled by external scheduler)
+    /// Update path metrics for the ML path selector
     pub fn update_path_metrics(&mut self, _metrics: PathMetrics) {
-        // Path metrics handled by MultipathScheduler, not ML engine
+        if let Ok(mut selector) = self.path_selector.lock() {
+            selector.update_metrics(_metrics);
+        }
     }
 
-    /// Update path reward (stub - learning handled by CI/CD training)
+    /// Update path reward for UCB1 bandit learning
     pub fn update_path_reward(&mut self, _path: PathId, _traffic: TrafficContext, _reward: f32) {
-        // Rewards collected for offline training via CI/CD
+        if let Ok(mut selector) = self.path_selector.lock() {
+            selector.update_reward(_path, _traffic, _reward);
+        }
     }
 
     /// Select path for traffic type (returns primary - use MultipathScheduler for real selection)
     pub fn select_path(&self, _traffic: TrafficContext) -> PathId {
+        if let Ok(mut selector) = self.path_selector.lock() {
+            return selector.select_path(_traffic);
+        }
+
         PathId::Primary
     }
 
@@ -1299,6 +1497,8 @@ pub enum TrafficContext {
 }
 
 impl TrafficContext {
+    pub const COUNT: usize = 5;
+
     pub fn to_index(self) -> usize {
         self as usize
     }

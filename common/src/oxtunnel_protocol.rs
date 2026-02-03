@@ -8,7 +8,7 @@
 //! - **Batch processing**: Process multiple packets per syscall
 //! - **Zero-copy buffers**: Pre-allocated buffer pools (no heap allocation per packet)
 //! - **Simpler handshake**: Faster connection establishment
-//! - **Native AF_XDP support**: Zero-copy kernel bypass on Linux
+//! - **Native AF_XDP support (server)**: Zero-copy kernel bypass on Linux relay nodes
 //!
 //! ## Security Features:
 //! - **Replay attack protection**: Sliding window sequence number validation

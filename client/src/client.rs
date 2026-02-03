@@ -3,31 +3,62 @@
 //! High-performance tunnel client using OxTunnel protocol.
 //!
 //! ## Transport Layer
-//! - **Linux**: AF_XDP/FLASH kernel bypass for maximum performance
-//! - **Other platforms**: Optimized UDP with batching
+//! - **Clients**: TUN/tunnel APIs + optimized UDP (no kernel bypass)
+//! - **Servers**: AF_XDP/FLASH on Linux for kernel bypass
 
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use oxidize_common::auth::ClientAuthConfig;
-use oxidize_common::compression::compress_data;
+use oxidize_common::compression::decompress_data;
 use oxidize_common::oxtunnel_client::ResponseInjector;
 use oxidize_common::oxtunnel_protocol::{
     control, decode_packet, encode_packet, flags, generate_id, AuthenticatedHandshakeInit,
-    CryptoEngine, HandshakeInit, HandshakeResponse, HEADER_SIZE, MAX_PACKET_SIZE, MAX_PAYLOAD_SIZE,
-    PROTOCOL_MAGIC,
+    CryptoEngine, HandshakeInit, HandshakeResponse, PacketHeader, HEADER_SIZE, MAX_PACKET_SIZE,
+    MAX_PAYLOAD_SIZE, PROTOCOL_MAGIC,
+};
+use oxidize_common::packet::PacketInfo;
+use oxidize_common::packet_processor::{
+    decode_compressed_payload, encode_compressed_payload, CompressionMethod, PacketProcessor,
+    PacketProcessorConfig,
 };
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-#[cfg(target_os = "linux")]
-#[allow(unused_imports)]
-use oxidize_common::af_xdp::XdpConfig;
+async fn decode_payload_with_processor(
+    header: &PacketHeader,
+    payload: &[u8],
+    processor: Option<&Arc<Mutex<PacketProcessor>>>,
+) -> Result<Vec<u8>> {
+    if header.flags & flags::COMPRESSED == 0 {
+        return Ok(payload.to_vec());
+    }
+
+    if let Some((method, compressed)) = decode_compressed_payload(payload) {
+        if let Some(processor) = processor {
+            let mut guard = processor.lock().await;
+            return guard
+                .decompress(compressed, method)
+                .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e));
+        }
+
+        return match method {
+            CompressionMethod::Lz4 => decompress_data(compressed)
+                .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e)),
+            _ => Err(anyhow::anyhow!(
+                "Compressed payload requires PacketProcessor"
+            )),
+        };
+    }
+
+    // Legacy LZ4 payload without method header
+    decompress_data(payload).map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))
+}
 
 /// Transport mode for tunnel connection
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -53,11 +84,16 @@ pub struct ClientConfig {
     pub enable_encryption: bool,
     pub encryption_key: Option<[u8; 32]>,
     pub enable_compression: bool,
+    /// Minimum packet size before compression is attempted
+    pub compression_threshold: usize,
+    /// Enable ROHC header compression
+    pub enable_rohc: bool,
+    /// Maximum packet size for ROHC compression
+    pub rohc_max_size: usize,
+    /// Enable AI heuristics for smart compression decisions
+    pub enable_ai_engine: bool,
     pub keepalive_interval: Duration,
     pub connection_timeout: Duration,
-    /// Network interface for AF_XDP (Linux only, requires root)
-    #[cfg(target_os = "linux")]
-    pub xdp_interface: Option<String>,
     /// Authentication configuration (None = unauthenticated mode)
     pub auth_config: Option<ClientAuthConfig>,
 }
@@ -73,10 +109,12 @@ impl Default for ClientConfig {
             enable_encryption: true,
             encryption_key: None,
             enable_compression: true,
+            compression_threshold: 512,
+            enable_rohc: true,
+            rohc_max_size: 1500,
+            enable_ai_engine: true,
             keepalive_interval: Duration::from_secs(25),
             connection_timeout: Duration::from_secs(30),
-            #[cfg(target_os = "linux")]
-            xdp_interface: None, // Auto-detect or use UDP fallback
             auth_config: None, // Unauthenticated by default
         }
     }
@@ -118,6 +156,7 @@ pub struct RelayClient {
     socket: Arc<UdpSocket>,
     client_id: [u8; 32],
     crypto: Arc<RwLock<Option<CryptoEngine>>>,
+    packet_processor: Option<Arc<Mutex<PacketProcessor>>>,
     stats: Arc<ClientStats>,
     connected: Arc<AtomicBool>,
     sequence: AtomicU32,
@@ -154,11 +193,26 @@ impl RelayClient {
             info!("🔄 TCP fallback available: {}", tcp_addr);
         }
 
+        let packet_processor = if config.enable_compression {
+            let mut processor = PacketProcessor::with_config(PacketProcessorConfig {
+                enable_lz4: config.enable_compression,
+                enable_rohc: config.enable_rohc,
+                lz4_min_size: config.compression_threshold.max(64),
+                rohc_max_size: config.rohc_max_size,
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to init packet processor: {}", e))?;
+            processor.set_ai_enabled(config.enable_ai_engine);
+            Some(Arc::new(Mutex::new(processor)))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             socket: Arc::new(socket),
             client_id,
             crypto: Arc::new(RwLock::new(None)),
+            packet_processor,
             stats: Arc::new(ClientStats::new()),
             connected: Arc::new(AtomicBool::new(false)),
             sequence: AtomicU32::new(0),
@@ -332,17 +386,49 @@ impl RelayClient {
             packet_flags |= flags::ENCRYPTED;
         }
 
-        // Compress data if enabled and worthwhile (min 64 bytes to avoid overhead)
-        let (payload, compressed) = if self.config.enable_compression && original_size >= 64 {
-            match compress_data(data) {
-                Ok(compressed_data) if compressed_data.len() < original_size => {
-                    packet_flags |= flags::COMPRESSED;
-                    (compressed_data, true)
+        // Compress data if enabled and worthwhile
+        let mut compressed = false;
+        let payload = if let Some(processor) = &self.packet_processor {
+            if original_size >= self.config.compression_threshold.max(64) {
+                let info = PacketInfo::analyze(data).ok();
+                let (src_port, dst_port, protocol) = info
+                    .as_ref()
+                    .map(|i| (i.src_port.unwrap_or(0), i.dst_port.unwrap_or(0), i.protocol))
+                    .unwrap_or((0, 0, 0));
+
+                let mut guard = processor.lock().await;
+                let compressed_packet = if self.config.enable_ai_engine {
+                    guard.compress_smart(data, src_port, dst_port, protocol)
+                } else {
+                    guard.compress(data)
+                };
+
+                let compressed_packet = match compressed_packet {
+                    Ok(packet) => Some(packet),
+                    Err(e) => {
+                        debug!("Compression failed: {}", e);
+                        None
+                    }
+                };
+
+                if let Some(compressed_packet) = compressed_packet {
+                    if compressed_packet.method != CompressionMethod::None
+                        && compressed_packet.data.len() < original_size
+                    {
+                        compressed = true;
+                        packet_flags |= flags::COMPRESSED;
+                        encode_compressed_payload(compressed_packet.method, &compressed_packet.data)
+                    } else {
+                        data.to_vec()
+                    }
+                } else {
+                    data.to_vec()
                 }
-                _ => (data.to_vec(), false),
+            } else {
+                data.to_vec()
             }
         } else {
-            (data.to_vec(), false)
+            data.to_vec()
         };
 
         let mut buf = [0u8; MAX_PACKET_SIZE];
@@ -561,10 +647,10 @@ impl RelayClient {
             .fetch_add(len as u64, Ordering::Relaxed);
 
         let crypto = self.crypto.read().await;
-        let (_header, payload) = decode_packet(&mut buf[..len], crypto.as_ref())
+        let (header, payload) = decode_packet(&mut buf[..len], crypto.as_ref())
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        Ok(payload.to_vec())
+        decode_payload_with_processor(&header, payload, self.packet_processor.as_ref()).await
     }
 
     /// Run the client with a packet capture receiver
@@ -760,6 +846,7 @@ impl RelayClient {
         let recv_keepalive_sent_us = keepalive_sent_us.clone();
         let recv_crypto = crypto.clone();
         let recv_injector = response_injector.clone();
+        let recv_processor = self.packet_processor.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; MAX_PACKET_SIZE];
             let mut injected_count: u64 = 0;
@@ -819,10 +906,24 @@ impl RelayClient {
                             let crypto_opt = recv_crypto.try_read().ok();
                             let crypto_ref = crypto_opt.as_ref().and_then(|g| g.as_ref());
                             match decode_packet(&mut buf[..len], crypto_ref) {
-                                Ok((_header, payload)) => {
+                                Ok((header, payload)) => {
+                                    let payload = match decode_payload_with_processor(
+                                        &header,
+                                        payload,
+                                        recv_processor.as_ref(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(data) => data,
+                                        Err(e) => {
+                                            debug!("Failed to decompress payload: {}", e);
+                                            continue;
+                                        }
+                                    };
+
                                     if !payload.is_empty() {
                                         // Inject the IP packet into local network stack
-                                        match recv_injector.inject(payload) {
+                                        match recv_injector.inject(&payload) {
                                             Ok(()) => {
                                                 injected_count += 1;
 

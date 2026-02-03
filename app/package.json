@@ -22,9 +22,10 @@
     },
     "devDependencies": {
         "@sveltejs/vite-plugin-svelte": "^4.0.0",
-        "@typescript-eslint/types": "^8.0.0",
         "@tauri-apps/cli": "^2.0.0",
         "@tsconfig/svelte": "^5.0.4",
+        "@typescript-eslint/types": "^8.0.0",
+        "sharp": "^0.34.5",
         "svelte": "^5.0.0",
         "svelte-check": "^4.0.0",
         "typescript": "^5.5.3",

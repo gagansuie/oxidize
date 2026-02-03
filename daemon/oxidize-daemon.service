@@ -23,9 +23,9 @@ ExecReload=/bin/kill -HUP $MAINPID
 LimitNOFILE=65535
 LimitNPROC=4096
 
-# Network capabilities for NFQUEUE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# Network capabilities for TUN
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 
 # Security hardening (relaxed for packet capture)
 NoNewPrivileges=false

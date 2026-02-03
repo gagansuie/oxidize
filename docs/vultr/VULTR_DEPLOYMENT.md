@@ -8,7 +8,7 @@ Quick-start guide for deploying Oxidize on Vultr bare metal with **kernel bypass
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Kernel Bypass** | ✅ AF_XDP | Optional, for 10-25 Gbps (no dedicated CPU cores) |
+| **Kernel Bypass** | ✅ AF_XDP | Required for 10-25 Gbps (no UDP fallback) |
 | **Zero-Downtime** | ✅ Active | SO_REUSEPORT + graceful shutdown |
 | **CI/CD** | ✅ Automated | Version bump → auto-deploy |
 | **Hugepages** | ✅ Configured | 4GB (2048 x 2MB pages) |
@@ -91,18 +91,19 @@ sudo ./scripts/vultr-setup.sh
 sudo reboot
 ```
 
-### 2. Deploy Server (Standard Mode)
+### 2. Deploy Server (FLASH Required)
 
 ```bash
 # Full deployment (build + install + start)
 sudo ./scripts/vultr-deploy.sh
 ```
 
-Server will be running on port 51820 (OxTunnel/UDP).
+Server will be running on port 51820 (OxTunnel/UDP), with FLASH AF_XDP required.
 
 ### 3. Kernel Bypass
 
-AF_XDP kernel bypass is available for maximum performance. Requires Linux kernel 5.4+ with XDP support.
+AF_XDP kernel bypass is **required** on Linux relay servers. If AF_XDP cannot initialize,
+the server exits with an error. Requires Linux kernel 5.4+ with XDP support.
 
 ## Server Management
 

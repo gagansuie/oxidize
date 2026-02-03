@@ -241,8 +241,17 @@ impl XdpProgram {
         })
     }
 
-    /// Attach XDP program to interface
+    /// Attach XDP program to interface (allows SKB fallback)
     pub fn attach(&mut self, skb_mode: bool) -> io::Result<()> {
+        self.attach_internal(skb_mode, true)
+    }
+
+    /// Attach XDP program to interface without any fallback
+    pub fn attach_no_fallback(&mut self, skb_mode: bool) -> io::Result<()> {
+        self.attach_internal(skb_mode, false)
+    }
+
+    fn attach_internal(&mut self, skb_mode: bool, allow_fallback: bool) -> io::Result<()> {
         if self.attached {
             return Ok(());
         }
@@ -277,10 +286,10 @@ impl XdpProgram {
             }
         }
 
-        // Last resort: try SKB mode
-        if !skb_mode {
+        // Optional fallback to SKB mode
+        if !skb_mode && allow_fallback {
             info!("Retrying with SKB mode...");
-            return self.attach(true);
+            return self.attach_internal(true, false);
         }
 
         Err(Error::other("Failed to attach XDP program"))

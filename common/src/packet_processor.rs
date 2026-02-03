@@ -39,6 +39,32 @@ impl CompressionMethod {
     }
 }
 
+/// Compression header magic for OxTunnel payloads
+/// Format: [magic:2][method:1][compressed_bytes...]
+pub const COMPRESSION_MAGIC: [u8; 2] = [0x4F, 0x43]; // "OC" (Oxidize Compression)
+pub const COMPRESSION_HEADER_LEN: usize = 3;
+
+/// Prefix compressed payload with OxTunnel compression header
+pub fn encode_compressed_payload(method: CompressionMethod, data: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(COMPRESSION_HEADER_LEN + data.len());
+    output.extend_from_slice(&COMPRESSION_MAGIC);
+    output.push(method as u8);
+    output.extend_from_slice(data);
+    output
+}
+
+/// Parse OxTunnel compression header, returning (method, payload) if present
+pub fn decode_compressed_payload(data: &[u8]) -> Option<(CompressionMethod, &[u8])> {
+    if data.len() < COMPRESSION_HEADER_LEN {
+        return None;
+    }
+    if data[..2] != COMPRESSION_MAGIC {
+        return None;
+    }
+    let method = CompressionMethod::from_u8(data[2])?;
+    Some((method, &data[COMPRESSION_HEADER_LEN..]))
+}
+
 /// Configuration for the packet processor
 #[derive(Debug, Clone)]
 pub struct PacketProcessorConfig {
@@ -311,6 +337,17 @@ impl PacketProcessor {
             bytes_saved_lz4: self.bytes_saved_lz4,
             total_bytes_saved: self.bytes_saved_rohc + self.bytes_saved_lz4,
             ai_skipped: self.ai_skipped,
+        }
+    }
+
+    /// Enable or disable the AI heuristic engine
+    pub fn set_ai_enabled(&mut self, enabled: bool) {
+        if enabled {
+            if self.ai_engine.is_none() {
+                self.ai_engine = Some(HeuristicEngine::new());
+            }
+        } else {
+            self.ai_engine = None;
         }
     }
 
