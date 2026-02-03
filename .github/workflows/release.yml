@@ -55,6 +55,10 @@ jobs:
           # Remove problematic Microsoft repos that return 403 Forbidden
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
           sudo apt-get update && sudo apt-get install -y musl-tools musl-dev linux-libc-dev
+          # Symlink kernel headers to musl include directory for tun-tap crate
+          sudo ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux
+          sudo ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic
+          sudo ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
 
       - name: Clean main binaries (force version rebuild)
         shell: bash
