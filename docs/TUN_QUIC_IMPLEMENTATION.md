@@ -35,7 +35,7 @@ Full-coverage network acceleration with UDP → QUIC → TCP fallback, **AF_XDP/
 #### 1. TUN Device Management (`common/src/tun_device.rs`)
 - **Linux**: TUN device (no client kernel bypass)
   - Creates `oxtun0` device with `tun-tap` crate
-  - Configures IP address (10.200.200.1/24)
+  - Configures IP address (server-assigned from pool)
   - Sets up routing via `ip route`
   - `unsafe impl Send/Sync` for thread-safe Mutex access
 - **macOS**: utun device support

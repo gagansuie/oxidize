@@ -29,7 +29,8 @@ impl Default for TunConfig {
     fn default() -> Self {
         Self {
             name: "oxtun0".to_string(),
-            address: IpAddr::V4(Ipv4Addr::new(10, 200, 200, 1)),
+            // Placeholder - MUST be overwritten with server-assigned IP
+            address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             netmask: 24,
             mtu: 1500,
             packet_info: true,
@@ -99,11 +100,21 @@ impl TunDevice {
 
         info!("Creating Linux TUN device: {}", config.name);
 
+        // Delete existing device if present (clean slate)
+        let _ = Command::new("ip")
+            .args(["link", "delete", &config.name])
+            .output();
+
         // Create TUN device
         let device = tun_tap::Iface::without_packet_info(&config.name, tun_tap::Mode::Tun)
             .context("Failed to create TUN device (requires CAP_NET_ADMIN)")?;
 
         info!("✅ TUN device {} created", config.name);
+
+        // Flush any existing IPs (safety measure)
+        let _ = Command::new("ip")
+            .args(["addr", "flush", "dev", &config.name])
+            .output();
 
         // Configure IP address
         let addr_str = format!("{}/{}", config.address, config.netmask);
