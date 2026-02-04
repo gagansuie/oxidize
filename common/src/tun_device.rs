@@ -243,9 +243,11 @@ impl TunDevice {
         info!("✅ Wintun adapter {} created", config.name);
 
         // Start session
-        let session = adapter
-            .start_session(wintun::MAX_RING_CAPACITY)
-            .context("Failed to start Wintun session")?;
+        let session = Arc::new(
+            adapter
+                .start_session(wintun::MAX_RING_CAPACITY)
+                .context("Failed to start Wintun session")?,
+        );
 
         // Configure IP address using netsh
         use std::process::Command;
@@ -335,7 +337,7 @@ impl TunDevice {
 
         #[cfg(target_os = "windows")]
         {
-            let packet = self
+            let mut packet = self
                 .session
                 .allocate_send_packet(buf.len() as u16)
                 .context("Failed to allocate Wintun packet")?;

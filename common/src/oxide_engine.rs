@@ -870,7 +870,7 @@ pub mod windows {
         config: OxideConfig,
         stats: OxideStats,
         session: Option<std::sync::Arc<wintun::Session>>,
-        adapter: Option<wintun::Adapter>,
+        adapter: Option<std::sync::Arc<wintun::Adapter>>,
         wintun: Option<wintun::Wintun>,
 
         // Ring buffers for batching
@@ -949,9 +949,11 @@ pub mod windows {
                 .context("Failed to create Wintun adapter")?;
 
             // Start session with maximum ring capacity for best throughput
-            let session = adapter
-                .start_session(wintun::MAX_RING_CAPACITY)
-                .context("Failed to start Wintun session")?;
+            let session = std::sync::Arc::new(
+                adapter
+                    .start_session(wintun::MAX_RING_CAPACITY)
+                    .context("Failed to start Wintun session")?,
+            );
 
             self.wintun = Some(wintun);
             self.adapter = Some(adapter);
@@ -962,41 +964,43 @@ pub mod windows {
 
         fn recv_batch<'a>(&'a mut self, packets: &mut [Option<OxidePacket<'a>>]) -> usize {
             let session = match &self.session {
-                Some(s) => s,
+                Some(s) => s.clone(),
                 None => return 0,
             };
 
-            let mut count = 0;
-            let max = packets
-                .len()
-                .min(MAX_BATCH_SIZE)
-                .min(self.packet_pool.len());
+            let pool_len = self.packet_pool.len();
+            let max = packets.len().min(MAX_BATCH_SIZE).min(pool_len);
+
+            // Phase 1: Receive packets and store metadata
+            let mut received: Vec<(usize, usize)> = Vec::with_capacity(max); // (idx, len)
             let mut bytes = 0u64;
 
-            // Non-blocking batch receive
             for _ in 0..max {
                 match session.try_receive() {
                     Ok(Some(packet)) => {
                         let len = packet.bytes().len();
-                        let idx = self.pool_head % self.packet_pool.len();
+                        let idx = self.pool_head % pool_len;
                         self.pool_head += 1;
 
-                        // Copy to pool buffer (Wintun packet lifetime is limited)
-                        let buf = &mut self.packet_pool[idx];
-                        buf[..len].copy_from_slice(packet.bytes());
-
-                        if count < packets.len() {
-                            packets[count] = Some(OxidePacket {
-                                data: &buf[..len],
-                                timestamp_ns: Self::now_ns(),
-                                flags: 0,
-                            });
-                        }
-
-                        count += 1;
+                        // Copy to pool buffer
+                        self.packet_pool[idx][..len].copy_from_slice(packet.bytes());
+                        received.push((idx, len));
                         bytes += len as u64;
                     }
                     _ => break,
+                }
+            }
+
+            let count = received.len();
+
+            // Phase 2: Create packet references (no more mutations to pool)
+            for (i, &(idx, len)) in received.iter().enumerate() {
+                if i < packets.len() {
+                    packets[i] = Some(OxidePacket {
+                        data: &self.packet_pool[idx][..len],
+                        timestamp_ns: Self::now_ns(),
+                        flags: 0,
+                    });
                 }
             }
 
