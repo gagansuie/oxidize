@@ -457,11 +457,62 @@ impl TunDevice {
         {
             use std::process::Command;
 
-            // Add default route through TUN
-            let output = Command::new("ip")
+            let (default_gateway, default_dev) =
+                match get_default_route_info(relay_server_ip, self.name()) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        warn!("Failed to read default route: {}", e);
+                        (None, None)
+                    }
+                };
+
+            // IMPORTANT: Add relay server route FIRST (before TUN default route)
+            // Otherwise relay traffic gets blackholed through the TUN
+            if default_gateway.is_some() || default_dev.is_some() {
+                let mut route_cmd = Command::new("/usr/sbin/ip");
+                if relay_server_ip.is_ipv6() {
+                    route_cmd.arg("-6");
+                }
+
+                let mut args = vec![
+                    "route".to_string(),
+                    "replace".to_string(),
+                    relay_server_ip.to_string(),
+                ];
+
+                if let Some(ref gateway) = default_gateway {
+                    args.push("via".to_string());
+                    args.push(gateway.clone());
+                }
+
+                if let Some(ref dev) = default_dev {
+                    args.push("dev".to_string());
+                    args.push(dev.clone());
+                }
+
+                let output = route_cmd.args(&args).output()?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.contains("File exists") {
+                        warn!("Failed to add relay server route: {}", stderr);
+                    }
+                } else {
+                    info!(
+                        "✅ Added relay server route: {} via {:?} dev {:?}",
+                        relay_server_ip, default_gateway, default_dev
+                    );
+                }
+            } else {
+                warn!(
+                    "No default route found; relay server route not added - connection may fail!"
+                );
+            }
+
+            // Now add default route through TUN (after relay route is in place)
+            let output = Command::new("/usr/sbin/ip")
                 .args([
                     "route",
-                    "add",
+                    "replace",
                     "default",
                     "dev",
                     self.name(),
@@ -475,24 +526,8 @@ impl TunDevice {
                 if !stderr.contains("File exists") {
                     warn!("Failed to add default route: {}", stderr);
                 }
-            }
-
-            // Ensure relay server is reachable via original gateway
-            let output = Command::new("ip")
-                .args([
-                    "route",
-                    "add",
-                    &relay_server_ip.to_string(),
-                    "via",
-                    "$(ip route | grep default | awk '{print $3}')",
-                ])
-                .output()?;
-
-            if !output.status.success() {
-                warn!(
-                    "Failed to add relay server route: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+            } else {
+                info!("✅ Added TUN default route via {}", self.name());
             }
 
             Ok(())
@@ -534,6 +569,130 @@ impl TunDevice {
             Ok(())
         }
     }
+
+    /// Clear default route through this TUN device and relay host route
+    pub fn clear_default_route(&self, relay_server_ip: IpAddr) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Command;
+
+            let mut route_cmd = Command::new("/usr/sbin/ip");
+            if relay_server_ip.is_ipv6() {
+                route_cmd.arg("-6");
+            }
+
+            let output = route_cmd
+                .args(["route", "del", &relay_server_ip.to_string()])
+                .output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("No such process") && !stderr.contains("No such file") {
+                    warn!("Failed to delete relay server route: {}", stderr);
+                }
+            } else {
+                info!("✅ Removed relay server route: {}", relay_server_ip);
+            }
+
+            let output = Command::new("/usr/sbin/ip")
+                .args(["route", "del", "default", "dev", self.name()])
+                .output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("No such process") && !stderr.contains("No such file") {
+                    warn!("Failed to delete TUN default route: {}", stderr);
+                }
+            } else {
+                info!("✅ Removed TUN default route via {}", self.name());
+            }
+
+            Ok(())
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Ok(())
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            Ok(())
+        }
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn get_default_route_info(
+    relay_server_ip: IpAddr,
+    tun_name: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    use std::process::Command;
+
+    let mut cmd = Command::new("/usr/sbin/ip");
+    if relay_server_ip.is_ipv6() {
+        cmd.arg("-6");
+    }
+
+    let output = cmd.args(["route", "show", "default"]).output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "ip route show default failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    info!("ip route show default output: {:?}", stdout);
+
+    let mut fallback: Option<(Option<String>, Option<String>)> = None;
+    let mut selected: Option<(Option<String>, Option<String>)> = None;
+
+    for line in stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with("default "))
+    {
+        info!("Parsing default route line: {}", line);
+        let mut gateway = None;
+        let mut dev = None;
+        let mut iter = line.split_whitespace();
+        while let Some(token) = iter.next() {
+            match token {
+                "via" => gateway = iter.next().map(|value| value.to_string()),
+                "dev" => dev = iter.next().map(|value| value.to_string()),
+                _ => {}
+            }
+        }
+
+        if fallback.is_none() {
+            fallback = Some((gateway.clone(), dev.clone()));
+        }
+
+        if dev.as_deref() == Some(tun_name) {
+            info!("Skipping default route via TUN device: {}", tun_name);
+            continue;
+        }
+
+        selected = Some((gateway, dev));
+        break;
+    }
+
+    let (gateway, dev) = if let Some(selected) = selected {
+        selected
+    } else if let Some(fallback) = fallback {
+        warn!("Only default route via TUN found; using fallback route info");
+        fallback
+    } else {
+        warn!("No default route line found in output");
+        (None, None)
+    };
+
+    info!("Parsed default route: gateway={:?}, dev={:?}", gateway, dev);
+
+    Ok((gateway, dev))
 }
 
 impl Drop for TunDevice {

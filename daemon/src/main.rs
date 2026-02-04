@@ -3,7 +3,7 @@ use oxidize_common::oxtunnel_client::{CaptureConfig, PacketCaptureService, Respo
 use relay_client::client::ClientStats;
 use relay_client::RelayClient;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::signal;
@@ -51,11 +51,14 @@ struct DaemonState {
     connected: bool,
     server_id: Option<String>,
     server_addr: Option<String>,
+    server_ip: Option<IpAddr>,
     client_task: Option<tokio::task::JoinHandle<()>>,
     client_stats: Option<Arc<ClientStats>>,
     connected_at: Option<std::time::Instant>,
     /// Reference to client for graceful disconnect
     client: Option<Arc<RelayClient>>,
+    /// TUN device for routing cleanup
+    tun_device: Option<Arc<std::sync::Mutex<oxidize_common::tun_device::TunDevice>>>,
 }
 
 #[tokio::main]
@@ -84,6 +87,18 @@ async fn main() -> Result<()> {
         if let Some(task) = state_guard.client_task.take() {
             task.abort();
         }
+
+        if let (Some(tun_device), Some(server_ip)) =
+            (state_guard.tun_device.as_ref(), state_guard.server_ip)
+        {
+            if let Ok(tun) = tun_device.lock() {
+                if let Err(e) = tun.clear_default_route(server_ip) {
+                    warn!("Failed to clear routes on shutdown: {}", e);
+                }
+            }
+        }
+        state_guard.tun_device = None;
+        state_guard.server_ip = None;
         drop(state_guard);
 
         info!("Cleanup complete, exiting");
@@ -341,6 +356,9 @@ async fn handle_connect(
         }
     }
 
+    state_guard.tun_device = Some(device.clone());
+    state_guard.server_ip = Some(server_addr.ip());
+
     let tun_device = Some(device);
     let tun_config = Some(config);
 
@@ -453,6 +471,16 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
         info!("Client task aborted");
     }
 
+    if let (Some(tun_device), Some(server_ip)) =
+        (state_guard.tun_device.as_ref(), state_guard.server_ip)
+    {
+        if let Ok(tun) = tun_device.lock() {
+            if let Err(e) = tun.clear_default_route(server_ip) {
+                warn!("Failed to clear routes on disconnect: {}", e);
+            }
+        }
+    }
+
     // Brief delay to allow cleanup to complete before allowing reconnect
     drop(state_guard);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -478,9 +506,11 @@ async fn handle_disconnect(state: &Arc<Mutex<DaemonState>>) -> DaemonResponse {
     state_guard.connected = false;
     state_guard.server_id = None;
     state_guard.server_addr = None;
+    state_guard.server_ip = None;
     state_guard.client_stats = None;
     state_guard.connected_at = None;
     state_guard.client = None;
+    state_guard.tun_device = None;
 
     info!(
         "Disconnected. Uptime: {}s, Sent: {}, Received: {}, Packets: {}/{}",

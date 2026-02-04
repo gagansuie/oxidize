@@ -205,14 +205,7 @@
   <main class="app initializing">
     <div class="init-screen">
       <div class="logo">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        </svg>
+        <img src="/logo.svg" alt="Oxidize" class="logo-img" />
         <span>Oxidize</span>
       </div>
       <div class="init-spinner"></div>
@@ -227,14 +220,7 @@
   <main class="app">
     <header class="header">
       <div class="logo">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        </svg>
+        <img src="/logo.svg" alt="Oxidize" class="logo-img" />
         <span>Oxidize</span>
       </div>
       <div class="status-badge" class:connected={status.connected}>
@@ -383,7 +369,7 @@
     color: #00d4aa;
   }
 
-  .init-screen .logo svg {
+  .init-screen .logo-img {
     width: 36px;
     height: 36px;
   }
@@ -438,7 +424,7 @@
     color: #00d4aa;
   }
 
-  .logo svg {
+  .logo-img {
     width: 28px;
     height: 28px;
   }

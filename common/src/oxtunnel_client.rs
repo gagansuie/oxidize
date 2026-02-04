@@ -700,9 +700,10 @@ impl PacketCaptureService {
         let (tx, rx) = mpsc::channel(50000);
         let stop_flag = self.stop_flag.clone();
         let config = self.config.clone();
+        let tun_device = self.tun_device.clone();
 
         let handle = tokio::task::spawn_blocking(move || {
-            run_platform_capture(tx, stop_flag, config);
+            run_platform_capture(tx, stop_flag, config, tun_device);
         });
 
         (rx, handle)
@@ -732,37 +733,55 @@ fn run_platform_capture(
     tx: mpsc::Sender<Vec<u8>>,
     stop_flag: Arc<AtomicBool>,
     config: CaptureConfig,
+    tun_device: Option<Arc<std::sync::Mutex<crate::tun_device::TunDevice>>>,
 ) {
-    run_tun_capture(tx, stop_flag, config);
+    run_tun_capture(tx, stop_flag, config, tun_device);
 }
 
 // ============================================================================
 // TUN capture (full TCP/UDP/ICMP coverage)
 // ============================================================================
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn run_tun_capture(tx: mpsc::Sender<Vec<u8>>, stop_flag: Arc<AtomicBool>, config: CaptureConfig) {
+fn run_tun_capture(
+    tx: mpsc::Sender<Vec<u8>>,
+    stop_flag: Arc<AtomicBool>,
+    config: CaptureConfig,
+    existing_tun: Option<Arc<std::sync::Mutex<crate::tun_device::TunDevice>>>,
+) {
     info!("📦 TUN capture starting...");
     info!(
         "   TCP: {}, UDP: {}, ICMP: {}",
         config.capture_tcp, config.capture_udp, config.capture_icmp
     );
 
-    // Create TUN device
-    let tun_config = config.tun_config.unwrap_or_default();
-    let mut tun_device = match crate::tun_device::TunDevice::new(tun_config) {
-        Ok(dev) => dev,
-        Err(e) => {
-            error!("Failed to create TUN device: {}", e);
-            return;
-        }
-    };
-
-    info!("✅ TUN device {} ready for capture", tun_device.name());
+    // Use existing TUN device if provided, otherwise create new one
+    let tun_device: Arc<std::sync::Mutex<crate::tun_device::TunDevice>> =
+        if let Some(tun) = existing_tun {
+            info!("✅ Using existing TUN device for capture");
+            tun
+        } else {
+            let tun_config = config.tun_config.unwrap_or_default();
+            match crate::tun_device::TunDevice::new(tun_config) {
+                Ok(dev) => {
+                    info!("✅ TUN device {} ready for capture", dev.name());
+                    Arc::new(std::sync::Mutex::new(dev))
+                }
+                Err(e) => {
+                    error!("Failed to create TUN device: {}", e);
+                    return;
+                }
+            }
+        };
 
     // Read packets from TUN device
     let mut buf = vec![0u8; 65536];
     while !stop_flag.load(Ordering::Relaxed) {
-        match tun_device.read(&mut buf) {
+        let read_result = {
+            let mut guard = tun_device.lock().unwrap();
+            guard.read(&mut buf)
+        };
+
+        match read_result {
             Ok(len) => {
                 if len > 0 {
                     let packet = buf[..len].to_vec();

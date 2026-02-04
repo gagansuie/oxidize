@@ -83,6 +83,11 @@ impl TcpState {
         self.our_ack.load(Ordering::SeqCst) as u32
     }
 
+    /// Get current sequence number without advancing
+    fn current_seq(&self) -> u32 {
+        self.our_seq.load(Ordering::SeqCst) as u32
+    }
+
     /// Update ack based on received client data
     #[allow(dead_code)]
     fn update_ack(&self, client_seq: u32, payload_len: usize) {
@@ -926,6 +931,13 @@ impl SharedForwarder {
         let tcp_header_len = ((packet[ip_header_len + 12] >> 4) * 4) as usize;
         let payload_offset = ip_header_len + tcp_header_len;
 
+        let client_seq = u32::from_be_bytes([
+            packet[ip_header_len + 4],
+            packet[ip_header_len + 5],
+            packet[ip_header_len + 6],
+            packet[ip_header_len + 7],
+        ]);
+
         let flags = packet[ip_header_len + 13];
         let syn = (flags & 0x02) != 0;
         let fin = (flags & 0x01) != 0;
@@ -938,7 +950,7 @@ impl SharedForwarder {
         };
 
         if syn && (flags & 0x10) == 0 {
-            self.establish_tcp_connection(conn_id, src_ip, src_port, dst_addr)
+            self.establish_tcp_connection(conn_id, src_ip, src_port, dst_addr, client_seq)
                 .await;
         } else if fin || rst {
             let mut conns = self.tcp_connections.write().await;
@@ -950,6 +962,12 @@ impl SharedForwarder {
         } else if packet.len() > payload_offset {
             let payload = packet[payload_offset..].to_vec();
             if !payload.is_empty() {
+                if let Some(tcp_state) = {
+                    let states = self.tcp_states.read().await;
+                    states.get(&key).cloned()
+                } {
+                    tcp_state.update_ack(client_seq, payload.len());
+                }
                 let conns = self.tcp_connections.read().await;
                 if let Some(tx) = conns.get(&key) {
                     if tx.try_send(payload).is_ok() {
@@ -1079,6 +1097,7 @@ impl SharedForwarder {
         src_ip: IpAddr,
         src_port: u16,
         dst_addr: SocketAddr,
+        client_seq: u32,
     ) {
         let key = TcpConnKey {
             conn_id,
@@ -1110,7 +1129,7 @@ impl SharedForwarder {
 
         // Create TCP state for tracking seq/ack
         // Initial client seq is 0 since we're establishing a new connection
-        let tcp_state = Arc::new(TcpState::new(src_ip, 0));
+        let tcp_state = Arc::new(TcpState::new(src_ip, client_seq));
 
         // Store the write channel and TCP state
         {
@@ -1120,6 +1139,27 @@ impl SharedForwarder {
         {
             let mut states = self.tcp_states.write().await;
             states.insert(key.clone(), tcp_state.clone());
+        }
+
+        // Send SYN-ACK to complete handshake with client
+        let syn_ack = Self::build_tcp_response_with_state(
+            dst_addr,
+            src_ip,
+            src_port,
+            tcp_state.current_seq(),
+            tcp_state.get_ack(),
+            0x12, // SYN + ACK
+            &[],
+        );
+        let channels = self.response_channels.read().await;
+        if let Some(tx) = channels.get(&conn_id) {
+            let _ = tx.try_send(syn_ack);
+            tcp_state.advance_seq(1); // SYN consumes one sequence number
+        } else {
+            debug!(
+                "TCP: No response channel for conn {}, cannot send SYN-ACK",
+                conn_id
+            );
         }
 
         // Spawn task to write data to TCP connection
