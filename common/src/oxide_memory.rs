@@ -262,11 +262,15 @@ impl CpuPinning {
     /// Windows CPU pinning
     #[cfg(target_os = "windows")]
     pub fn pin_to_core(&mut self, core_id: usize) -> Result<(), String> {
-        unsafe {
-            use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadAffinityMask};
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadAffinityMask(hThread: isize, dwThreadAffinityMask: usize) -> usize;
+        }
 
-            let mask = 1u64 << core_id;
-            let result = SetThreadAffinityMask(GetCurrentThread(), mask as usize);
+        unsafe {
+            let mask = 1usize << core_id;
+            let result = SetThreadAffinityMask(GetCurrentThread(), mask);
 
             if result != 0 {
                 self.pinned_cores.push(core_id);
