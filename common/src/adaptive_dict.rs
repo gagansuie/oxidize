@@ -347,7 +347,7 @@ impl Default for DictPool {
 
 /// Compress data using connection-specific dictionary
 pub fn compress_with_dict(data: &[u8], dict: Option<&[u8]>) -> Vec<u8> {
-    // Note: lz4_flex doesn't support dictionaries directly
+    // Note: lz4 block mode doesn't support dictionaries directly
     // In production, use lz4-sys with dictionary support
     // For now, fall back to standard compression
 
@@ -355,10 +355,12 @@ pub fn compress_with_dict(data: &[u8], dict: Option<&[u8]>) -> Vec<u8> {
         // Prefix compressed data with dictionary hash for validation
         let mut output = Vec::with_capacity(data.len());
         output.extend_from_slice(&[0xDD, 0x1C]); // Dict marker
-        output.extend_from_slice(&lz4_flex::compress_prepend_size(data));
+        output.extend_from_slice(
+            &crate::compression::compress_data(data).unwrap_or_else(|_| data.to_vec()),
+        );
         output
     } else {
-        lz4_flex::compress_prepend_size(data)
+        crate::compression::compress_data(data).unwrap_or_else(|_| data.to_vec())
     }
 }
 
@@ -366,9 +368,9 @@ pub fn compress_with_dict(data: &[u8], dict: Option<&[u8]>) -> Vec<u8> {
 pub fn decompress_with_dict(data: &[u8], _dict: Option<&[u8]>) -> Result<Vec<u8>, &'static str> {
     // Check for dictionary marker
     if data.len() > 2 && data[0] == 0xDD && data[1] == 0x1C {
-        lz4_flex::decompress_size_prepended(&data[2..]).map_err(|_| "Decompression failed")
+        crate::compression::decompress_data(&data[2..]).map_err(|_| "Decompression failed")
     } else {
-        lz4_flex::decompress_size_prepended(data).map_err(|_| "Decompression failed")
+        crate::compression::decompress_data(data).map_err(|_| "Decompression failed")
     }
 }
 

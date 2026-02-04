@@ -3174,15 +3174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lz4_flex"
-version = "0.11.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
-dependencies = [
- "twox-hash",
-]
-
-[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4003,7 +3994,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-app"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -4029,7 +4020,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-common"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "bytes 1.11.0",
@@ -4044,7 +4035,6 @@ dependencies = [
  "hmac",
  "libc",
  "lz4",
- "lz4_flex",
  "quinn",
  "rand 0.8.5",
  "rayon",
@@ -4068,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "oxidize-daemon"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "nix 0.29.0",
@@ -4998,9 +4988,10 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "relay-client"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "anyhow",
+ "bytes 1.11.0",
  "clap",
  "oxidize-common",
  "rand 0.8.5",
@@ -5014,7 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "relay-server"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "bytes 1.11.0",
@@ -7151,12 +7142,6 @@ dependencies = [
  "mio 0.6.23",
  "tokio-core",
 ]
-
-[[package]]
-name = "twox-hash"
-version = "2.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typeid"

@@ -410,13 +410,13 @@ impl SimdCompressor {
 
     /// Compress data using SIMD-accelerated operations where possible
     pub fn compress(&self, input: &[u8]) -> Vec<u8> {
-        // Use lz4_flex which already has optimized implementations
-        lz4_flex::compress_prepend_size(input)
+        // Use native LZ4 for maximum performance
+        crate::compression::compress_data(input).unwrap_or_else(|_| input.to_vec())
     }
 
     /// Decompress data
     pub fn decompress(&self, input: &[u8]) -> Result<Vec<u8>, &'static str> {
-        lz4_flex::decompress_size_prepended(input).map_err(|_| "Decompression failed")
+        crate::compression::decompress_data(input).map_err(|_| "Decompression failed")
     }
 
     /// Get SIMD capability info

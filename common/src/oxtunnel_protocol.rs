@@ -1131,7 +1131,7 @@ pub fn decode_packet_auto<'a>(
 /// Session state for a connected peer
 pub struct TunnelSession {
     pub peer_addr: SocketAddr,
-    pub assigned_ip: Ipv4Addr,
+    pub assigned_ip: IpAddr,
     pub last_activity: Instant,
     pub tx_seq: AtomicU32,
     pub rx_seq: AtomicU32,
@@ -1150,7 +1150,7 @@ pub struct TunnelSession {
 }
 
 impl TunnelSession {
-    pub fn new(peer_addr: SocketAddr, assigned_ip: Ipv4Addr, key: Option<&[u8; 32]>) -> Self {
+    pub fn new(peer_addr: SocketAddr, assigned_ip: IpAddr, key: Option<&[u8; 32]>) -> Self {
         Self {
             peer_addr,
             assigned_ip,
@@ -1262,31 +1262,73 @@ pub struct SessionStats {
 // IP Pool
 // ============================================================================
 
-/// IP address pool for assigning virtual IPs to peers
+/// IP address pool for assigning virtual IPs to peers (dual-stack IPv4/IPv6)
 pub struct IpPool {
-    base: Ipv4Addr,
-    next_octet: AtomicU32,
-    assigned: RwLock<HashMap<[u8; 32], Ipv4Addr>>,
+    /// IPv4 base address (e.g., 10.0.0.0)
+    base_v4: Ipv4Addr,
+    /// IPv6 base address (e.g., fd00::) - ULA range
+    base_v6: Ipv6Addr,
+    /// Next available host number for allocation
+    next_host: AtomicU32,
+    /// Assigned IPv4 addresses by peer ID
+    assigned_v4: RwLock<HashMap<[u8; 32], Ipv4Addr>>,
+    /// Assigned IPv6 addresses by peer ID
+    assigned_v6: RwLock<HashMap<[u8; 32], Ipv6Addr>>,
+    /// Whether to prefer IPv6 for new allocations
+    prefer_ipv6: bool,
 }
 
 impl IpPool {
-    pub fn new(base: Ipv4Addr) -> Self {
+    /// Create a new dual-stack IP pool
+    /// `base_v4`: IPv4 base (e.g., 10.0.0.0), clients get .2, .3, etc.
+    /// `base_v6`: IPv6 ULA base (e.g., fd00::), clients get ::2, ::3, etc.
+    pub fn new(base_v4: Ipv4Addr) -> Self {
         Self {
-            base,
-            next_octet: AtomicU32::new(2), // .1 is server, start clients at .2
-            assigned: RwLock::new(HashMap::new()),
+            base_v4,
+            base_v6: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0),
+            next_host: AtomicU32::new(2), // .1/::1 is server, start clients at .2/::2
+            assigned_v4: RwLock::new(HashMap::new()),
+            assigned_v6: RwLock::new(HashMap::new()),
+            prefer_ipv6: false,
         }
     }
 
-    pub async fn allocate(&self, peer_id: [u8; 32]) -> Ipv4Addr {
-        let mut assigned = self.assigned.write().await;
+    /// Create pool with custom IPv6 base
+    pub fn with_ipv6_base(base_v4: Ipv4Addr, base_v6: Ipv6Addr) -> Self {
+        Self {
+            base_v4,
+            base_v6,
+            next_host: AtomicU32::new(2),
+            assigned_v4: RwLock::new(HashMap::new()),
+            assigned_v6: RwLock::new(HashMap::new()),
+            prefer_ipv6: false,
+        }
+    }
+
+    /// Set IPv6 preference for new allocations
+    pub fn set_prefer_ipv6(&mut self, prefer: bool) {
+        self.prefer_ipv6 = prefer;
+    }
+
+    /// Allocate an IP address (returns IPv4 by default, IPv6 if preferred)
+    pub async fn allocate(&self, peer_id: [u8; 32]) -> IpAddr {
+        if self.prefer_ipv6 {
+            IpAddr::V6(self.allocate_v6(peer_id).await)
+        } else {
+            IpAddr::V4(self.allocate_v4(peer_id).await)
+        }
+    }
+
+    /// Allocate an IPv4 address for a peer
+    pub async fn allocate_v4(&self, peer_id: [u8; 32]) -> Ipv4Addr {
+        let mut assigned = self.assigned_v4.write().await;
 
         if let Some(&ip) = assigned.get(&peer_id) {
             return ip;
         }
 
-        let octets = self.base.octets();
-        let next = self.next_octet.fetch_add(1, Ordering::Relaxed);
+        let octets = self.base_v4.octets();
+        let next = self.next_host.fetch_add(1, Ordering::Relaxed);
         let last_octet = ((next - 2) % 253 + 2) as u8; // Wrap around, skip .0, .1, .255
 
         let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], last_octet);
@@ -1294,9 +1336,44 @@ impl IpPool {
         ip
     }
 
+    /// Allocate an IPv6 address for a peer (from fd00::/8 ULA range)
+    pub async fn allocate_v6(&self, peer_id: [u8; 32]) -> Ipv6Addr {
+        let mut assigned = self.assigned_v6.write().await;
+
+        if let Some(&ip) = assigned.get(&peer_id) {
+            return ip;
+        }
+
+        let segments = self.base_v6.segments();
+        let next = self.next_host.fetch_add(1, Ordering::Relaxed) as u16;
+
+        // Use the last segment for host numbering (simple scheme)
+        let ip = Ipv6Addr::new(
+            segments[0],
+            segments[1],
+            segments[2],
+            segments[3],
+            segments[4],
+            segments[5],
+            segments[6],
+            next,
+        );
+        assigned.insert(peer_id, ip);
+        ip
+    }
+
+    /// Allocate both IPv4 and IPv6 addresses for dual-stack clients
+    pub async fn allocate_dual(&self, peer_id: [u8; 32]) -> (Ipv4Addr, Ipv6Addr) {
+        let v4 = self.allocate_v4(peer_id).await;
+        let v6 = self.allocate_v6(peer_id).await;
+        (v4, v6)
+    }
+
     pub async fn release(&self, peer_id: &[u8; 32]) {
-        let mut assigned = self.assigned.write().await;
-        assigned.remove(peer_id);
+        let mut assigned_v4 = self.assigned_v4.write().await;
+        let mut assigned_v6 = self.assigned_v6.write().await;
+        assigned_v4.remove(peer_id);
+        assigned_v6.remove(peer_id);
     }
 }
 
@@ -1417,43 +1494,84 @@ impl AuthenticatedHandshakeInit {
     }
 }
 
-/// Handshake response message
+/// Handshake response message (supports dual-stack IPv4/IPv6)
 #[derive(Debug)]
 pub struct HandshakeResponse {
     pub server_id: [u8; 32],
-    pub assigned_ip: Ipv4Addr,
+    pub assigned_ip: IpAddr,
     pub encryption_key: Option<[u8; 32]>,
 }
 
 impl HandshakeResponse {
+    /// Encode handshake response into buffer
+    ///
+    /// Format:
+    /// - `[0]`: control::HANDSHAKE_RESPONSE
+    /// - `[1..33]`: server_id (32 bytes)
+    /// - `[33]`: IP version (4 = IPv4, 6 = IPv6)
+    /// - `[34..38]` or `[34..50]`: IP address (4 or 16 bytes)
+    /// - `[next]`: has_encryption_key (0 or 1)
+    /// - `[next+1..next+33]`: encryption_key (32 bytes, if present)
     pub fn encode(&self, buf: &mut [u8]) -> usize {
         buf[0] = control::HANDSHAKE_RESPONSE;
         buf[1..33].copy_from_slice(&self.server_id);
-        buf[33..37].copy_from_slice(&self.assigned_ip.octets());
+
+        let ip_end = match self.assigned_ip {
+            IpAddr::V4(v4) => {
+                buf[33] = 4; // IPv4 marker
+                buf[34..38].copy_from_slice(&v4.octets());
+                38
+            }
+            IpAddr::V6(v6) => {
+                buf[33] = 6; // IPv6 marker
+                buf[34..50].copy_from_slice(&v6.octets());
+                50
+            }
+        };
 
         if let Some(key) = &self.encryption_key {
-            buf[37] = 1;
-            buf[38..70].copy_from_slice(key);
-            70
+            buf[ip_end] = 1;
+            buf[ip_end + 1..ip_end + 33].copy_from_slice(key);
+            ip_end + 33
         } else {
-            buf[37] = 0;
-            38
+            buf[ip_end] = 0;
+            ip_end + 1
         }
     }
 
     pub fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < 38 || buf[0] != control::HANDSHAKE_RESPONSE {
+        // Minimum size: 1 (type) + 32 (server_id) + 1 (ip_version) + 4 (ipv4) + 1 (has_key) = 39
+        if buf.len() < 39 || buf[0] != control::HANDSHAKE_RESPONSE {
             return None;
         }
 
         let mut server_id = [0u8; 32];
         server_id.copy_from_slice(&buf[1..33]);
 
-        let assigned_ip = Ipv4Addr::new(buf[33], buf[34], buf[35], buf[36]);
+        let ip_version = buf[33];
+        let (assigned_ip, ip_end) = match ip_version {
+            4 => {
+                if buf.len() < 39 {
+                    return None;
+                }
+                let ip = Ipv4Addr::new(buf[34], buf[35], buf[36], buf[37]);
+                (IpAddr::V4(ip), 38)
+            }
+            6 => {
+                if buf.len() < 51 {
+                    return None;
+                }
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&buf[34..50]);
+                let ip = Ipv6Addr::from(octets);
+                (IpAddr::V6(ip), 50)
+            }
+            _ => return None, // Unknown IP version
+        };
 
-        let encryption_key = if buf[37] != 0 && buf.len() >= 70 {
+        let encryption_key = if buf.len() > ip_end && buf[ip_end] != 0 && buf.len() >= ip_end + 33 {
             let mut key = [0u8; 32];
-            key.copy_from_slice(&buf[38..70]);
+            key.copy_from_slice(&buf[ip_end + 1..ip_end + 33]);
             Some(key)
         } else {
             None
@@ -1927,7 +2045,7 @@ mod tests {
     fn test_session_replay_protection() {
         let session = TunnelSession::new(
             "127.0.0.1:1234".parse().unwrap(),
-            Ipv4Addr::new(10, 0, 0, 1),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             None,
         );
 

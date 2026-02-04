@@ -287,6 +287,8 @@ async fn handle_connect(
 
     let oxtunnel_config = relay_client::client::ClientConfig {
         server_addr,
+        // QUIC fallback on port 51822 (same host as UDP server)
+        quic_fallback_addr: Some(std::net::SocketAddr::new(server_addr.ip(), 51822)),
         // TCP fallback on port 51821 (same host as UDP server)
         tcp_fallback_addr: Some(std::net::SocketAddr::new(server_addr.ip(), 51821)),
         transport_mode: relay_client::client::TransportMode::Auto,
@@ -326,10 +328,21 @@ async fn handle_connect(
     // STEP 4: Configure TUN capture (full coverage)
     use oxidize_common::tun_device::{TunConfig, TunDevice};
 
+    let assigned_ip = match client.assigned_ip().await {
+        Some(ip) => ip,
+        None => {
+            return DaemonResponse {
+                success: false,
+                message: "Handshake completed without assigned IP".to_string(),
+                data: None,
+            };
+        }
+    };
+
     let config = TunConfig {
         name: "oxtun0".to_string(),
-        address: "10.200.200.1".parse().unwrap(),
-        netmask: 24,
+        address: assigned_ip, // Now directly IpAddr (IPv4 or IPv6 from server)
+        netmask: if assigned_ip.is_ipv6() { 64 } else { 24 },
         mtu: 1500,
         packet_info: false,
     };
@@ -440,6 +453,7 @@ async fn handle_connect(
         data: Some(serde_json::json!({
             "server_id": server_id,
             "server_addr": server_addr.to_string(),
+            "assigned_ip": assigned_ip.to_string(),
             "mode": platform,
             "tcp_enabled": true,
             "udp_enabled": true,

@@ -1,7 +1,7 @@
 //! Parallel LZ4 Compression (High-Performance)
 //!
 //! Uses native LZ4 C bindings + rayon for maximum throughput.
-//! Native LZ4 is 50x faster than pure Rust lz4_flex.
+//! Native LZ4 is 50x faster than pure Rust implementations.
 //!
 //! Performance targets (with native LZ4):
 //! - 1 core:  ~4000 MB/s (32 Gbps)

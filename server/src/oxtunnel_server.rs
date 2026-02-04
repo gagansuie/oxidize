@@ -1683,7 +1683,8 @@ impl MobileServerHandler {
         };
 
         // Encode payload first to avoid borrow conflict
-        let mut payload_buf = [0u8; 70];
+        // Buffer size: 1 (type) + 32 (server_id) + 1 (ip_version) + 16 (ipv6) + 1 (has_key) + 32 (key) = 83 max
+        let mut payload_buf = [0u8; 96];
         let payload_len = response.encode(&mut payload_buf);
 
         let mut response_buf = [0u8; 128];
@@ -1781,10 +1782,11 @@ impl MobileServerHandler {
             encryption_key,
         };
 
-        let mut payload_buf = [0u8; 70];
+        // Buffer size: 1 (type) + 32 (server_id) + 1 (ip_version) + 16 (ipv6) + 1 (has_key) + 32 (key) = 83 max
+        let mut payload_buf = [0u8; 96];
         let payload_len = response.encode(&mut payload_buf);
 
-        let mut response_buf = [0u8; 128];
+        let mut response_buf = [0u8; 160];
         let total_len = encode_packet(
             &mut response_buf,
             &payload_buf[..payload_len],
@@ -2138,8 +2140,13 @@ mod tests {
         let ip2 = pool.allocate(id2).await;
 
         assert_ne!(ip1, ip2);
-        assert_eq!(ip1.octets()[0..3], [10, 0, 0]);
-        assert_eq!(ip2.octets()[0..3], [10, 0, 0]);
+        // Verify IPv4 addresses are in expected range
+        if let (IpAddr::V4(v4_1), IpAddr::V4(v4_2)) = (ip1, ip2) {
+            assert_eq!(v4_1.octets()[0..3], [10, 0, 0]);
+            assert_eq!(v4_2.octets()[0..3], [10, 0, 0]);
+        } else {
+            panic!("Expected IPv4 addresses from default pool");
+        }
 
         // Same ID should get same IP
         let ip1_again = pool.allocate(id1).await;

@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
         "║   Oxidize Server v{}                ║",
         env!("CARGO_PKG_VERSION")
     );
-    info!("║   OxTunnel Protocol (no QUIC)          ║");
+    info!("║   OxTunnel Protocol (UDP/QUIC/TCP)     ║");
     info!("╚════════════════════════════════════════╝");
 
     let config = Config::load(&args.config).unwrap_or_else(|_| {

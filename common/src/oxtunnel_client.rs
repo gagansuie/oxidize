@@ -316,7 +316,7 @@ impl OxTunnelEncapsulator {
 
         let payload = if self.config.enable_compression && packet.len() > 64 {
             flags_byte |= flags::COMPRESSED;
-            lz4_flex::compress_prepend_size(packet)
+            crate::compression::compress_data(packet).unwrap_or_else(|_| packet.to_vec())
         } else {
             packet.to_vec()
         };
@@ -773,8 +773,17 @@ fn run_tun_capture(
             }
         };
 
+    // Log excluded IPs for debugging
+    if !config.exclude_ips.is_empty() {
+        info!("   Excluding IPs: {:?}", config.exclude_ips);
+    }
+
     // Read packets from TUN device
     let mut buf = vec![0u8; 65536];
+    let mut excluded_count: u64 = 0;
+    let mut captured_count: u64 = 0;
+    let mut last_stats = std::time::Instant::now();
+
     while !stop_flag.load(Ordering::Relaxed) {
         let read_result = {
             let mut guard = tun_device.lock().unwrap();
@@ -784,10 +793,48 @@ fn run_tun_capture(
         match read_result {
             Ok(len) => {
                 if len > 0 {
-                    let packet = buf[..len].to_vec();
-                    if tx.blocking_send(packet).is_err() {
-                        debug!("TUN capture: channel closed");
-                        break;
+                    // Parse IP header to check destination and protocol
+                    if let Some((dest_ip, protocol)) = parse_ip_header(&buf[..len]) {
+                        // Check system traffic exclusions (localhost, link-local, etc.)
+                        if should_exclude_system_traffic(&dest_ip) {
+                            excluded_count += 1;
+                            continue;
+                        }
+
+                        // Check configured exclusion list (e.g., relay server)
+                        if config.exclude_ips.contains(&dest_ip) {
+                            excluded_count += 1;
+                            continue;
+                        }
+
+                        // Filter by protocol based on config
+                        let should_capture = match protocol {
+                            6 => config.capture_tcp,       // TCP
+                            17 => config.capture_udp,      // UDP
+                            1 | 58 => config.capture_icmp, // ICMP/ICMPv6
+                            _ => true,                     // Allow other protocols (GRE, ESP, etc.)
+                        };
+
+                        if !should_capture {
+                            continue;
+                        }
+
+                        // Send packet through tunnel
+                        let packet = buf[..len].to_vec();
+                        if tx.blocking_send(packet).is_err() {
+                            debug!("TUN capture: channel closed");
+                            break;
+                        }
+                        captured_count += 1;
+
+                        // Log stats periodically
+                        if last_stats.elapsed() > std::time::Duration::from_secs(30) {
+                            debug!(
+                                "TUN capture stats: {} captured, {} excluded",
+                                captured_count, excluded_count
+                            );
+                            last_stats = std::time::Instant::now();
+                        }
                     }
                 }
             }
@@ -801,7 +848,80 @@ fn run_tun_capture(
         }
     }
 
-    info!("TUN capture stopped");
+    info!(
+        "TUN capture stopped (captured: {}, excluded: {})",
+        captured_count, excluded_count
+    );
+}
+
+/// Parse IP header to extract destination IP and protocol
+#[inline]
+fn parse_ip_header(packet: &[u8]) -> Option<(std::net::IpAddr, u8)> {
+    if packet.is_empty() {
+        return None;
+    }
+
+    let version = (packet[0] >> 4) & 0x0F;
+
+    match version {
+        4 if packet.len() >= 20 => {
+            // IPv4: protocol at byte 9, destination at bytes 16-19
+            let protocol = packet[9];
+            let dest = std::net::Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
+            Some((std::net::IpAddr::V4(dest), protocol))
+        }
+        6 if packet.len() >= 40 => {
+            // IPv6: next header (protocol) at byte 6, destination at bytes 24-39
+            let protocol = packet[6];
+            let mut dest_bytes = [0u8; 16];
+            dest_bytes.copy_from_slice(&packet[24..40]);
+            let dest = std::net::Ipv6Addr::from(dest_bytes);
+            Some((std::net::IpAddr::V6(dest), protocol))
+        }
+        _ => None,
+    }
+}
+
+/// Check if traffic should be excluded as system traffic
+/// Excludes: localhost, link-local, multicast, broadcast, and well-known system ports
+#[inline]
+fn should_exclude_system_traffic(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // Localhost (127.0.0.0/8)
+            if v4.octets()[0] == 127 {
+                return true;
+            }
+            // Link-local (169.254.0.0/16) - DHCP fallback, mDNS
+            if v4.octets()[0] == 169 && v4.octets()[1] == 254 {
+                return true;
+            }
+            // Multicast (224.0.0.0/4)
+            if v4.octets()[0] >= 224 && v4.octets()[0] <= 239 {
+                return true;
+            }
+            // Broadcast
+            if v4.is_broadcast() {
+                return true;
+            }
+            false
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Loopback (::1)
+            if v6.is_loopback() {
+                return true;
+            }
+            // Link-local (fe80::/10)
+            if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // Multicast (ff00::/8)
+            if v6.segments()[0] >> 8 == 0xff {
+                return true;
+            }
+            false
+        }
+    }
 }
 
 // ============================================================================

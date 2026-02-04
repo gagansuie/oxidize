@@ -22,11 +22,13 @@ use oxidize_common::packet_processor::{
     decode_compressed_payload, encode_compressed_payload, CompressionMethod, PacketProcessor,
     PacketProcessorConfig,
 };
-use std::net::SocketAddr;
+use oxidize_common::quic_transport::{QuicClient, QuicClientConfig};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
@@ -65,11 +67,21 @@ async fn decode_payload_with_processor(
 pub enum TransportMode {
     /// UDP only (default, fastest)
     Udp,
+    /// QUIC fallback (better than TCP for packet-based traffic)
+    Quic,
     /// TCP fallback for restrictive networks
     Tcp,
-    /// Auto-detect: try UDP first, fall back to TCP if blocked
+    /// Auto-detect: try UDP first, fall back to QUIC, then TCP if blocked
     #[default]
     Auto,
+}
+
+/// Active transport type (runtime state)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveTransport {
+    Udp,
+    Quic,
+    Tcp,
 }
 
 /// Client configuration
@@ -77,6 +89,8 @@ pub enum TransportMode {
 pub struct ClientConfig {
     /// Server address for UDP (default port 51820)
     pub server_addr: SocketAddr,
+    /// QUIC fallback server address (default port 51822)
+    pub quic_fallback_addr: Option<SocketAddr>,
     /// TCP fallback server address (default port 51821)
     pub tcp_fallback_addr: Option<SocketAddr>,
     /// Transport mode selection
@@ -103,6 +117,8 @@ impl Default for ClientConfig {
         let server_addr: SocketAddr = "127.0.0.1:51820".parse().unwrap();
         Self {
             server_addr,
+            // QUIC fallback on port 51822 (same host)
+            quic_fallback_addr: Some(SocketAddr::new(server_addr.ip(), 51822)),
             // TCP fallback on port 51821 (same host)
             tcp_fallback_addr: Some(SocketAddr::new(server_addr.ip(), 51821)),
             transport_mode: TransportMode::Auto,
@@ -150,10 +166,17 @@ impl ClientStats {
     }
 }
 
-/// OxTunnel relay client
+/// OxTunnel relay client with UDP/QUIC/TCP fallback support
 pub struct RelayClient {
     config: ClientConfig,
+    /// UDP socket (primary transport)
     socket: Arc<UdpSocket>,
+    /// QUIC client (fallback transport)
+    quic_client: Arc<RwLock<Option<QuicClient>>>,
+    /// TCP stream (last resort fallback)
+    tcp_stream: Arc<RwLock<Option<TcpStream>>>,
+    /// Currently active transport
+    active_transport: Arc<RwLock<ActiveTransport>>,
     client_id: [u8; 32],
     crypto: Arc<RwLock<Option<CryptoEngine>>>,
     packet_processor: Option<Arc<Mutex<PacketProcessor>>>,
@@ -162,6 +185,7 @@ pub struct RelayClient {
     sequence: AtomicU32,
     /// Timestamp (in microseconds) when last keepalive was sent, for RTT measurement
     keepalive_sent_us: Arc<AtomicU64>,
+    assigned_ip: Arc<RwLock<Option<IpAddr>>>,
 }
 
 impl RelayClient {
@@ -189,6 +213,9 @@ impl RelayClient {
             addr_type, config.server_addr
         );
 
+        if let Some(ref quic_addr) = config.quic_fallback_addr {
+            info!("🔄 QUIC fallback available: {}", quic_addr);
+        }
         if let Some(ref tcp_addr) = config.tcp_fallback_addr {
             info!("🔄 TCP fallback available: {}", tcp_addr);
         }
@@ -210,6 +237,9 @@ impl RelayClient {
         Ok(Self {
             config,
             socket: Arc::new(socket),
+            quic_client: Arc::new(RwLock::new(None)),
+            tcp_stream: Arc::new(RwLock::new(None)),
+            active_transport: Arc::new(RwLock::new(ActiveTransport::Udp)),
             client_id,
             crypto: Arc::new(RwLock::new(None)),
             packet_processor,
@@ -217,23 +247,220 @@ impl RelayClient {
             connected: Arc::new(AtomicBool::new(false)),
             sequence: AtomicU32::new(0),
             keepalive_sent_us: Arc::new(AtomicU64::new(0)),
+            assigned_ip: Arc::new(RwLock::new(None)),
         })
     }
 
     /// Connect to the server (perform handshake)
     /// Uses authenticated handshake if auth_config is set, otherwise legacy handshake
+    /// Implements auto-fallback: UDP -> QUIC -> TCP based on transport_mode
     pub async fn connect(&self) -> Result<()> {
         info!("Connecting to OxTunnel server...");
 
+        match self.config.transport_mode {
+            TransportMode::Udp => self.connect_udp().await,
+            TransportMode::Quic => self.connect_quic().await,
+            TransportMode::Tcp => self.connect_tcp().await,
+            TransportMode::Auto => {
+                // Try UDP first
+                info!("🔄 Auto mode: trying UDP first...");
+                match self.connect_udp().await {
+                    Ok(()) => {
+                        info!("✅ UDP connection successful");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!("⚠️ UDP connection failed: {}, trying QUIC...", e);
+                    }
+                }
+
+                // Try QUIC fallback
+                if self.config.quic_fallback_addr.is_some() {
+                    match self.connect_quic().await {
+                        Ok(()) => {
+                            info!("✅ QUIC fallback connection successful");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!("⚠️ QUIC connection failed: {}, trying TCP...", e);
+                        }
+                    }
+                }
+
+                // Try TCP fallback (last resort)
+                if self.config.tcp_fallback_addr.is_some() {
+                    match self.connect_tcp().await {
+                        Ok(()) => {
+                            info!("✅ TCP fallback connection successful");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("All transports failed. TCP error: {}", e));
+                        }
+                    }
+                }
+
+                Err(anyhow::anyhow!("All transport methods failed"))
+            }
+        }
+    }
+
+    /// Connect via UDP (primary transport)
+    async fn connect_udp(&self) -> Result<()> {
+        let handshake_packet = self.build_handshake_packet()?;
+
+        // Send handshake via UDP
+        self.socket.send(&handshake_packet).await?;
+        debug!("Sent UDP handshake init ({} bytes)", handshake_packet.len());
+
+        // Wait for response with timeout
+        let mut response_buf = [0u8; 256];
+        let recv_len = tokio::time::timeout(self.config.connection_timeout, async {
+            self.socket.recv(&mut response_buf).await
+        })
+        .await
+        .context("UDP handshake timeout")?
+        .context("Failed to receive UDP handshake response")?;
+
+        self.process_handshake_response(&mut response_buf[..recv_len])
+            .await?;
+
+        // Set active transport to UDP
+        {
+            let mut transport = self.active_transport.write().await;
+            *transport = ActiveTransport::Udp;
+        }
+
+        Ok(())
+    }
+
+    /// Connect via QUIC (fallback transport)
+    async fn connect_quic(&self) -> Result<()> {
+        let quic_addr = self
+            .config
+            .quic_fallback_addr
+            .context("QUIC fallback address not configured")?;
+
+        info!("🔗 Connecting via QUIC to {}...", quic_addr);
+
+        let quic_config = QuicClientConfig {
+            server_addr: quic_addr,
+            server_name: quic_addr.ip().to_string(),
+            enable_0rtt: true,
+            keepalive_interval: self.config.keepalive_interval.as_secs(),
+        };
+
+        let mut quic_client = QuicClient::new(quic_config).await?;
+        quic_client.connect().await?;
+
+        // Send handshake via QUIC
+        let handshake_packet = self.build_handshake_packet()?;
+        quic_client.send(&handshake_packet).await?;
+        debug!(
+            "Sent QUIC handshake init ({} bytes)",
+            handshake_packet.len()
+        );
+
+        // Wait for response
+        let response = tokio::time::timeout(self.config.connection_timeout, async {
+            quic_client.recv().await
+        })
+        .await
+        .context("QUIC handshake timeout")?
+        .context("Failed to receive QUIC handshake response")?;
+
+        let mut response_buf = response.to_vec();
+        self.process_handshake_response(&mut response_buf).await?;
+
+        // Store QUIC client and set active transport
+        {
+            let mut quic_guard = self.quic_client.write().await;
+            *quic_guard = Some(quic_client);
+        }
+        {
+            let mut transport = self.active_transport.write().await;
+            *transport = ActiveTransport::Quic;
+        }
+
+        Ok(())
+    }
+
+    /// Connect via TCP (last resort fallback)
+    async fn connect_tcp(&self) -> Result<()> {
+        let tcp_addr = self
+            .config
+            .tcp_fallback_addr
+            .context("TCP fallback address not configured")?;
+
+        info!("🔗 Connecting via TCP to {}...", tcp_addr);
+
+        let stream =
+            tokio::time::timeout(self.config.connection_timeout, TcpStream::connect(tcp_addr))
+                .await
+                .context("TCP connection timeout")?
+                .context("TCP connection failed")?;
+
+        // Disable Nagle's algorithm for lower latency
+        stream.set_nodelay(true)?;
+
+        // Send handshake via TCP (with length prefix)
+        let handshake_packet = self.build_handshake_packet()?;
+        let len_prefix = (handshake_packet.len() as u16).to_be_bytes();
+
+        // Use split to get separate read/write halves
+        let (mut reader, mut writer) = stream.into_split();
+
+        writer.write_all(&len_prefix).await?;
+        writer.write_all(&handshake_packet).await?;
+        debug!("Sent TCP handshake init ({} bytes)", handshake_packet.len());
+
+        // Read response (with length prefix)
+        let mut len_buf = [0u8; 2];
+        tokio::time::timeout(
+            self.config.connection_timeout,
+            reader.read_exact(&mut len_buf),
+        )
+        .await
+        .context("TCP response length timeout")?
+        .context("Failed to read TCP response length")?;
+
+        let response_len = u16::from_be_bytes(len_buf) as usize;
+        let mut response_buf = vec![0u8; response_len];
+        tokio::time::timeout(
+            self.config.connection_timeout,
+            reader.read_exact(&mut response_buf),
+        )
+        .await
+        .context("TCP response timeout")?
+        .context("Failed to read TCP response")?;
+
+        self.process_handshake_response(&mut response_buf).await?;
+
+        // Reunite the stream halves
+        let stream = reader.reunite(writer)?;
+
+        // Store TCP stream and set active transport
+        {
+            let mut tcp_guard = self.tcp_stream.write().await;
+            *tcp_guard = Some(stream);
+        }
+        {
+            let mut transport = self.active_transport.write().await;
+            *transport = ActiveTransport::Tcp;
+        }
+
+        Ok(())
+    }
+
+    /// Build handshake packet (authenticated or legacy)
+    fn build_handshake_packet(&self) -> Result<Vec<u8>> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // Build handshake packet - authenticated or legacy
         let mut packet_buf = [0u8; MAX_PACKET_SIZE];
         let packet_len = if let Some(ref auth_config) = self.config.auth_config {
-            // Authenticated handshake
             info!("Using authenticated handshake");
             let auth_payload =
                 oxidize_common::auth::AuthPayload::create(self.client_id, auth_config);
@@ -259,7 +486,6 @@ impl RelayClient {
             )
             .map_err(|e| anyhow::anyhow!("Failed to encode authenticated handshake: {}", e))?
         } else {
-            // Legacy unauthenticated handshake
             let handshake = HandshakeInit {
                 client_id: self.client_id,
                 timestamp,
@@ -279,37 +505,30 @@ impl RelayClient {
             .map_err(|e| anyhow::anyhow!("Failed to encode handshake: {}", e))?
         };
 
-        // Send handshake
-        self.socket.send(&packet_buf[..packet_len]).await?;
-        debug!("Sent handshake init ({} bytes)", packet_len);
+        Ok(packet_buf[..packet_len].to_vec())
+    }
 
-        // Wait for response
-        let mut response_buf = [0u8; 256];
-        let recv_len = tokio::time::timeout(self.config.connection_timeout, async {
-            self.socket.recv(&mut response_buf).await
-        })
-        .await
-        .context("Handshake timeout")?
-        .context("Failed to receive handshake response")?;
-
-        // Decode OxTunnel packet first
-        let (_header, payload) = decode_packet(&mut response_buf[..recv_len], None)
+    /// Process handshake response and store connection state
+    async fn process_handshake_response(&self, response_buf: &mut [u8]) -> Result<()> {
+        let (_header, payload) = decode_packet(response_buf, None)
             .map_err(|e| anyhow::anyhow!("Failed to decode response packet: {}", e))?;
 
-        // Check for auth rejection
         if !payload.is_empty() && payload[0] == control::AUTH_REJECTED {
             return Err(anyhow::anyhow!("Authentication rejected by server"));
         }
 
-        // Parse handshake response from payload
         let response = HandshakeResponse::decode(payload)
             .ok_or_else(|| anyhow::anyhow!("Invalid handshake response"))?;
 
-        // Store encryption key if provided
         if let Some(ref key) = response.encryption_key {
             let crypto = CryptoEngine::new(Some(key));
             let mut crypto_guard = self.crypto.write().await;
             *crypto_guard = Some(crypto);
+        }
+
+        {
+            let mut assigned_guard = self.assigned_ip.write().await;
+            *assigned_guard = Some(response.assigned_ip);
         }
 
         self.connected.store(true, Ordering::SeqCst);
@@ -323,6 +542,11 @@ impl RelayClient {
         );
 
         Ok(())
+    }
+
+    /// Get the assigned virtual IP for this client (from handshake)
+    pub async fn assigned_ip(&self) -> Option<IpAddr> {
+        *self.assigned_ip.read().await
     }
 
     /// Check if connected
@@ -437,7 +661,32 @@ impl RelayClient {
         let len = encode_packet(&mut buf, &payload, seq, packet_flags, crypto.as_ref())
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        self.socket.send(&buf[..len]).await?;
+        // Send via active transport
+        let transport = *self.active_transport.read().await;
+        match transport {
+            ActiveTransport::Udp => {
+                self.socket.send(&buf[..len]).await?;
+            }
+            ActiveTransport::Quic => {
+                let quic_guard = self.quic_client.read().await;
+                if let Some(ref quic) = *quic_guard {
+                    quic.send(&buf[..len]).await?;
+                } else {
+                    anyhow::bail!("QUIC client not connected");
+                }
+            }
+            ActiveTransport::Tcp => {
+                let mut tcp_guard = self.tcp_stream.write().await;
+                if let Some(ref mut stream) = *tcp_guard {
+                    // TCP: send with length prefix
+                    let len_prefix = (len as u16).to_be_bytes();
+                    stream.write_all(&len_prefix).await?;
+                    stream.write_all(&buf[..len]).await?;
+                } else {
+                    anyhow::bail!("TCP stream not connected");
+                }
+            }
+        }
 
         self.stats.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.stats

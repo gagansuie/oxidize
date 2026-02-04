@@ -508,11 +508,17 @@ impl TunDevice {
                 );
             }
 
-            // Now add default route through TUN (after relay route is in place)
+            // Ensure any stale TUN default route is removed before adding a fresh one
+            let _ = Command::new("/usr/sbin/ip")
+                .args(["route", "del", "default", "dev", self.name()])
+                .output();
+
+            // Add default route through TUN (after relay route is in place)
+            // Use add (not replace) so the original gateway remains as a fallback.
             let output = Command::new("/usr/sbin/ip")
                 .args([
                     "route",
-                    "replace",
+                    "add",
                     "default",
                     "dev",
                     self.name(),

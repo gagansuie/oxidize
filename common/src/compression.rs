@@ -1,7 +1,6 @@
 //! High-Performance Compression Module
 //!
-//! Uses native LZ4 C bindings for maximum throughput (4+ GB/s vs 82 MB/s with pure Rust).
-//! Falls back to lz4_flex if native bindings fail.
+//! Uses native LZ4 C bindings for maximum throughput (4+ GB/s).
 //!
 //! Performance comparison:
 //! - lz4_flex (pure Rust): ~82 MB/s
@@ -30,7 +29,6 @@ pub fn init_dict_pool(max_connections: usize) {
 static USING_NATIVE_LZ4: AtomicBool = AtomicBool::new(true);
 
 /// Compress data using native LZ4 (50x faster than pure Rust)
-/// Falls back to lz4_flex if native fails
 pub fn compress_data(data: &[u8]) -> Result<Vec<u8>> {
     if USING_NATIVE_LZ4.load(Ordering::Relaxed) {
         match compress_native(data) {
@@ -38,13 +36,14 @@ pub fn compress_data(data: &[u8]) -> Result<Vec<u8>> {
             Err(_) => {
                 // Fall back to pure Rust implementation
                 USING_NATIVE_LZ4.store(false, Ordering::Relaxed);
-                tracing::warn!("Native LZ4 failed, falling back to lz4_flex");
+                tracing::warn!("Native LZ4 compression failed");
+                return Err(anyhow::anyhow!("LZ4 compression failed"));
             }
         }
     }
 
-    // Fallback to pure Rust lz4_flex
-    Ok(lz4_flex::compress_prepend_size(data))
+    // Native LZ4 is required
+    compress_native(data)
 }
 
 /// Decompress data using native LZ4
@@ -58,17 +57,17 @@ pub fn decompress_data(compressed: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    // Fallback to pure Rust lz4_flex
-    Ok(lz4_flex::decompress_size_prepended(compressed)?)
+    // Native LZ4 is required
+    decompress_native(compressed)
 }
 
-/// Native LZ4 compression with size prepended (compatible with lz4_flex format)
+/// Native LZ4 compression with size prepended
 /// Uses DEFAULT mode (~6 GB/s) instead of HIGHCOMPRESSION (~200 MB/s) for real-time traffic
 fn compress_native(data: &[u8]) -> Result<Vec<u8>> {
     // Use DEFAULT mode for speed - HIGHCOMPRESSION(9) is 30x slower and only ~5% better ratio
     let compressed = lz4::block::compress(data, Some(lz4::block::CompressionMode::DEFAULT), false)?;
 
-    // Prepend original size (4 bytes, little-endian) for compatibility with lz4_flex format
+    // Prepend original size (4 bytes, little-endian)
     let mut result = Vec::with_capacity(4 + compressed.len());
     result.extend_from_slice(&(data.len() as u32).to_le_bytes());
     result.extend_from_slice(&compressed);
@@ -82,7 +81,7 @@ fn decompress_native(compressed: &[u8]) -> Result<Vec<u8>> {
         anyhow::bail!("Compressed data too short");
     }
 
-    // Read original size (little-endian, same as lz4_flex)
+    // Read original size (little-endian)
     let original_size =
         u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]) as usize;
 
@@ -179,7 +178,7 @@ pub fn compression_backend() -> &'static str {
     if USING_NATIVE_LZ4.load(Ordering::Relaxed) {
         "lz4-native (C bindings, ~4 GB/s)"
     } else {
-        "lz4_flex (pure Rust, ~82 MB/s)"
+        "lz4 (native C bindings disabled)"
     }
 }
 

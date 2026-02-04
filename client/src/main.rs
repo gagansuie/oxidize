@@ -166,6 +166,8 @@ async fn main() -> Result<()> {
     // Create OxTunnel client config
     let oxtunnel_config = OxTunnelConfig {
         server_addr,
+        // QUIC fallback on port 51822 for restrictive networks (better than TCP for packets)
+        quic_fallback_addr: Some(std::net::SocketAddr::new(server_addr.ip(), 51822)),
         // TCP fallback on port 51821 for restrictive networks
         tcp_fallback_addr: Some(std::net::SocketAddr::new(server_addr.ip(), 51821)),
         transport_mode: crate::client::TransportMode::Auto,
