@@ -862,13 +862,14 @@ pub mod macos {
 #[cfg(target_os = "windows")]
 pub mod windows {
     use super::*;
+    use anyhow::Context;
 
     /// Windows OXIDE engine using Wintun's native ring buffers
     /// Wintun already provides near-optimal performance with its ring buffer design
     pub struct WindowsOxideEngine {
         config: OxideConfig,
         stats: OxideStats,
-        session: Option<wintun::Session>,
+        session: Option<std::sync::Arc<wintun::Session>>,
         adapter: Option<wintun::Adapter>,
         wintun: Option<wintun::Wintun>,
 

@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(target_os = "windows")]
+use std::sync::Arc;
 use tracing::{info, warn};
 
 /// TUN device configuration
@@ -40,7 +42,7 @@ pub struct TunDevice {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     device: tun_tap::Iface,
     #[cfg(target_os = "windows")]
-    session: wintun::Session,
+    session: Arc<wintun::Session>,
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fd: RawFd,
     #[allow(dead_code)]
